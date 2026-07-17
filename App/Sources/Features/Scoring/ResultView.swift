@@ -1,29 +1,22 @@
 import SwiftUI
 import DesignSystem
 import MahjongCore
-import Recognition
 import ScoringEngine
 
 /// Lane 2 · Result (spec screen 9) + Why this score (screen 10).
-/// Fully engine-driven: the recognized hand is scored live by `ScoringEngine`.
+/// Fully engine-driven: the confirmed hand is scored live by `ScoringEngine`
+/// using the seat/round/win context gathered in the flow.
 struct ResultView: View {
-    let result: RecognitionResult
-    @Environment(\.dismiss) private var dismiss
+    private let onClose: () -> Void
     @State private var showWhy = false
 
-    private let hand: Hand
+    private let isSelfDraw: Bool
     private let score: ScoreResult
 
-    init(result: RecognitionResult) {
-        self.result = result
-        // Demo context: East seat in the East round, self-draw. `scoreFlowers` is
-        // off so the walkthrough's 7-faan hand reproduces exactly (無花 is
-        // house-variable — the House Rules screen will expose it).
-        let context = GameContext(seatWind: .east, prevailingWind: .east,
-                                  houseRules: HouseRules(minimumFaan: 3, faanLimit: 10, scoreFlowers: false))
-        let hand = Hand(concealedTiles: result.faces, winningTile: result.faces.last, isSelfDraw: true)
-        self.hand = hand
-        self.score = ScoringEngine.score(hand: hand, context: context)
+    init(session: ScanSession, onClose: @escaping () -> Void) {
+        self.onClose = onClose
+        self.isSelfDraw = session.isSelfDraw
+        self.score = ScoringEngine.score(hand: session.hand, context: session.gameContext)
     }
 
     var body: some View {
@@ -48,13 +41,14 @@ struct ResultView: View {
                 .presentationDetents([.medium, .large])
                 .presentationBackground(.clear)
         }
+        .toolbar(.hidden, for: .navigationBar)
     }
 
     private var header: some View {
         HStack {
             Text("Result").font(MJFont.serif(18, weight: .bold)).foregroundStyle(MJColor.creamHeading)
             Spacer()
-            Button { dismiss() } label: {
+            Button { onClose() } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(MJColor.cream(0.8))
@@ -68,7 +62,7 @@ struct ResultView: View {
 
     private var heroCard: some View {
         VStack(spacing: 12) {
-            Text(hand.isSelfDraw ? "You win · 自摸" : "You win")
+            Text(isSelfDraw ? "You win · 自摸" : "You win")
                 .eyebrowStyle(MJColor.cream(0.7))
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text("\(score.totalFaan)")
@@ -150,7 +144,7 @@ struct ResultView: View {
     private var actions: some View {
         HStack(spacing: 12) {
             SecondaryButton("Why?") { showWhy = true }
-            GoldButton("Save hand") { dismiss() }
+            GoldButton("Save hand") { onClose() }
         }
     }
 }

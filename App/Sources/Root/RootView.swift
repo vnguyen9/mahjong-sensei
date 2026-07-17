@@ -12,7 +12,11 @@ struct RootView: View {
         if let forced = ProcessInfo.processInfo.environment["MJ_SCREEN"] {
             switch forced {
             case "onboarding": OnboardingView()
-            case "result":     ResultView(result: MockHands.winning)
+            case "result":     ResultView(session: Self.demoResultSession()) {}
+            case "detected":   ScanFlowView(debugRoute: .detected)
+            case "correct":    ScanFlowView(debugRoute: .correct)
+            case "context":    ScanFlowView(debugRoute: .context)
+            case "coach":      ScanFlowView(debugRoute: .coach)
             default:           MainTabView()
             }
         } else if app.hasOnboarded {
@@ -20,6 +24,13 @@ struct RootView: View {
         } else {
             OnboardingView()
         }
+    }
+
+    /// A session preloaded with the sample winning hand (debug `MJ_SCREEN=result`).
+    private static func demoResultSession() -> ScanSession {
+        let session = ScanSession()
+        session.start(with: MockHands.winning)
+        return session
     }
 }
 
@@ -32,7 +43,7 @@ struct MainTabView: View {
         ZStack(alignment: .bottom) {
             Group {
                 switch app.selectedTab {
-                case .scan:     ScanView()
+                case .scan:     ScanFlowView()
                 case .learn:    LearnView()
                 case .settings: SettingsView()
                 }

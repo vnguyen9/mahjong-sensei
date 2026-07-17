@@ -6,18 +6,23 @@ import Recognition
 /// Lane 2 · Aim at your hand (spec screen 5). Simulated camera ground for the
 /// simulator; the live `AVCaptureVideoPreviewLayer` drops in behind this later.
 struct ScanView: View {
-    private enum Mode: Hashable { case score, coach }
-    @State private var mode: Mode = .score
-    @State private var showResult = false
+    @Environment(ScanCoordinator.self) private var coordinator
+    @State private var mode: ScanMode = .score
+    @State private var camera = CameraCapture()
 
     var body: some View {
         ZStack {
+            #if targetEnvironment(simulator)
             ScreenBackground(.camera)
+            #else
+            CameraPreview(session: camera.session).ignoresSafeArea()
+            Color.black.opacity(0.2).ignoresSafeArea()
+            #endif
 
             VStack(spacing: 0) {
                 VStack(spacing: 12) {
                     SegmentedToggle(selection: $mode,
-                                    options: [(Mode.score, "Score"), (Mode.coach, "Coach")])
+                                    options: [(ScanMode.score, "Score"), (ScanMode.coach, "Coach")])
                     HintPill(text: mode == .score
                              ? "Lay your hand flat, face-up"
                              : "I'll suggest your best discard")
@@ -29,13 +34,21 @@ struct ScanView: View {
                     .frame(width: 300, height: 150)
                 Spacer()
 
-                ScanStatusCard { showResult = true }
+                ScanStatusCard(mode: mode) { coordinator.capture(mode) }
                     .padding(.bottom, 96)
             }
             .padding(.horizontal, 20)
         }
-        .fullScreenCover(isPresented: $showResult) {
-            ResultView(result: MockHands.winning)
+        .toolbar(.hidden, for: .navigationBar)
+        .onAppear {
+            #if !targetEnvironment(simulator)
+            camera.requestAndStart()
+            #endif
+        }
+        .onDisappear {
+            #if !targetEnvironment(simulator)
+            camera.stop()
+            #endif
         }
     }
 }
@@ -56,6 +69,7 @@ private struct HintPill: View {
 }
 
 private struct ScanStatusCard: View {
+    let mode: ScanMode
     let onShutter: () -> Void
     @State private var pulse = false
 
@@ -64,7 +78,7 @@ private struct ScanStatusCard: View {
             HStack(spacing: 8) {
                 Circle().fill(MJColor.gold).frame(width: 7, height: 7)
                     .opacity(pulse ? 1 : 0.35)
-                Text("Looking for tiles…")
+                Text(mode == .score ? "Looking for tiles…" : "Ready to coach your hand")
                     .font(MJFont.ui(13, weight: .semibold))
                     .foregroundStyle(MJColor.cream)
             }

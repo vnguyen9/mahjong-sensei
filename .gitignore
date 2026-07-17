@@ -3,6 +3,7 @@
 
 # Xcode build output / derived data
 build/
+build-device/
 DerivedData/
 *.xcuserstate
 xcuserdata/

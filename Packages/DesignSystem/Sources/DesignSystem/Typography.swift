@@ -1,12 +1,25 @@
 import SwiftUI
+import CoreText
 
 /// Type ramp for Mahjong Sensei. Display / Chinese / numerals use **Noto Serif TC**;
 /// body & UI use **SF Pro** (system). Until the serif face is bundled we fall back to
 /// the system serif design, so the app renders correctly offline from day one.
 public enum MJFont {
-    /// Flip to `true` once "Noto Serif TC" is bundled + registered (UIAppFonts).
+    /// Flip to `true` once "Noto Serif TC" is bundled + registered.
     public static var bundledSerifAvailable = false
     public static let serifFamily = "Noto Serif TC"
+
+    /// Registers bundled font files (call once at launch) and enables the serif face.
+    /// Safe to call with a missing file — it simply leaves the system-serif fallback on.
+    public static func registerBundledSerif(from bundle: Bundle, fileNames: [String] = ["NotoSerifTC"]) {
+        var registeredAny = false
+        for name in fileNames {
+            guard let url = bundle.url(forResource: name, withExtension: "ttf")
+                    ?? bundle.url(forResource: name, withExtension: "otf") else { continue }
+            if CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil) { registeredAny = true }
+        }
+        if registeredAny { bundledSerifAvailable = true }
+    }
 
     /// Serif display face (headings, big numerals, Chinese glyphs).
     public static func serif(_ size: CGFloat, weight: Font.Weight = .bold) -> Font {
