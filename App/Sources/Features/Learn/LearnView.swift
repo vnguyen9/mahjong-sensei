@@ -2,87 +2,137 @@ import SwiftUI
 import DesignSystem
 import MahjongCore
 
-/// Lane 4 · Learn — first cut of the Tile Dictionary (spec screen 19).
-/// The wind explainer + tile-detail sheet attach here next.
+/// Lane 4 · Learn — the hub (spec §1 lane 4). A `NavigationStack` whose root
+/// links to four teaching destinations: the tiles primer, the faan cheat
+/// sheet, the searchable tile dictionary, and the interactive wind explainer.
 struct LearnView: View {
-    private enum SuitFilter: String, CaseIterable {
-        case dots = "Dots", bamboo = "Bamboo", chars = "Chars", honors = "字"
-    }
-    @State private var filter: SuitFilter = .dots
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                ScreenBackground(.content)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        header
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
+                        NavigationLink { LearnBasicsView() } label: {
+                            hubCard(title: "The tiles", zh: "牌",
+                                    subtitle: "Suits, honors, and how a hand is built.") {
+                                MahjongTileView(.p(5), theme: .jade, width: 40)
+                            }
+                        }
+                        .buttonStyle(.plain)
+
+                        NavigationLink { ScoringCheatSheetView() } label: {
+                            hubCard(title: "Scoring cheat sheet", zh: "番數",
+                                    subtitle: "Every faan pattern and what it's worth.") {
+                                faanBadge
+                            }
+                        }
+                        .buttonStyle(.plain)
+
+                        NavigationLink { TileDictionaryView() } label: {
+                            hubCard(title: "Tile dictionary", zh: "字典",
+                                    subtitle: "All 42 faces — names, sounds, and lore.") {
+                                MahjongTileView(.s(1), theme: .jade, width: 40)
+                            }
+                        }
+                        .buttonStyle(.plain)
+
+                        NavigationLink { WindExplainerView() } label: {
+                            hubCard(title: "Seats & winds", zh: "門風",
+                                    subtitle: "The compass behind the #1 confusion.") {
+                                MahjongTileView(.east, theme: .jade, width: 40)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(20)
+                    .padding(.bottom, 100)
+                }
+            }
+            .toolbar(.hidden, for: .navigationBar)
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Learn 學")
+                .font(MJFont.serif(26, weight: .bold))
+                .foregroundStyle(MJColor.creamHeading)
+            Text("The basics, the tiles, and the points — between the games.")
+                .font(MJFont.ui(13))
+                .foregroundStyle(MJColor.cream(0.6))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 8)
+    }
+
+    private var faanBadge: some View {
+        Text("番")
+            .font(MJFont.serif(24, weight: .bold))
+            .foregroundStyle(MJColor.gold)
+            .frame(width: 40, height: 54)
+            .background(MJColor.gold(0.12),
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(MJColor.gold(0.3), lineWidth: 1)
+            }
+    }
+
+    private func hubCard<Leading: View>(title: String, zh: String, subtitle: String,
+                                        @ViewBuilder leading: () -> Leading) -> some View {
+        HStack(spacing: 14) {
+            leading()
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(title)
+                        .font(MJFont.ui(15, weight: .semibold))
+                        .foregroundStyle(MJColor.creamHeading)
+                    Text(zh)
+                        .font(MJFont.serif(13, weight: .regular))
+                        .foregroundStyle(MJColor.gold(0.8))
+                }
+                Text(subtitle)
+                    .font(MJFont.ui(12))
+                    .foregroundStyle(MJColor.cream(0.55))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+            }
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(MJColor.cream(0.4))
+        }
+        .mjCard(cornerRadius: 16)
+    }
+}
+
+/// Shared back header for pushed Learn / Settings destinations (spec screens 7,
+/// 10, 21 — "‹ Title" in the serif face). Defined once here and reused across
+/// the app module.
+struct MJBackHeader: View {
+    let title: String
+    let onBack: () -> Void
 
     var body: some View {
-        ZStack {
-            ScreenBackground(.content)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Dictionary 字典")
-                        .font(MJFont.serif(24, weight: .bold))
+        HStack(spacing: 8) {
+            Button(action: onBack) {
+                HStack(spacing: 3) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(MJColor.gold)
+                    Text(title)
+                        .font(MJFont.serif(20, weight: .bold))
                         .foregroundStyle(MJColor.creamHeading)
-                        .padding(.top, 8)
-
-                    HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(MJColor.cream(0.5))
-                        Text("Search 42 tiles").foregroundStyle(MJColor.cream(0.5))
-                        Spacer()
-                    }
-                    .font(MJFont.ui(13))
-                    .padding(.horizontal, 12).padding(.vertical, 10)
-                    .background(MJColor.cardRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                    HStack(spacing: 8) {
-                        ForEach(SuitFilter.allCases, id: \.self) { f in
-                            FilterChip(f.rawValue, active: f == filter) { filter = f }
-                        }
-                    }
-
-                    LazyVGrid(columns: columns, spacing: 14) {
-                        ForEach(Array(tiles.enumerated()), id: \.offset) { _, tile in
-                            tileCell(tile)
-                        }
-                    }
                 }
-                .padding(20)
-                .padding(.bottom, 100)
             }
+            .buttonStyle(.plain)
+            Spacer()
         }
-    }
-
-    private var tiles: [Tile] {
-        switch filter {
-        case .dots:   return (1...9).map { .p($0) }
-        case .bamboo: return (1...9).map { .s($0) }
-        case .chars:  return (1...9).map { .m($0) }
-        case .honors: return [.east, .south, .west, .north, .redDragon, .greenDragon, .whiteDragon]
-        }
-    }
-
-    private func tileCell(_ tile: Tile) -> some View {
-        VStack(spacing: 8) {
-            MahjongTileView(tile, theme: .jade, width: 46)
-            Text(shortLabel(tile))
-                .font(MJFont.ui(11, weight: .medium))
-                .foregroundStyle(MJColor.cream(0.6))
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 12)
-        .mjCard(cornerRadius: 14, padding: 0)
-    }
-
-    private func shortLabel(_ tile: Tile) -> String {
-        switch tile {
-        case let .suited(.dots, r):   return "\(r) Dot"
-        case let .suited(.bamboo, r): return "\(r) Bam"
-        case let .suited(.characters, r): return "\(r) Char"
-        case .wind(.east): return "East"
-        case .wind(.south): return "South"
-        case .wind(.west): return "West"
-        case .wind(.north): return "North"
-        case .dragon(.red): return "Red"
-        case .dragon(.green): return "Green"
-        case .dragon(.white): return "White"
-        default: return tile.code
-        }
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
+        .accessibilityAddTraits(.isHeader)
     }
 }

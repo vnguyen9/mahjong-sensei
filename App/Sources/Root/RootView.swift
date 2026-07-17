@@ -17,6 +17,13 @@ struct RootView: View {
             case "correct":    ScanFlowView(debugRoute: .correct)
             case "context":    ScanFlowView(debugRoute: .context)
             case "coach":      ScanFlowView(debugRoute: .coach)
+            case "learn":      LearnView()
+            case "settings":   SettingsView()
+            case "basics":     NavigationStack { LearnBasicsView() }
+            case "cheatsheet": NavigationStack { ScoringCheatSheetView() }
+            case "dictionary": NavigationStack { TileDictionaryView() }
+            case "winds":      NavigationStack { WindExplainerView() }
+            case "rules":      NavigationStack { HouseRulesView() }
             default:           MainTabView()
             }
         } else if app.hasOnboarded {
