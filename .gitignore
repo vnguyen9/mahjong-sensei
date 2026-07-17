@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Xcode build output / derived data
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# XcodeGen output — regenerate with `xcodegen generate` from project.yml
+*.xcodeproj/
+*.xcworkspace/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Local Claude Code settings
+.claude/
+
+# Reference material (external / large — not part of the app)
+Ref/
+
+# Local training data (models train on a separate machine)
+Dataset/
+
+# Trained model artifacts (dropped in when exported)
+*.mlmodel
+*.mlmodelc

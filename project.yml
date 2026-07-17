@@ -1,0 +1,56 @@
+name: MahjongSensei
+
+options:
+  bundleIdPrefix: com.lumiodatalabs
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "26.0"
+  developmentLanguage: en
+
+packages:
+  MahjongCore:
+    path: Packages/MahjongCore
+  MahjongData:
+    path: Packages/MahjongData
+  Recognition:
+    path: Packages/Recognition
+  DesignSystem:
+    path: Packages/DesignSystem
+  ScoringEngine:
+    path: Packages/ScoringEngine
+  EfficiencyEngine:
+    path: Packages/EfficiencyEngine
+
+targets:
+  MahjongSensei:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: App/Sources
+    dependencies:
+      - package: MahjongCore
+      - package: MahjongData
+      - package: Recognition
+      - package: DesignSystem
+      - package: ScoringEngine
+      - package: EfficiencyEngine
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lumiodatalabs.MahjongSensei
+        PRODUCT_NAME: Mahjong Sensei
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGNING_ALLOWED: NO
+        ENABLE_PREVIEWS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Mahjong Sensei
+        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
+        INFOPLIST_KEY_UIStatusBarStyle: UIStatusBarStyleLightContent
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_NSCameraUsageDescription: "Mahjong Sensei reads your tiles on-device. Images are processed live and never leave your phone."
