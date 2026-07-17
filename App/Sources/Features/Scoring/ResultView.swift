@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import DesignSystem
 import MahjongCore
 import ScoringEngine
@@ -12,16 +13,18 @@ struct ResultView: View {
 
     private let isSelfDraw: Bool
     private let score: ScoreResult
+    private let capturedPhoto: UIImage?
 
     init(session: ScanSession, onClose: @escaping () -> Void) {
         self.onClose = onClose
         self.isSelfDraw = session.isSelfDraw
         self.score = ScoringEngine.score(hand: session.hand, context: session.gameContext)
+        self.capturedPhoto = session.capturedPhoto
     }
 
     var body: some View {
         ZStack {
-            ScreenBackground(.content)
+            CapturedBackdrop(photo: capturedPhoto, fallback: .content)
             VStack(spacing: 0) {
                 header
                 ScrollView {
@@ -32,13 +35,14 @@ struct ResultView: View {
                         actions
                     }
                     .padding(20)
-                    .padding(.bottom, 40)
+                    .padding(.bottom, 104)
                 }
             }
         }
         .sheet(isPresented: $showWhy) {
             WhyThisScoreSheet(score: score)
                 .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.hidden)
                 .presentationBackground(.clear)
         }
         .toolbar(.hidden, for: .navigationBar)

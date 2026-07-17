@@ -1,20 +1,48 @@
 import Foundation
+import CoreGraphics
+import CoreVideo
+import ImageIO
 import MahjongCore
 
-/// Abstraction over "turn a captured frame into recognized tiles". The live
-/// implementation (AVCapture → Vision → Core ML on the Neural Engine) drops in
-/// behind this protocol once the trained model is exported; the app targets this
-/// interface so every screen works today on `MockRecognizer`.
-public protocol Recognizer: Sendable {
-    func recognize() async -> RecognitionResult
+/// A single frame handed to a ``Recognizer`` — either a still image (a picked
+/// photo) or a live camera pixel buffer. The orientation is passed through to
+/// Vision so rotated captures are read correctly.
+public enum RecognizerFrame: @unchecked Sendable {
+    case cgImage(CGImage, CGImagePropertyOrientation)
+    case pixelBuffer(CVPixelBuffer, CGImagePropertyOrientation)
+
+    /// A still image (defaults to `.up`).
+    public static func image(_ image: CGImage,
+                             orientation: CGImagePropertyOrientation = .up) -> RecognizerFrame {
+        .cgImage(image, orientation)
+    }
+
+    /// A live camera frame (use `.right` for the back camera held in portrait).
+    public static func buffer(_ buffer: CVPixelBuffer,
+                              orientation: CGImagePropertyOrientation = .up) -> RecognizerFrame {
+        .pixelBuffer(buffer, orientation)
+    }
 }
 
-/// A recognizer that returns a fixed, scripted result — drives the whole UI
-/// (and previews/tests) with zero dependency on the trained model or a camera.
+/// Abstraction over "turn a captured frame into recognized tiles". The live
+/// implementation — ``VisionRecognizer`` (Vision → Core ML on the Neural Engine)
+/// — sits behind this; ``MockRecognizer`` drives previews/tests with scripted data.
+public protocol Recognizer: Sendable {
+    func recognize(_ frame: RecognizerFrame) async throws -> RecognitionResult
+}
+
+public enum RecognizerError: Error, Sendable {
+    /// No compiled model resource (`<name>.mlmodelc`) was found in the bundle —
+    /// e.g. before the detector has been exported and bundled.
+    case modelNotFound(String)
+}
+
+/// A recognizer that returns a fixed, scripted result regardless of the frame —
+/// drives the whole UI (and previews/tests) with zero dependency on a model or camera.
 public struct MockRecognizer: Recognizer {
     public var result: RecognitionResult
     public init(result: RecognitionResult = MockHands.winning) { self.result = result }
-    public func recognize() async -> RecognitionResult { result }
+    public func recognize(_ frame: RecognizerFrame) async throws -> RecognitionResult { result }
 }
 
 /// Canonical sample hands taken from the design walkthrough, for mock/preview use.
@@ -34,4 +62,11 @@ public enum MockHands {
         [.s(2), .s(3), .s(4), .s(5), .s(6), .s(7), .s(8),
          .greenDragon, .greenDragon, .m(9), .p(3), .s(1), .s(9), .p(5)]
     )
+
+    /// Two physical rows spanning every dot & bamboo rank — exercises the new pip
+    /// layouts, badges, and row-mirroring (debug / preview use).
+    public static let twoRowWinning = RecognitionResult.rows([
+        [.p(2), .p(3), .p(4), .p(5), .p(6), .p(7), .p(8)],
+        [.s(2), .s(3), .s(4), .s(5), .s(6), .s(7), .s(8)],
+    ])
 }

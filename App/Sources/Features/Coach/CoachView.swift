@@ -23,9 +23,10 @@ struct CoachView: View {
 
     var body: some View {
         ZStack {
-            ScreenBackground(.content)
+            CapturedBackdrop(photo: session.capturedPhoto, fallback: .content)
             VStack(spacing: 0) {
                 header
+                coachCountWarning
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         handTray
@@ -37,6 +38,7 @@ struct CoachView: View {
                         valueOverlayCard
                     }
                     .padding(20)
+                    .padding(.bottom, 104)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
@@ -46,6 +48,7 @@ struct CoachView: View {
         .sheet(item: $explaining) { row in
             WaitQualitySheet(option: row.option)
                 .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.hidden)
                 .presentationBackground(.clear)
         }
     }
@@ -65,6 +68,22 @@ struct CoachView: View {
             StatusPill(shantenLabel(bestShanten))
         }
         .padding(.horizontal, 20).padding(.top, 16)
+    }
+
+    @ViewBuilder private var coachCountWarning: some View {
+        if session.countStatus(for: .coach) != .valid {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(MJColor.amberLowConf)
+                Text("Coach needs exactly 14 playable tiles — you have \(session.playable.count).")
+                    .font(MJFont.ui(11.5, weight: .medium)).foregroundStyle(MJColor.cream(0.78))
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .background(MJColor.amberLowConf.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.horizontal, 20).padding(.top, 8)
+        }
     }
 
     // MARK: Hand tray

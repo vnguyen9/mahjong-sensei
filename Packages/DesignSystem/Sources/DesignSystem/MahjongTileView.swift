@@ -3,25 +3,39 @@ import MahjongCore
 
 /// A procedurally-drawn mahjong tile. Every dimension is a ratio of `width`
 /// (design spec §3.2), so it scales cleanly from dense grids (w≈18) to hero
-/// tiles (w≈60). Pass a `Tile` from MahjongCore and one of the five `TileTheme`s.
+/// tiles (w≈60). Pip/stick arrangements follow real HK tiles (quincunx 5, M/W
+/// 8-bamboo, 3×3 9, …). Pass a `Tile` from MahjongCore and one of the `TileTheme`s.
+///
+/// `showsBadge` overlays a small top-right helper mark (suit number, wind letter,
+/// flower/season number) so beginners can read a hand at a glance; it auto-hides
+/// below ~30pt and on decorative tiles (pass `showsBadge: false`).
 public struct MahjongTileView: View {
     public let tile: Tile
     public var theme: TileTheme
     public var width: CGFloat
+    public var showsBadge: Bool
 
-    public init(_ tile: Tile, theme: TileTheme = .jade, width: CGFloat = 40) {
+    public init(_ tile: Tile, theme: TileTheme = .jade, width: CGFloat = 40, showsBadge: Bool = true) {
         self.tile = tile
         self.theme = theme
         self.width = width
+        self.showsBadge = showsBadge
     }
 
     private var height: CGFloat { (width * 1.35).rounded() }
     private var corner: CGFloat { (width * 0.19).rounded() }
+    /// Central content box the pips/sticks are laid out within (leaves a margin
+    /// so corner badges and the tile edge stay clear).
+    private var contentW: CGFloat { width * 0.76 }
+    private var contentH: CGFloat { height * 0.80 }
 
     public var body: some View {
-        ZStack {
-            face
-            content
+        ZStack(alignment: .topTrailing) {
+            ZStack {
+                face
+                content
+            }
+            badge
         }
         .frame(width: width, height: height)
         .shadow(color: theme.shadowColor,
@@ -59,6 +73,29 @@ public struct MahjongTileView: View {
         theme.usesSerif ? MJFont.serif(size, weight: .bold) : MJFont.ui(size, weight: .bold)
     }
 
+    // MARK: Helper badge (top-right index mark)
+
+    @ViewBuilder private var badge: some View {
+        if showsBadge, width >= 30, let text = badgeText {
+            Text(text)
+                .font(MJFont.ui(max(6.5, width * 0.16), weight: .bold))
+                .foregroundStyle(theme.sub.opacity(0.9))
+                .shadow(color: theme.shadowColor, radius: 0.5)
+                .padding(width * 0.05)
+        }
+    }
+
+    /// Suits → rank number; winds → E/S/W/N; flowers/seasons → 1–4; dragons → none.
+    private var badgeText: String? {
+        switch tile {
+        case let .suited(_, r):  return String(r)
+        case let .wind(w):       return ["E", "S", "W", "N"][w.rawValue]
+        case .dragon:            return nil
+        case let .flower(f):     return String(f.rawValue)
+        case let .season(s):     return String(s.rawValue)
+        }
+    }
+
     // MARK: Content dispatch
 
     @ViewBuilder private var content: some View {
@@ -80,7 +117,7 @@ public struct MahjongTileView: View {
         }
     }
 
-    // MARK: Dots
+    // MARK: Dots (筒) — authored per-rank layouts
 
     private var oneDot: some View {
         let d = width * 0.5
@@ -92,16 +129,14 @@ public struct MahjongTileView: View {
     }
 
     private func dotGrid(_ n: Int) -> some View {
-        let ds = (n <= 5 ? width * 0.22 : width * 0.175).rounded()
-        let gap = width * 0.07
-        let perRow = max(1, Int((width * 0.7 + gap) / (ds + gap)))
-        return VStack(spacing: gap) {
-            ForEach(rowRanges(n, perRow: perRow), id: \.self) { range in
-                HStack(spacing: gap) {
-                    ForEach(range, id: \.self) { _ in dot(ds) }
-                }
+        let layout = Self.dotLayouts[n] ?? []
+        let d = width * (Self.dotDiameter[n] ?? 0.20)
+        return ZStack {
+            ForEach(Array(layout.enumerated()), id: \.offset) { _, p in
+                dot(d).position(x: p.x * contentW, y: p.y * contentH)
             }
         }
+        .frame(width: contentW, height: contentH)
     }
 
     private func dot(_ size: CGFloat) -> some View {
@@ -118,25 +153,23 @@ public struct MahjongTileView: View {
             .frame(width: size, height: size)
     }
 
-    // MARK: Bamboo
+    // MARK: Bamboo (索) — authored per-rank layouts
 
     private func barGrid(_ n: Int) -> some View {
-        let bw = (width * 0.1).rounded()
-        let bh = (width * 0.4).rounded()
-        let gap = width * 0.08
-        let containerW = (n <= 2 ? width * 0.42 : width * 0.64)
-        let perRow = max(1, Int((containerW + gap) / (bw + gap)))
-        return VStack(spacing: gap * 0.7) {
-            ForEach(rowRanges(n, perRow: perRow), id: \.self) { range in
-                HStack(spacing: gap) {
-                    ForEach(range, id: \.self) { _ in
-                        RoundedRectangle(cornerRadius: width * 0.06)
-                            .fill(theme.bam)
-                            .frame(width: bw, height: bh)
-                    }
-                }
+        let layout = Self.bambooLayouts[n] ?? []
+        let size = Self.bambooSize[n] ?? (w: 0.10, h: 0.34)
+        let bw = width * size.w
+        let bh = width * size.h
+        return ZStack {
+            ForEach(Array(layout.enumerated()), id: \.offset) { _, s in
+                RoundedRectangle(cornerRadius: width * 0.06)
+                    .fill(theme.bam)
+                    .frame(width: bw, height: bh)
+                    .rotationEffect(.degrees(s.rot))
+                    .position(x: s.x * contentW, y: s.y * contentH)
             }
         }
+        .frame(width: contentW, height: contentH)
     }
 
     private var bird: some View {
@@ -177,16 +210,61 @@ public struct MahjongTileView: View {
         }
     }
 
+    // MARK: Layout tables (pip/stick centers in the 0–1 content box)
+
+    private static let dotDiameter: [Int: CGFloat] = [
+        2: 0.30, 3: 0.26, 4: 0.26, 5: 0.24, 6: 0.20, 7: 0.19, 8: 0.175, 9: 0.19,
+    ]
+    private static let dotLayouts: [Int: [CGPoint]] = [
+        2: [CGPoint(x: 0.5, y: 0.24), CGPoint(x: 0.5, y: 0.76)],
+        3: [CGPoint(x: 0.24, y: 0.20), CGPoint(x: 0.50, y: 0.50), CGPoint(x: 0.76, y: 0.80)],
+        4: [CGPoint(x: 0.28, y: 0.24), CGPoint(x: 0.72, y: 0.24),
+            CGPoint(x: 0.28, y: 0.76), CGPoint(x: 0.72, y: 0.76)],
+        5: [CGPoint(x: 0.24, y: 0.20), CGPoint(x: 0.76, y: 0.20), CGPoint(x: 0.50, y: 0.50),
+            CGPoint(x: 0.24, y: 0.80), CGPoint(x: 0.76, y: 0.80)],
+        6: [CGPoint(x: 0.32, y: 0.16), CGPoint(x: 0.68, y: 0.16),
+            CGPoint(x: 0.32, y: 0.50), CGPoint(x: 0.68, y: 0.50),
+            CGPoint(x: 0.32, y: 0.84), CGPoint(x: 0.68, y: 0.84)],
+        7: [CGPoint(x: 0.22, y: 0.13), CGPoint(x: 0.50, y: 0.21), CGPoint(x: 0.78, y: 0.29),
+            CGPoint(x: 0.32, y: 0.58), CGPoint(x: 0.68, y: 0.58),
+            CGPoint(x: 0.32, y: 0.86), CGPoint(x: 0.68, y: 0.86)],
+        8: [CGPoint(x: 0.32, y: 0.125), CGPoint(x: 0.68, y: 0.125),
+            CGPoint(x: 0.32, y: 0.375), CGPoint(x: 0.68, y: 0.375),
+            CGPoint(x: 0.32, y: 0.625), CGPoint(x: 0.68, y: 0.625),
+            CGPoint(x: 0.32, y: 0.875), CGPoint(x: 0.68, y: 0.875)],
+        9: [CGPoint(x: 0.20, y: 0.16), CGPoint(x: 0.50, y: 0.16), CGPoint(x: 0.80, y: 0.16),
+            CGPoint(x: 0.20, y: 0.50), CGPoint(x: 0.50, y: 0.50), CGPoint(x: 0.80, y: 0.50),
+            CGPoint(x: 0.20, y: 0.84), CGPoint(x: 0.50, y: 0.84), CGPoint(x: 0.80, y: 0.84)],
+    ]
+
+    private static let bambooSize: [Int: (w: CGFloat, h: CGFloat)] = [
+        2: (0.11, 0.42), 3: (0.11, 0.42), 4: (0.105, 0.40), 5: (0.105, 0.40),
+        6: (0.10, 0.34), 7: (0.095, 0.30), 8: (0.095, 0.32), 9: (0.095, 0.30),
+    ]
+    /// (x, y, rotation°) — 8索 is the classic "M over W" of tilted sticks.
+    private static let bambooLayouts: [Int: [(x: CGFloat, y: CGFloat, rot: Double)]] = [
+        2: [(0.50, 0.25, 0), (0.50, 0.75, 0)],
+        3: [(0.50, 0.25, 0), (0.30, 0.75, 0), (0.70, 0.75, 0)],
+        4: [(0.30, 0.25, 0), (0.70, 0.25, 0), (0.30, 0.75, 0), (0.70, 0.75, 0)],
+        5: [(0.28, 0.25, 0), (0.72, 0.25, 0), (0.50, 0.50, 0), (0.28, 0.75, 0), (0.72, 0.75, 0)],
+        6: [(0.22, 0.25, 0), (0.50, 0.25, 0), (0.78, 0.25, 0),
+            (0.22, 0.75, 0), (0.50, 0.75, 0), (0.78, 0.75, 0)],
+        7: [(0.50, 0.14, 0),
+            (0.22, 0.50, 0), (0.50, 0.50, 0), (0.78, 0.50, 0),
+            (0.22, 0.86, 0), (0.50, 0.86, 0), (0.78, 0.86, 0)],
+        8: [(0.17, 0.26, 30), (0.39, 0.26, -30), (0.61, 0.26, 30), (0.83, 0.26, -30),
+            (0.17, 0.74, -30), (0.39, 0.74, 30), (0.61, 0.74, -30), (0.83, 0.74, 30)],
+        9: [(0.22, 0.16, 0), (0.50, 0.16, 0), (0.78, 0.16, 0),
+            (0.22, 0.50, 0), (0.50, 0.50, 0), (0.78, 0.50, 0),
+            (0.22, 0.84, 0), (0.50, 0.84, 0), (0.78, 0.84, 0)],
+    ]
+
     // MARK: Glyph maps
 
     private static let cnNumerals = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
     private func windGlyph(_ w: Wind) -> String { ["東", "南", "西", "北"][w.rawValue] }
     private func flowerGlyph(_ f: Flower) -> String { ["", "梅", "蘭", "菊", "竹"][f.rawValue] }
     private func seasonGlyph(_ s: Season) -> String { ["", "春", "夏", "秋", "冬"][s.rawValue] }
-
-    private func rowRanges(_ count: Int, perRow: Int) -> [Range<Int>] {
-        stride(from: 0, to: count, by: perRow).map { $0..<Swift.min($0 + perRow, count) }
-    }
 }
 
 /// A downward-pointing triangle (the 1-bamboo bird's tail).
@@ -203,7 +281,7 @@ private struct DownTriangle: Shape {
 
 #if DEBUG
 #Preview("Tiles · jade") {
-    let sample: [Tile] = [.m(5), .p(1), .p(6), .s(1), .s(3), .east, .redDragon, .greenDragon, .whiteDragon, .flower(.plum), .season(.spring)]
+    let sample: [Tile] = [.m(5), .p(1), .p(5), .p(7), .p(8), .p(9), .s(1), .s(5), .s(8), .s(9), .east, .redDragon, .greenDragon, .whiteDragon, .flower(.plum), .season(.spring)]
     return ScrollView(.horizontal) {
         HStack(spacing: 8) {
             ForEach(Array(sample.enumerated()), id: \.offset) { _, t in

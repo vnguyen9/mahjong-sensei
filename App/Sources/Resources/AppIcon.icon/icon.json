@@ -1,0 +1,95 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "04-tile-front-dragon-1024.png",
+          "name" : "04-tile-front-dragon-1024"
+        },
+        {
+          "image-name" : "03-tile-mid-dot-1024.png",
+          "name" : "03-tile-mid-dot-1024"
+        },
+        {
+          "image-name" : "02-tile-back-bamboo-1024.png",
+          "name" : "02-tile-back-bamboo-1024"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    },
+    {
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill-specializations" : [
+            {
+              "value" : {
+                "linear-gradient" : [
+                  "display-p3:0.07148,0.16027,0.14087,1.00000",
+                  "display-p3:0.95526,0.92600,0.76999,1.00000"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.4717866407058026,
+                    "y" : 0.8220343803953952
+                  },
+                  "stop" : {
+                    "x" : -0.638300348743779,
+                    "y" : -0.7294968428024085
+                  }
+                }
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "linear-gradient" : [
+                  "display-p3:0.02623,0.05955,0.05292,1.00000",
+                  "display-p3:0.74469,0.67853,0.44233,1.00000"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.5,
+                    "y" : 0.7063744759922566
+                  },
+                  "stop" : {
+                    "x" : -0.8096558916926917,
+                    "y" : -1.3058618168675988
+                  }
+                }
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "01-background-1024.png",
+          "name" : "01-background-1024"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

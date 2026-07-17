@@ -66,15 +66,18 @@ public struct TileRow: View {
     private let theme: TileTheme
     private let width: CGFloat
     private let spacing: CGFloat
+    private let showsBadges: Bool
 
-    public init(_ tiles: [Tile], theme: TileTheme = .jade, width: CGFloat = 24, spacing: CGFloat = 3) {
-        self.tiles = tiles; self.theme = theme; self.width = width; self.spacing = spacing
+    public init(_ tiles: [Tile], theme: TileTheme = .jade, width: CGFloat = 24,
+                spacing: CGFloat = 3, showsBadges: Bool = true) {
+        self.tiles = tiles; self.theme = theme; self.width = width
+        self.spacing = spacing; self.showsBadges = showsBadges
     }
 
     public var body: some View {
         HStack(spacing: spacing) {
             ForEach(Array(tiles.enumerated()), id: \.offset) { _, tile in
-                MahjongTileView(tile, theme: theme, width: width)
+                MahjongTileView(tile, theme: theme, width: width, showsBadge: showsBadges)
             }
         }
     }

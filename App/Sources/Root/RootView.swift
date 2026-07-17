@@ -13,7 +13,6 @@ struct RootView: View {
             switch forced {
             case "onboarding": OnboardingView()
             case "result":     ResultView(session: Self.demoResultSession()) {}
-            case "detected":   ScanFlowView(debugRoute: .detected)
             case "correct":    ScanFlowView(debugRoute: .correct)
             case "context":    ScanFlowView(debugRoute: .context)
             case "coach":      ScanFlowView(debugRoute: .coach)

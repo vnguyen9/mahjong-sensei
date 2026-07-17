@@ -1,68 +1,81 @@
 import SwiftUI
 import DesignSystem
 
-/// The four gold corner brackets of the alignment frame (spec §3.9), drawn as a
-/// single stroked shape (rounded only on the outer corner of each bracket).
-struct ReticleCorners: Shape {
-    var cornerLength: CGFloat = 24
-    var radius: CGFloat = 8
+/// The viewfinder: a full-screen frosted overlay whose blur + jade tint fade away
+/// around a clear "window" — no border, no hard edge. Everything outside the window
+/// is blurred; the window shows the live camera (or fake ground) sharp.
+struct ViewfinderBlurOverlay: View {
+    /// The clear window rect, in this overlay's (full-screen, global) coordinate space.
+    let window: CGRect
+    var cornerRadius: CGFloat = 24
+    /// How soft the transition from clear to blurred is.
+    var feather: CGFloat = 26
 
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        let c = cornerLength, r = radius
-        // Top-left
-        p.move(to: CGPoint(x: rect.minX, y: rect.minY + c))
-        p.addLine(to: CGPoint(x: rect.minX, y: rect.minY + r))
-        p.addQuadCurve(to: CGPoint(x: rect.minX + r, y: rect.minY), control: CGPoint(x: rect.minX, y: rect.minY))
-        p.addLine(to: CGPoint(x: rect.minX + c, y: rect.minY))
-        // Top-right
-        p.move(to: CGPoint(x: rect.maxX - c, y: rect.minY))
-        p.addLine(to: CGPoint(x: rect.maxX - r, y: rect.minY))
-        p.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY + r), control: CGPoint(x: rect.maxX, y: rect.minY))
-        p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + c))
-        // Bottom-right
-        p.move(to: CGPoint(x: rect.maxX, y: rect.maxY - c))
-        p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - r))
-        p.addQuadCurve(to: CGPoint(x: rect.maxX - r, y: rect.maxY), control: CGPoint(x: rect.maxX, y: rect.maxY))
-        p.addLine(to: CGPoint(x: rect.maxX - c, y: rect.maxY))
-        // Bottom-left
-        p.move(to: CGPoint(x: rect.minX + c, y: rect.maxY))
-        p.addLine(to: CGPoint(x: rect.minX + r, y: rect.maxY))
-        p.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.maxY - r), control: CGPoint(x: rect.minX, y: rect.maxY))
-        p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY - c))
-        return p
+    var body: some View {
+        Rectangle()
+            .fill(.ultraThinMaterial)
+            .environment(\.colorScheme, .dark)
+            .overlay(MJColor.deepJade.opacity(0.30))
+            .mask {
+                // Alpha hole: opaque everywhere, punched through at the window.
+                // Blurring the punch feathers the edge so the blur ramps in
+                // gradually instead of cutting off. The hole is grown by ~half
+                // the feather so the fully-clear core still matches the window.
+                ZStack {
+                    Rectangle().fill(.white)
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .frame(width: window.width + feather / 2, height: window.height + feather / 2)
+                        .position(x: window.midX, y: window.midY)
+                        .blur(radius: feather)
+                        .blendMode(.destinationOut)
+                }
+                .compositingGroup()
+            }
+            .allowsHitTesting(false)
+            .ignoresSafeArea()
     }
 }
 
-/// Alignment reticle with animated sweep line (spec §3.9).
-struct ScanReticle: View {
-    var dashed: Bool = false
-    @State private var sweepDown = false
+/// Dots of varying size drifting slowly around the viewfinder window — a calm,
+/// organic replacement for the scan-line sweep (per the user's mockup): three
+/// loose elliptical bands, each dot with its own radius, speed, and twinkle.
+struct OrbitDots: View {
+    let window: CGRect
+    private let count = 36
+    private static let palette: [Color] = [MJColor.cream, MJColor.lightGold, .white, MJColor.gold(0.9)]
+
+    /// Deterministic per-dot jitter in 0..<1 (stable frame to frame).
+    private static func jitter(_ i: Int, _ salt: Double) -> Double {
+        let x = sin(Double(i) * 12.9898 + salt * 78.233) * 43758.5453
+        return x - x.rounded(.down)
+    }
 
     var body: some View {
-        ZStack {
-            if dashed {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(MJColor.gold(0.4), style: StrokeStyle(lineWidth: 2, dash: [6, 5]))
-            } else {
-                ReticleCorners(cornerLength: 24, radius: 8)
-                    .stroke(MJColor.gold(0.85), style: StrokeStyle(lineWidth: 3, lineCap: .round))
-
-                GeometryReader { geo in
-                    Rectangle()
-                        .fill(LinearGradient(colors: [.clear, MJColor.lightGold, .clear],
-                                             startPoint: .leading, endPoint: .trailing))
-                        .frame(height: 2)
-                        .shadow(color: MJColor.gold, radius: 6)
-                        .padding(.horizontal, 6)
-                        .position(x: geo.size.width / 2, y: sweepDown ? geo.size.height - 8 : 8)
-                        .onAppear {
-                            withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true)) {
-                                sweepDown = true
-                            }
-                        }
+        TimelineView(.animation) { timeline in
+            Canvas { context, _ in
+                let t = timeline.date.timeIntervalSinceReferenceDate
+                let cx = window.midX, cy = window.midY
+                let bands: [CGFloat] = [10, 34, 62]   // insets beyond the window edge
+                for i in 0..<count {
+                    let jR = Self.jitter(i, 1), jP = Self.jitter(i, 2)
+                    let jS = Self.jitter(i, 3), jZ = Self.jitter(i, 4)
+                    let inset = bands[i % bands.count] + CGFloat(jR * 20 - 6)
+                    let a = window.width / 2 + inset      // ellipse radii for this dot
+                    let b = window.height / 2 + inset
+                    let lap = 14.0 + jS * 10.0            // one lap in 14–24 s
+                    let angle = jP * 2 * .pi + t * (2 * .pi / lap)
+                    let wobble = 1 + 0.05 * sin(1.7 * Double(i) + 0.4 * t)
+                    let x = cx + CGFloat(cos(angle) * wobble) * a
+                    let y = cy + CGFloat(sin(angle) * wobble) * b
+                    let size = 2.0 + 4.0 * jZ             // 2–6 pt
+                    let twinkle = 0.45 + 0.45 * ((sin(1.1 * t + Double(i)) + 1) / 2)
+                    let color = Self.palette[i % Self.palette.count].opacity(twinkle)
+                    let rect = CGRect(x: x - size / 2, y: y - size / 2, width: size, height: size)
+                    context.fill(Path(ellipseIn: rect), with: .color(color))
                 }
             }
         }
+        .allowsHitTesting(false)
+        .ignoresSafeArea()
     }
 }

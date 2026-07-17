@@ -41,10 +41,10 @@ struct ContextView: View {
             Spacer(minLength: 12)
 
             GoldButton("See result →") { coordinator.push(.result) }
-                .padding(.horizontal, 20).padding(.bottom, 16)
+                .padding(.horizontal, 20).padding(.bottom, 104)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(ScreenBackground(.content))
+        .background(CapturedBackdrop(photo: session.capturedPhoto, fallback: .content))
         .toolbar(.hidden, for: .navigationBar)
     }
 

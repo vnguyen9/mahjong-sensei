@@ -1,0 +1,51 @@
+# Unified HK physical-tile dataset (produced by scripts/merge_hk_dataset.py)
+path: data/processed/hk_merged
+train: train/images
+val: val/images
+test: test/images
+
+nc: 43
+names:
+  - 1m
+  - 2m
+  - 3m
+  - 4m
+  - 5m
+  - 6m
+  - 7m
+  - 8m
+  - 9m
+  - 1p
+  - 2p
+  - 3p
+  - 4p
+  - 5p
+  - 6p
+  - 7p
+  - 8p
+  - 9p
+  - 1s
+  - 2s
+  - 3s
+  - 4s
+  - 5s
+  - 6s
+  - 7s
+  - 8s
+  - 9s
+  - 1z
+  - 2z
+  - 3z
+  - 4z
+  - 5z
+  - 6z
+  - 7z
+  - 1F
+  - 2F
+  - 3F
+  - 4F
+  - 1S
+  - 2S
+  - 3S
+  - 4S
+  - back

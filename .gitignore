@@ -22,10 +22,30 @@ Package.resolved
 
 # Reference material (external / large — not part of the app)
 Ref/
+**/Planning/exports/
 
-# Local training data (models train on a separate machine)
+# Local training data / datasets (models train on a separate machine)
 Dataset/
+**/data/raw/
+**/data/processed/
+**/data/exports/
+**/datasets/
+*.zip
 
-# Trained model artifacts (dropped in when exported)
+# Trained model artifacts & training runs
 *.mlmodel
 *.mlmodelc
+*.mlpackage
+*.pt
+*.pth
+*.onnx
+*.weights
+*.safetensors
+*.tflite
+*.pb
+*.h5
+*.pkl
+*.joblib
+**/runs/
+**/weights/
+**/wandb/

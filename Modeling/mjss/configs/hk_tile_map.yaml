@@ -1,0 +1,242 @@
+# Hong Kong–style mahjong detector: canonical 43 classes + source remaps.
+# Class ids after merge are 0..42 in the order of `names` below.
+
+names:
+  - 1m
+  - 2m
+  - 3m
+  - 4m
+  - 5m
+  - 6m
+  - 7m
+  - 8m
+  - 9m
+  - 1p
+  - 2p
+  - 3p
+  - 4p
+  - 5p
+  - 6p
+  - 7p
+  - 8p
+  - 9p
+  - 1s
+  - 2s
+  - 3s
+  - 4s
+  - 5s
+  - 6s
+  - 7s
+  - 8s
+  - 9s
+  - 1z  # East
+  - 2z  # South
+  - 3z  # West
+  - 4z  # North
+  - 5z  # White dragon
+  - 6z  # Green dragon
+  - 7z  # Red dragon
+  - 1F  # Plum
+  - 2F  # Orchid
+  - 3F  # Chrysanthemum
+  - 4F  # Bamboo (flower)
+  - 1S  # Spring
+  - 2S  # Summer
+  - 3S  # Autumn
+  - 4S  # Winter
+  - back
+
+nc: 43
+
+# Source dataset name lists (Roboflow data.yaml order) -> canonical name.
+# Red fives (0m/0p/0s) map to normal 5s for HK rules.
+sources:
+  v83:
+    zip: Mahjong.v83-entire-dataset-yolo11m.yolo26.zip
+    extract_dir: Mahjong-v83
+    names:
+      - 1B
+      - 1C
+      - 1D
+      - 1F
+      - 1S
+      - 2B
+      - 2C
+      - 2D
+      - 2F
+      - 2S
+      - 3B
+      - 3C
+      - 3D
+      - 3F
+      - 3S
+      - 4B
+      - 4C
+      - 4D
+      - 4F
+      - 4S
+      - 5B
+      - 5C
+      - 5D
+      - 6B
+      - 6C
+      - 6D
+      - 7B
+      - 7C
+      - 7D
+      - 8B
+      - 8C
+      - 8D
+      - 9B
+      - 9C
+      - 9D
+      - EW
+      - GD
+      - NW
+      - RD
+      - SW
+      - WD
+      - WW
+    # B=bamboo(s), C=characters(m), D=dots(p); honors -> z
+    remap:
+      1B: 1s
+      2B: 2s
+      3B: 3s
+      4B: 4s
+      5B: 5s
+      6B: 6s
+      7B: 7s
+      8B: 8s
+      9B: 9s
+      1C: 1m
+      2C: 2m
+      3C: 3m
+      4C: 4m
+      5C: 5m
+      6C: 6m
+      7C: 7m
+      8C: 8m
+      9C: 9m
+      1D: 1p
+      2D: 2p
+      3D: 3p
+      4D: 4p
+      5D: 5p
+      6D: 6p
+      7D: 7p
+      8D: 8p
+      9D: 9p
+      1F: 1F
+      2F: 2F
+      3F: 3F
+      4F: 4F
+      1S: 1S
+      2S: 2S
+      3S: 3S
+      4S: 4S
+      EW: 1z
+      SW: 2z
+      WW: 3z
+      NW: 4z
+      WD: 5z
+      GD: 6z
+      RD: 7z
+
+  v2:
+    zip: mahjong.v2-result.yolo26.zip
+    extract_dir: mahjong-v2
+    names:
+      - 1m
+      - 1p
+      - 1s
+      - 1z
+      - 2m
+      - 2p
+      - 2s
+      - 2z
+      - 3m
+      - 3p
+      - 3s
+      - 3z
+      - 4m
+      - 4p
+      - 4s
+      - 4z
+      - 5m
+      - 5p
+      - 5s
+      - 5z
+      - 6m
+      - 6p
+      - 6s
+      - 6z
+      - 7m
+      - 7p
+      - 7s
+      - 7z
+      - 8m
+      - 8p
+      - 8s
+      - 9m
+      - 9p
+      - 9s
+    remap: null  # identity by name
+
+  v5:
+    zip: mahjong.v5i.yolo26.zip
+    extract_dir: mahjong-v5
+    names:
+      - 0m
+      - 0p
+      - 0s
+      - 1m
+      - 1p
+      - 1s
+      - 1z
+      - 2m
+      - 2p
+      - 2s
+      - 2z
+      - 3m
+      - 3p
+      - 3s
+      - 3z
+      - 4m
+      - 4p
+      - 4s
+      - 4z
+      - 5m
+      - 5p
+      - 5s
+      - 5z
+      - 6m
+      - 6p
+      - 6s
+      - 6z
+      - 7m
+      - 7p
+      - 7s
+      - 7z
+      - 8m
+      - 8p
+      - 8s
+      - 9m
+      - 9p
+      - 9s
+      - back
+    remap:
+      0m: 5m
+      0p: 5p
+      0s: 5s
+      # all other names are identity (omit or list explicitly in script)
+
+# Filename / path substrings treated as screen / game-UI (skip image).
+screen_exclude_substrings:
+  - mahjongsoul
+  - mahjong_soul
+  - majsoul
+  - screenshot
+  - screen_shot
+  - gameui
+  - game_ui
+  - desktop
