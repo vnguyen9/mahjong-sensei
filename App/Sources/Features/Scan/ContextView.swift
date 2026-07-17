@@ -9,42 +9,42 @@ struct ContextView: View {
 
     var body: some View {
         @Bindable var session = coordinator.session
-        ZStack {
-            ScreenBackground(.content)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    Text("Winds are computed for you.")
-                        .font(MJFont.ui(13)).foregroundStyle(MJColor.cream(0.6))
+        VStack(alignment: .leading, spacing: 18) {
+            header
+            Text("Winds are computed for you.")
+                .font(MJFont.ui(13)).foregroundStyle(MJColor.cream(0.6))
+                .padding(.horizontal, 20)
 
-                    labeled("Your seat") { WindPicker(selection: $session.seatWind) }
-                    labeled("Round wind") { WindPicker(selection: $session.roundWind) }
+            Group {
+                labeled("Your seat") { WindPicker(selection: $session.seatWind) }
+                labeled("Round wind") { WindPicker(selection: $session.roundWind) }
 
-                    if session.seatWind == session.roundWind {
-                        doubleWindPill(session.seatWind)
-                    }
-
-                    labeled("How did you win?") {
-                        TwoCellPicker(selection: $session.isSelfDraw,
-                                      left: ("Self-draw 自摸", true), right: ("By discard", false))
-                    }
-
-                    HStack {
-                        Text("I'm the dealer")
-                            .font(MJFont.ui(14, weight: .medium)).foregroundStyle(MJColor.creamHeading)
-                        Spacer()
-                        Toggle("", isOn: $session.isDealer).labelsHidden().tint(MJColor.jadeAccent)
-                    }
-                    .mjCard()
+                if session.seatWind == session.roundWind {
+                    doubleWindPill(session.seatWind)
                 }
-                .padding(20)
-                .frame(maxWidth: .infinity, alignment: .leading)
+
+                labeled("How did you win?") {
+                    TwoCellPicker(selection: $session.isSelfDraw,
+                                  left: ("Self-draw 自摸", true), right: ("By discard", false))
+                }
+
+                HStack {
+                    Text("I'm the dealer")
+                        .font(MJFont.ui(14, weight: .medium)).foregroundStyle(MJColor.creamHeading)
+                    Spacer()
+                    Toggle("", isOn: $session.isDealer).labelsHidden().tint(MJColor.jadeAccent)
+                }
+                .mjCard()
             }
-            .safeAreaInset(edge: .top, spacing: 0) { header }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                GoldButton("See result →") { coordinator.push(.result) }
-                    .padding(.horizontal, 20).padding(.top, 8).padding(.bottom, 16)
-            }
+            .padding(.horizontal, 20)
+
+            Spacer(minLength: 12)
+
+            GoldButton("See result →") { coordinator.push(.result) }
+                .padding(.horizontal, 20).padding(.bottom, 16)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(ScreenBackground(.content))
         .toolbar(.hidden, for: .navigationBar)
     }
 
@@ -58,7 +58,7 @@ struct ContextView: View {
             Spacer()
             Text("Almost there").font(MJFont.serif(17, weight: .bold)).foregroundStyle(MJColor.creamHeading)
             Spacer()
-            Color.clear.frame(width: 44)
+            Color.clear.frame(width: 44, height: 1)
         }
         .padding(.horizontal, 20).padding(.top, 16)
     }
