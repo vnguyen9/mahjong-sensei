@@ -84,6 +84,74 @@ final class UkeireTests: XCTestCase {
     }
 }
 
+// MARK: - Table-aware live counting (seen tiles)
+
+final class TableSeenTests: XCTestCase {
+    private func histogram(_ codes: String...) -> [Int] {
+        var h = [Int](repeating: 0, count: Tile.baseClassCount)
+        for c in codes { h[tile(c).classIndex] += 1 }
+        return h
+    }
+
+    /// Open wait 1m/4m; the table shows two 1m + one 4m gone → live outs drop.
+    func testSeenTilesReduceLiveOuts() {
+        let hand = tiles("2m","3m","4p","5p","6p","7p","8p","9p","1s","2s","3s","9s","9s")
+        let seen = histogram("1m","1m","4m")
+        XCTAssertEqual(EfficiencyEngine.ukeire(hand, seen: seen), [tile("1m"): 2, tile("4m"): 3])
+    }
+
+    /// All four 1m visible on the table ⇒ that side of the wait is dead and drops out.
+    func testDeadWaitDropsOut() {
+        let hand = tiles("2m","3m","4p","5p","6p","7p","8p","9p","1s","2s","3s","9s","9s")
+        let seen = histogram("1m","1m","1m","1m")
+        let uke = EfficiencyEngine.ukeire(hand, seen: seen)
+        XCTAssertEqual(uke, [tile("4m"): 4])
+        XCTAssertNil(uke[tile("1m")])
+    }
+
+    /// Defensive: an impossible over-count (bad recognition) clamps to 0, never negative.
+    func testOverCountClampsToZero() {
+        let hand = tiles("2m","3m","4p","5p","6p","7p","8p","9p","1s","2s","3s","9s","9s")
+        var seen = histogram()
+        seen[tile("1m").classIndex] = 7
+        let uke = EfficiencyEngine.ukeire(hand, seen: seen)
+        XCTAssertNil(uke[tile("1m")])
+        XCTAssertEqual(uke[tile("4m")], 4)
+    }
+
+    /// `seen: nil` and an all-zero histogram both equal today's own-hand-only output.
+    func testNilSeenMatchesUnseeded() {
+        let hand = tiles("2m","3m","4p","5p","6p","7p","8p","9p","1s","2s","3s","9s","9s")
+        XCTAssertEqual(EfficiencyEngine.ukeire(hand, seen: nil), EfficiencyEngine.ukeire(hand))
+        XCTAssertEqual(EfficiencyEngine.ukeire(hand, seen: histogram()), EfficiencyEngine.ukeire(hand))
+    }
+
+    /// `rankDiscards` threads the table through: the best discard's live ukeire
+    /// reflects the pond, and a fully-killed wait becomes a 0-out (dead) tenpai.
+    func testRankDiscardsUsesTableSeen() {
+        let hand = Hand(concealedTiles: tiles(
+            "2m","3m","4p","5p","6p","7p","8p","9p","1s","2s","3s","9s","9s","W"))
+        let two1m = histogram("1m","1m")
+        let opts = EfficiencyEngine.rankDiscards(hand, tableSeen: two1m)
+        XCTAssertEqual(opts.first?.discard, tile("W"))
+        XCTAssertEqual(opts.first?.ukeireCount, 6)          // 1m:2 + 4m:4
+        XCTAssertEqual(opts.first?.ukeireTiles, [tile("1m"), tile("4m")])
+
+        let killed = histogram("1m","1m","1m","1m","4m","4m","4m","4m")
+        let dead = EfficiencyEngine.rankDiscards(hand, tableSeen: killed)
+        XCTAssertEqual(dead.first?.discard, tile("W"))      // still shanten 0 → ranks first
+        XCTAssertEqual(dead.first?.shantenAfter, 0)
+        XCTAssertEqual(dead.first?.ukeireCount, 0)          // …but a dead wait — UI must flag
+    }
+
+    func testWinOddsClamps() {
+        XCTAssertEqual(EfficiencyEngine.winOdds(liveOuts: 6, unseen: 60), 0.1, accuracy: 1e-9)
+        XCTAssertEqual(EfficiencyEngine.winOdds(liveOuts: 0, unseen: 60), 0)
+        XCTAssertEqual(EfficiencyEngine.winOdds(liveOuts: 6, unseen: 0), 0)
+        XCTAssertEqual(EfficiencyEngine.winOdds(liveOuts: 99, unseen: 10), 1)
+    }
+}
+
 // MARK: - Special shapes
 
 final class SpecialShapeTests: XCTestCase {

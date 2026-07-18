@@ -13,9 +13,13 @@ struct RootView: View {
             switch forced {
             case "onboarding": OnboardingView()
             case "result":     ResultView(session: Self.demoResultSession()) {}
-            case "correct":    ScanFlowView(debugRoute: .correct)
+            case "correct":      ScanFlowView(debugRoute: .correct)
+            case "correct-long": ScanFlowView(debugRoute: .correct, debugHand: MockHands.longRow)
+            case "correct-emoji": ScanFlowView(debugRoute: .correct, debugHand: MockHands.bonusSampler)
+            case "lookup":     ScanFlowView(debugScanMode: .lookup)
             case "context":    ScanFlowView(debugRoute: .context)
             case "coach":      ScanFlowView(debugRoute: .coach)
+            case "coach-table": ScanFlowView(debugRoute: .coach, debugTable: true)
             case "learn":      LearnView()
             case "settings":   SettingsView()
             case "basics":     NavigationStack { LearnBasicsView() }

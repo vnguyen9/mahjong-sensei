@@ -31,4 +31,26 @@ public enum AspectFillMapping {
             height: rect.height / displayedH
         )
     }
+
+    /// The inverse of ``normalizedImageRect(of:previewBounds:orientedImageSize:)``:
+    /// maps a normalized image box back to a rectangle in the preview layer's
+    /// (global) coordinate space — used to draw the live "look up" tile highlight.
+    public static func previewRect(ofNormalized box: TileBoundingBox,
+                                   previewBounds: CGRect,
+                                   orientedImageSize: CGSize) -> CGRect {
+        let s = previewBounds.size
+        let i = orientedImageSize
+        guard i.width > 0, i.height > 0, s.width > 0, s.height > 0 else { return .zero }
+        let fill = max(s.width / i.width, s.height / i.height)
+        let displayedW = i.width * fill
+        let displayedH = i.height * fill
+        let cropX = (displayedW - s.width) / 2
+        let cropY = (displayedH - s.height) / 2
+        return CGRect(
+            x: box.x * displayedW - cropX + previewBounds.origin.x,
+            y: box.y * displayedH - cropY + previewBounds.origin.y,
+            width: box.width * displayedW,
+            height: box.height * displayedH
+        )
+    }
 }

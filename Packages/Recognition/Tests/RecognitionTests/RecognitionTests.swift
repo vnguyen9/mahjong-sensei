@@ -282,6 +282,21 @@ final class RecognitionTests: XCTestCase {
         XCTAssertEqual(roi.centerY, 0.5, accuracy: 0.005)
         XCTAssertEqual(roi.width, 300.0 / 479.25, accuracy: 0.01)
     }
+
+    func testPreviewRectInvertsNormalizedMapping() {
+        // A tile rect on-screen → normalize → back should land on the same rect.
+        let preview = CGRect(x: 0, y: 0, width: 393, height: 852)
+        let image = CGSize(width: 720, height: 1280)
+        let tileRect = CGRect(x: 140, y: 500, width: 70, height: 96)
+        let norm = AspectFillMapping.normalizedImageRect(of: tileRect, previewBounds: preview,
+                                                         orientedImageSize: image)
+        let back = AspectFillMapping.previewRect(ofNormalized: norm, previewBounds: preview,
+                                                 orientedImageSize: image)
+        XCTAssertEqual(back.minX, tileRect.minX, accuracy: 0.5)
+        XCTAssertEqual(back.minY, tileRect.minY, accuracy: 0.5)
+        XCTAssertEqual(back.width, tileRect.width, accuracy: 0.5)
+        XCTAssertEqual(back.height, tileRect.height, accuracy: 0.5)
+    }
 }
 
 private extension Array {

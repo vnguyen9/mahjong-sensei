@@ -69,4 +69,20 @@ public enum MockHands {
         [.p(2), .p(3), .p(4), .p(5), .p(6), .p(7), .p(8)],
         [.s(2), .s(3), .s(4), .s(5), .s(6), .s(7), .s(8)],
     ])
+
+    /// One long physical row (14 playable + 1 flower) — how a real hand is laid
+    /// out on the table. Exercises the tray's shrink-to-fit / horizontal scroll
+    /// (regression guard for the "screen zooms in" overflow bug).
+    public static let longRow = RecognitionResult.row(
+        [.m(1), .m(2), .m(3), .p(1), .p(2), .p(3), .s(1), .s(2), .s(3),
+         .east, .east, .west, .redDragon, .redDragon, .flower(.plum)]
+    )
+
+    /// Winds, all three dragons, every flower and season — rendered large enough
+    /// to show the emoji cues (🐲 / 🌺 / 🌸☀️🍁❄️). Debug/preview use.
+    public static let bonusSampler = RecognitionResult.rows([
+        [.east, .south, .redDragon, .greenDragon, .whiteDragon],
+        [.flower(.plum), .flower(.orchid),
+         .season(.spring), .season(.summer), .season(.autumn), .season(.winter)],
+    ])
 }

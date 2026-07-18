@@ -8,8 +8,15 @@ final class AppState {
     var selectedTab: MJTab = .scan
     var hasOnboarded: Bool
 
+    /// "Higher accuracy" — swaps the scan detector for the larger, slower model.
+    /// Persisted under the shared key the scan coordinator reads. Defaults to on.
+    var prefersHighAccuracy: Bool {
+        didSet { TileDetector.prefersHighAccuracy = prefersHighAccuracy }
+    }
+
     init() {
         hasOnboarded = UserDefaults.standard.bool(forKey: Self.onboardKey)
+        prefersHighAccuracy = TileDetector.prefersHighAccuracy
     }
 
     func completeOnboarding() {

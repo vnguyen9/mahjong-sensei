@@ -4,8 +4,30 @@ import Observation
 import MahjongCore
 import Recognition
 
-/// Which destination the scan feeds (the Score/Coach toggle on the scan screen).
-enum ScanMode: Hashable { case score, coach }
+/// Which destination the scan feeds (the Score / Coach / What's-this toggle on the
+/// scan screen). `.lookup` is a live single-tile identifier — it never scores.
+enum ScanMode: Hashable { case score, coach, lookup }
+
+/// Picks which bundled detector the recognizer loads. Two models ship: a small
+/// fast one and a larger, more accurate (slower) one — the Settings "Higher
+/// accuracy" toggle flips between them without ever naming the models. Defaults
+/// to the accurate model (current testing default).
+enum TileDetector {
+    static let defaultsKey = "prefersHighAccuracy"
+    /// Compiled-resource base names (`<name>.mlmodelc` in the app bundle).
+    static let fastModel = "MahjongTileDetector"
+    static let accurateModel = "MahjongTileDetectorPro"
+
+    /// Unset → true (accurate) so fresh installs and test builds get the big model.
+    static var prefersHighAccuracy: Bool {
+        get { UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: defaultsKey) }
+    }
+
+    static var preferredModelName: String {
+        prefersHighAccuracy ? accurateModel : fastModel
+    }
+}
 
 /// Steps in the scan → score / coach flow.
 enum ScanRoute: Hashable { case correct, context, result, coach }
@@ -28,6 +50,11 @@ final class ScanSession {
     var recognized: RecognitionResult = .empty
     /// The editable working set — reading order, survives add/remove/replace.
     var working: [DetectedTile] = []
+    /// MINE bucket: my own exposed melds (pung/kong/chow) — structure feeds `Hand.melds`.
+    var myMelds: [Meld] = []
+    /// TABLE bucket: every other face-up tile (all discards + opponents' melds).
+    /// Only the *count per type* matters — subtracted from live outs. Order irrelevant.
+    var tablePool: [DetectedTile] = []
     var mode: ScanMode = .score
     /// The photo grabbed at the shutter — the whole post-scan flow sits on a
     /// blurred, green-tinted copy of it. Nil for mock/demo captures.
@@ -40,6 +67,8 @@ final class ScanSession {
     func start(with result: RecognitionResult) {
         recognized = result
         working = result.tiles
+        myMelds = []
+        tablePool = []
         seatWind = .east
         roundWind = .east
         isSelfDraw = true
@@ -54,6 +83,21 @@ final class ScanSession {
     /// Non-bonus tiles (what counts toward a hand) and the flowers/seasons set aside.
     var playable: [DetectedTile] { working.filter { !$0.tile.isBonus } }
     var bonus: [DetectedTile] { working.filter { $0.tile.isBonus } }
+
+    /// TABLE bucket as a 34-slot `classIndex` histogram — the "seen" tiles fed to
+    /// the engine so ukeire reports *live* outs. Bonus tiles skipped.
+    var seenHistogram: [Int] {
+        var h = [Int](repeating: 0, count: Tile.baseClassCount)
+        for d in tablePool where !d.tile.isBonus { h[d.tile.classIndex] += 1 }
+        return h
+    }
+
+    /// Base tiles (of 136) not yet visible anywhere — the draw pool for a rough
+    /// "chance" figure: everything minus my concealed hand, my melds, and the table.
+    var unseenCount: Int {
+        let myMeldTiles = myMelds.reduce(0) { $0 + $1.tiles.filter { !$0.isBonus }.count }
+        return max(1, 136 - playable.count - myMeldTiles - seenHistogram.reduce(0, +))
+    }
 
     var lowConfidenceCount: Int { working.filter(\.isLowConfidence).count }
     /// Tiles worth a look: the recognizer wasn't sure about them.
@@ -86,10 +130,12 @@ final class ScanSession {
     }
 
     /// Flowers/seasons go into `bonusTiles` (never a scoring set); the winning tile
-    /// is the last *playable* tile in reading order.
+    /// is the last *playable* tile in reading order. My own exposed melds go into
+    /// `melds` so a mid-game (melded) hand shantens correctly.
     var hand: Hand {
         let faces = playable.map(\.tile)
         return Hand(concealedTiles: faces,
+                    melds: myMelds,
                     bonusTiles: bonus.map(\.tile),
                     winningTile: faces.last,
                     isSelfDraw: isSelfDraw)
@@ -104,7 +150,12 @@ final class ScanSession {
             if (15...18).contains(n) { return .kongSized(playable: n) }
             return n < 14 ? .tooFew(playable: n) : .tooMany(playable: n)
         case .coach:
-            return n == 14 ? .valid : (n < 14 ? .tooFew(playable: n) : .tooMany(playable: n))
+            // A decision hand is 14 tiles; each exposed meld fills a 3-tile set,
+            // so the concealed target shrinks by 3 per meld (13+draw when melded).
+            let need = 14 - 3 * myMelds.count
+            return n == need ? .valid : (n < need ? .tooFew(playable: n) : .tooMany(playable: n))
+        case .lookup:
+            return .valid   // identify-only; never scored
         }
     }
 }
@@ -120,6 +171,9 @@ final class ScanCoordinator {
 
     /// Cached recognizer, loaded lazily off the main thread on first capture.
     private var recognizer: (any Recognizer)?
+    /// Which bundled model the cached recognizer holds — so a flipped accuracy
+    /// preference triggers a reload instead of serving the stale model.
+    private var loadedModelName: String?
 
     /// Recognize `frame` (a live camera buffer or a picked photo), keep only tiles
     /// inside the viewfinder `roi`, and route to the result or coach lane. When
@@ -150,15 +204,35 @@ final class ScanCoordinator {
         }
     }
 
-    /// Loads the bundled ``VisionRecognizer`` (Core ML) off the main thread, or
-    /// ``MockRecognizer`` when no model is bundled. Cached after the first load.
+    /// Identify the single most-confident tile in `frame` (≥ 0.5 confidence) for the
+    /// live "What's this?" lens, considering only detections inside the viewfinder
+    /// `roi` — the camera sees the whole (blurred) frame, the user only the window.
+    /// Reuses the cached recognizer and never touches the routing/`isRecognizing`
+    /// state, so it's safe to poll continuously.
+    @MainActor
+    func lookup(_ frame: RecognizerFrame, roi: TileBoundingBox? = nil) async -> DetectedTile? {
+        let recognizer = await activeRecognizer()
+        guard let result = try? await recognizer.recognize(frame) else { return nil }
+        return result.keepingTiles(insideROI: roi).tiles
+            .filter { $0.confidence >= 0.5 }
+            .max { $0.confidence < $1.confidence }
+    }
+
+    /// Loads the preferred bundled ``VisionRecognizer`` (Core ML) off the main
+    /// thread, reloading when the accuracy preference has flipped since last time.
+    /// Falls back accurate → fast → ``MockRecognizer`` so a model that won't load
+    /// (or an unbundled one) degrades gracefully rather than crashing.
     @MainActor
     private func activeRecognizer() async -> any Recognizer {
-        if let recognizer { return recognizer }
+        let wanted = TileDetector.preferredModelName
+        if let recognizer, loadedModelName == wanted { return recognizer }
         let loaded = await Task.detached(priority: .userInitiated) {
-            (try? VisionRecognizer()) as (any Recognizer)? ?? MockRecognizer()
+            (try? VisionRecognizer(bundledModelNamed: wanted)) as (any Recognizer)?
+                ?? (try? VisionRecognizer(bundledModelNamed: TileDetector.fastModel)) as (any Recognizer)?
+                ?? MockRecognizer()
         }.value
         recognizer = loaded
+        loadedModelName = wanted
         return loaded
     }
 
@@ -170,12 +244,18 @@ final class ScanCoordinator {
 struct ScanFlowView: View {
     /// Debug: jump straight to a route (used by the `MJ_SCREEN` launch hook).
     var debugRoute: ScanRoute? = nil
+    /// Debug: seed a specific hand instead of the default demo one.
+    var debugHand: RecognitionResult? = nil
+    /// Debug: open the scan screen already on a given mode (e.g. `.lookup`).
+    var debugScanMode: ScanMode? = nil
+    /// Debug: seed a melded coach hand + a discard pool (table-aware coaching).
+    var debugTable: Bool = false
     @State private var coordinator = ScanCoordinator()
 
     var body: some View {
         @Bindable var coordinator = coordinator
         NavigationStack(path: $coordinator.path) {
-            ScanView()
+            ScanView(initialMode: debugScanMode ?? .score)
                 .navigationDestination(for: ScanRoute.self) { route in
                     switch route {
                     case .correct:  CorrectView()
@@ -186,12 +266,31 @@ struct ScanFlowView: View {
                 }
         }
         .environment(coordinator)
-        .onAppear {
-            if let debugRoute, coordinator.path.isEmpty {
-                coordinator.session.start(with: debugRoute == .coach ? MockHands.coach : MockHands.twoRowWinning)
-                coordinator.session.mode = (debugRoute == .coach) ? .coach : .score
-                coordinator.path = [debugRoute]
-            }
+        .onAppear(perform: seedIfDebug)
+    }
+
+    /// Debug: a melded tenpai plus a discard pool, so the table-aware Coach shows
+    /// reduced live outs. Concealed 23m 456p 789p 33s 5s + exposed East pung;
+    /// the pond already holds two 1m + one 4m, thinning the 1m/4m wait.
+    private static func seedCoachTable(_ session: ScanSession) {
+        session.start(with: .row([.m(2), .m(3), .p(4), .p(5), .p(6),
+                                  .p(7), .p(8), .p(9), .s(3), .s(3), .s(5)]))
+        session.myMelds = [.pung(.east)]
+        session.tablePool = [.m(1), .m(1), .m(4), .p(1), .s(9), .west].map {
+            DetectedTile(tile: $0, confidence: 1.0,
+                         box: TileBoundingBox(x: 0, y: 0, width: 0.05, height: 0.05))
         }
+    }
+
+    private func seedIfDebug() {
+        guard let debugRoute, coordinator.path.isEmpty else { return }
+        if debugTable {
+            Self.seedCoachTable(coordinator.session)
+        } else {
+            let hand = debugHand ?? (debugRoute == .coach ? MockHands.coach : MockHands.twoRowWinning)
+            coordinator.session.start(with: hand)
+        }
+        coordinator.session.mode = (debugRoute == .coach) ? .coach : .score
+        coordinator.path = [debugRoute]
     }
 }

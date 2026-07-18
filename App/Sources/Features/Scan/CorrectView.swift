@@ -107,37 +107,55 @@ struct CorrectView: View {
         return s
     }
 
-    /// Adaptive tile width from the longest row (counting the ghost "+" on the last
-    /// row), clamped 20–48pt, then scaled by pinch zoom.
-    private var tileWidth: CGFloat {
+    /// Slots in the widest rendered row — the longest physical row, or the last
+    /// row plus its ghost "+", whichever is wider.
+    private var maxSlots: Int {
         let longest = rows.map(\.count).max() ?? 0
         let lastPlusGhost = (rows.last?.count ?? 0) + 1
-        let nMax = max(1, longest, lastPlusGhost)
+        return max(1, longest, lastPlusGhost)
+    }
+
+    /// Adaptive tile width from the widest row, clamped 20–48pt, then pinch-scaled.
+    private var tileWidth: CGFloat {
+        let nMax = maxSlots
         let base = trayWidth > 0 ? (trayWidth - spacing * CGFloat(nMax - 1)) / CGFloat(nMax) : 40
         return min(48, max(20, base)) * zoom * gestureZoom
     }
 
+    /// True when the widest row fits the tray viewport at the current zoom — used
+    /// to disable horizontal scrolling so a normal 1–2 row hand doesn't rubber-band.
+    /// (A long single row hits the 20pt floor and overflows → scroll enables.)
+    private var trayFits: Bool {
+        guard trayWidth > 0 else { return true }
+        let n = CGFloat(maxSlots)
+        return n * tileWidth + (n - 1) * spacing <= trayWidth + 0.5
+    }
+
     private var tray: some View {
         let w = tileWidth
-        return VStack(spacing: spacing + 6) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
-                HStack(spacing: spacing) {
-                    ForEach(row) { detected in
-                        TrayTile(detected: detected, width: w,
-                                 flagged: session.flaggedIDs.contains(detected.id),
-                                 onTap: { editing = .replace(detected) },
-                                 onRemove: { removeTile(detected.id) })
-                    }
-                    if idx == rows.count - 1 {
-                        GhostAddTile(width: w) { editing = .add }
+        return ScrollView(.horizontal, showsIndicators: false) {
+            VStack(spacing: spacing + 6) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
+                    HStack(spacing: spacing) {
+                        ForEach(row) { detected in
+                            TrayTile(detected: detected, width: w,
+                                     flagged: session.flaggedIDs.contains(detected.id),
+                                     onTap: { editing = .replace(detected) },
+                                     onRemove: { removeTile(detected.id) })
+                        }
+                        if idx == rows.count - 1 {
+                            GhostAddTile(width: w) { editing = .add }
+                        }
                     }
                 }
+                if rows.isEmpty {
+                    GhostAddTile(width: w) { editing = .add }
+                }
             }
-            if rows.isEmpty {
-                GhostAddTile(width: w) { editing = .add }
-            }
+            .padding(.vertical, 10)
+            .frame(minWidth: trayWidth, alignment: .center)
         }
-        .frame(maxWidth: .infinity)
+        .scrollDisabled(trayFits)
         .onGeometryChange(for: CGFloat.self, of: { $0.size.width }, action: { trayWidth = $0 })
         .gesture(
             MagnifyGesture()

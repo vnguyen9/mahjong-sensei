@@ -13,12 +13,18 @@ import Recognition
 /// data, or you can feed a still via the "Test with a photo" picker (device too).
 struct ScanView: View {
     @Environment(ScanCoordinator.self) private var coordinator
-    @State private var mode: ScanMode = .score
+    @State private var mode: ScanMode
     @State private var camera = CameraCapture()
     @State private var photoItem: PhotosPickerItem?
     @State private var previewFrame: CGRect = .zero
     @State private var reticleFrame: CGRect = .zero
     @State private var torchOn = false
+    @State private var lookupTile: Tile?
+    @State private var lookupRect: CGRect?
+
+    init(initialMode: ScanMode = .score) {
+        _mode = State(initialValue: initialMode)
+    }
 
     var body: some View {
         ZStack {
@@ -31,39 +37,55 @@ struct ScanView: View {
                                   action: { previewFrame = $0 })
             #endif
 
+            // The viewfinder window anchor: a fixed spot (~42% down the screen) so
+            // the window never shifts between modes with different bottom cards.
+            GeometryReader { geo in
+                Color.clear
+                    .frame(width: 300, height: 150)
+                    .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) },
+                                      action: { reticleFrame = $0 })
+                    .position(x: geo.size.width / 2, y: geo.size.height * 0.42)
+            }
+            .allowsHitTesting(false)
+
             if reticleFrame != .zero {
                 ViewfinderBlurOverlay(window: reticleFrame)
                 OrbitDots(window: reticleFrame)
             }
 
+            #if !targetEnvironment(simulator)
+            if mode == .lookup, let rect = lookupRect {
+                LookupHighlight(rect: rect)
+            }
+            #endif
+
             VStack(spacing: 0) {
                 VStack(spacing: 12) {
                     SegmentedToggle(selection: $mode,
-                                    options: [(ScanMode.score, "Score"), (ScanMode.coach, "Coach")])
-                    HintPill(text: mode == .score
-                             ? "Lay your hand flat, face-up"
-                             : "I'll suggest your best discard")
+                                    options: [(ScanMode.score, "Score"), (ScanMode.coach, "Coach"),
+                                              (ScanMode.lookup, "What's this?")],
+                                    fontSize: 14, hPad: 16, vPad: 9)
+                    HintPill(text: hint)
                 }
                 .padding(.top, 16)
 
                 Spacer()
-                Color.clear
-                    .frame(width: 300, height: 150)
-                    .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) },
-                                      action: { reticleFrame = $0 })
-                Spacer()
 
                 VStack(spacing: 12) {
-                    ScanStatusCard(mode: mode, isBusy: coordinator.isRecognizing) { shutterTapped() }
-                    PhotosPicker(selection: $photoItem, matching: .images, photoLibrary: .shared()) {
-                        Label("Test with a photo", systemImage: "photo.on.rectangle.angled")
-                            .font(MJFont.ui(12, weight: .semibold))
-                            .foregroundStyle(MJColor.cream(0.9))
-                            .padding(.horizontal, 14).padding(.vertical, 8)
-                            .background { Capsule().fill(Color(hex: 0x0A241D, alpha: 0.55)) }
-                            .overlay { Capsule().strokeBorder(MJColor.gold(0.2), lineWidth: 1) }
+                    if mode == .lookup {
+                        LookupCard(tile: lookupTile)
+                    } else {
+                        ScanStatusCard(mode: mode, isBusy: coordinator.isRecognizing) { shutterTapped() }
+                        PhotosPicker(selection: $photoItem, matching: .images, photoLibrary: .shared()) {
+                            Label("Test with a photo", systemImage: "photo.on.rectangle.angled")
+                                .font(MJFont.ui(12, weight: .semibold))
+                                .foregroundStyle(MJColor.cream(0.9))
+                                .padding(.horizontal, 14).padding(.vertical, 8)
+                                .background { Capsule().fill(Color(hex: 0x0A241D, alpha: 0.55)) }
+                                .overlay { Capsule().strokeBorder(MJColor.gold(0.2), lineWidth: 1) }
+                        }
+                        .disabled(coordinator.isRecognizing)
                     }
-                    .disabled(coordinator.isRecognizing)
                 }
                 .padding(.bottom, 96)
             }
@@ -89,6 +111,52 @@ struct ScanView: View {
             #endif
         }
         .onChange(of: photoItem) { _, item in loadPhoto(item) }
+        .task(id: mode) { await runLookupLoop() }
+    }
+
+    private var hint: String {
+        switch mode {
+        case .score:  return "Lay your hand flat, face-up"
+        case .coach:  return "I'll suggest your best discard"
+        case .lookup: return "Point the camera at one tile"
+        }
+    }
+
+    /// While in What's-this mode, poll the live frame ~3×/s and identify the single
+    /// most-confident tile, updating the card + highlight. Cancelled (and cleared)
+    /// the moment the mode changes. The Simulator shows a fixed demo tile.
+    private func runLookupLoop() async {
+        guard mode == .lookup else { lookupTile = nil; lookupRect = nil; return }
+        #if targetEnvironment(simulator)
+        lookupTile = .redDragon
+        lookupRect = nil
+        #else
+        var misses = 0
+        while !Task.isCancelled, mode == .lookup {
+            if let buffer = camera.latestBuffer {
+                let frame = RecognizerFrame.buffer(buffer, orientation: .right)
+                var roi: TileBoundingBox?
+                if previewFrame.width > 0, reticleFrame.width > 0 {
+                    roi = AspectFillMapping.normalizedImageRect(of: reticleFrame,
+                                                                previewBounds: previewFrame,
+                                                                orientedImageSize: frame.orientedPixelSize)
+                }
+                if let hit = await coordinator.lookup(frame, roi: roi) {
+                    lookupTile = hit.tile
+                    if previewFrame.width > 0 {
+                        lookupRect = AspectFillMapping.previewRect(ofNormalized: hit.box,
+                                                                   previewBounds: previewFrame,
+                                                                   orientedImageSize: frame.orientedPixelSize)
+                    }
+                    misses = 0
+                } else {
+                    misses += 1
+                    if misses >= 4 { lookupTile = nil; lookupRect = nil }
+                }
+            }
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+        #endif
     }
 
     /// Flash toggle for the live camera (device only).

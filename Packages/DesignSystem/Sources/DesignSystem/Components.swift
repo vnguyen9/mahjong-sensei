@@ -191,10 +191,17 @@ public struct SheetGrabber: View {
 public struct SegmentedToggle<Value: Hashable>: View {
     @Binding private var selection: Value
     private let options: [(value: Value, label: String)]
+    private let fontSize: CGFloat
+    private let hPad: CGFloat
+    private let vPad: CGFloat
 
-    public init(selection: Binding<Value>, options: [(value: Value, label: String)]) {
+    public init(selection: Binding<Value>, options: [(value: Value, label: String)],
+                fontSize: CGFloat = 11, hPad: CGFloat = 14, vPad: CGFloat = 5) {
         self._selection = selection
         self.options = options
+        self.fontSize = fontSize
+        self.hPad = hPad
+        self.vPad = vPad
     }
 
     public var body: some View {
@@ -205,12 +212,12 @@ public struct SegmentedToggle<Value: Hashable>: View {
                     withAnimation(.snappy(duration: 0.2)) { selection = option.value }
                 } label: {
                     Text(option.label)
-                        .font(MJFont.ui(11, weight: .semibold))
+                        .font(MJFont.ui(fontSize, weight: .semibold))
                         .foregroundStyle(isActive ? MJColor.inkOnGold : MJColor.creamStatus)
-                        .padding(.horizontal, 14).padding(.vertical, 5)
+                        .padding(.horizontal, hPad).padding(.vertical, vPad)
                         .background {
                             if isActive {
-                                RoundedRectangle(cornerRadius: 15, style: .continuous).fill(MJColor.gold)
+                                Capsule(style: .continuous).fill(MJColor.gold)
                             }
                         }
                 }

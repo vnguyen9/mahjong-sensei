@@ -1,4 +1,4 @@
-"""Package hk_merged as a Ultralytics Platform-ready ZIP for cloud upload."""
+"""Package a merged HK YOLO dataset as a Ultralytics Platform-ready ZIP."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "data" / "processed" / "hk_merged"
+DEFAULT_SRC = ROOT / "data" / "processed" / "hk_merged"
 OUT_DIR = ROOT / "data" / "exports"
 DEFAULT_ZIP = OUT_DIR / "hk-mahjong-yolo26-43cls.zip"
 
@@ -27,32 +27,31 @@ def platform_data_yaml(src_yaml: Path) -> str:
     return yaml.safe_dump(payload, sort_keys=False)
 
 
-def count_split(split: str) -> tuple[int, int]:
-    img = SRC / split / "images"
-    lbl = SRC / split / "labels"
+def count_split(src: Path, split: str) -> tuple[int, int]:
+    img = src / split / "images"
+    lbl = src / split / "labels"
     n_img = len(list(img.glob("*"))) if img.exists() else 0
     n_lbl = len(list(lbl.glob("*.txt"))) if lbl.exists() else 0
     return n_img, n_lbl
 
 
-def package(out_zip: Path) -> None:
-    if not (SRC / "data.yaml").exists():
-        raise SystemExit(f"Missing dataset at {SRC}. Run: python scripts/merge_hk_dataset.py")
+def package(src: Path, out_zip: Path) -> None:
+    if not (src / "data.yaml").exists():
+        raise SystemExit(f"Missing dataset at {src}. Run: python scripts/merge_hk_dataset.py")
 
     out_zip.parent.mkdir(parents=True, exist_ok=True)
     if out_zip.exists():
         out_zip.unlink()
 
-    yaml_text = platform_data_yaml(SRC / "data.yaml")
-    # Files to include: train/val/test images+labels (skip macOS junk)
+    yaml_text = platform_data_yaml(src / "data.yaml")
     skip_names = {".DS_Store", "__MACOSX"}
 
-    print(f"Packaging {SRC} -> {out_zip}")
+    print(f"Packaging {src} -> {out_zip}")
     with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         zf.writestr("data.yaml", yaml_text)
         for split in ("train", "val", "test"):
             for kind in ("images", "labels"):
-                base = SRC / split / kind
+                base = src / split / kind
                 if not base.exists():
                     continue
                 for path in sorted(base.rglob("*")):
@@ -66,17 +65,19 @@ def package(out_zip: Path) -> None:
     size_gb = out_zip.stat().st_size / (1024**3)
     print(f"\nWrote {out_zip} ({size_gb:.2f} GB)")
     for split in ("train", "val", "test"):
-        n_img, n_lbl = count_split(split)
+        n_img, n_lbl = count_split(src, split)
         print(f"  {split}: images={n_img} labels={n_lbl}")
 
-    # Verify archive root
     with zipfile.ZipFile(out_zip) as zf:
         names = zf.namelist()
         assert "data.yaml" in names, "data.yaml missing at zip root"
         assert any(n.startswith("train/images/") for n in names)
         assert any(n.startswith("val/images/") for n in names)
-        # ensure no nested hk_merged/ prefix
-        bad = [n for n in names if n.startswith("hk_merged/") or n.startswith("data/processed/")]
+        bad = [
+            n
+            for n in names
+            if n.startswith("hk_merged") or n.startswith("data/processed/")
+        ]
         assert not bad, f"unexpected nested paths: {bad[:5]}"
         root_yaml = yaml.safe_load(zf.read("data.yaml"))
         assert root_yaml.get("path") in (".", None) or str(root_yaml.get("path")) == "."
@@ -90,9 +91,17 @@ def package(out_zip: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--src",
+        type=Path,
+        default=DEFAULT_SRC,
+        help="Merged dataset directory (default: data/processed/hk_merged)",
+    )
     parser.add_argument("-o", "--output", type=Path, default=DEFAULT_ZIP)
     args = parser.parse_args()
-    package(args.output.resolve())
+    src = args.src if args.src.is_absolute() else (ROOT / args.src)
+    out = args.output if args.output.is_absolute() else (ROOT / args.output)
+    package(src.resolve(), out.resolve())
 
 
 if __name__ == "__main__":

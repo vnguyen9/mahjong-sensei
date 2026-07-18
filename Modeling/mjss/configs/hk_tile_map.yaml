@@ -230,6 +230,112 @@ sources:
       0s: 5s
       # all other names are identity (omit or list explicitly in script)
 
+  roman:
+    zip: Mahjong.v1i.yolo26_romanNguyen.zip
+    extract_dir: Mahjong-v1-roman
+    names:
+      - bamboo_1
+      - bamboo_2
+      - bamboo_3
+      - bamboo_4
+      - bamboo_5
+      - bamboo_6
+      - bamboo_7
+      - bamboo_8
+      - bamboo_9
+      - character_1
+      - character_2
+      - character_3
+      - character_4
+      - character_5
+      - character_6
+      - character_7
+      - character_8
+      - character_9
+      - circle_1
+      - circle_2
+      - circle_3
+      - circle_4
+      - circle_5
+      - circle_6
+      - circle_7
+      - circle_8
+      - circle_9
+      - east
+      - green
+      - north
+      - red
+      - south
+      - west
+      - white
+    remap:
+      bamboo_1: 1s
+      bamboo_2: 2s
+      bamboo_3: 3s
+      bamboo_4: 4s
+      bamboo_5: 5s
+      bamboo_6: 6s
+      bamboo_7: 7s
+      bamboo_8: 8s
+      bamboo_9: 9s
+      character_1: 1m
+      character_2: 2m
+      character_3: 3m
+      character_4: 4m
+      character_5: 5m
+      character_6: 6m
+      character_7: 7m
+      character_8: 8m
+      character_9: 9m
+      circle_1: 1p
+      circle_2: 2p
+      circle_3: 3p
+      circle_4: 4p
+      circle_5: 5p
+      circle_6: 6p
+      circle_7: 7p
+      circle_8: 8p
+      circle_9: 9p
+      east: 1z
+      south: 2z
+      west: 3z
+      north: 4z
+      white: 5z
+      green: 6z
+      red: 7z
+
+  bing:
+    zip: Mahjong.v1i.yolo26.zip
+    extract_dir: Mahjong-v1-bing
+    names:
+      - 1bing
+      - 2bing
+      - 3bing
+      - 4bing
+      - 5bing
+      - 6bing
+      - 7bing
+      - 8bing
+      - 9bing
+      - back
+      - bai
+      - fa
+      - zhong
+    remap:
+      1bing: 1p
+      2bing: 2p
+      3bing: 3p
+      4bing: 4p
+      5bing: 5p
+      6bing: 6p
+      7bing: 7p
+      8bing: 8p
+      9bing: 9p
+      back: back
+      bai: 5z
+      fa: 6z
+      zhong: 7z
+
 # Filename / path substrings treated as screen / game-UI (skip image).
 screen_exclude_substrings:
   - mahjongsoul

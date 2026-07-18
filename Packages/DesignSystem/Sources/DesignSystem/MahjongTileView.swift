@@ -109,11 +109,36 @@ public struct MahjongTileView: View {
         case let .wind(w):
             glyph(windGlyph(w), color: theme.wind)
         case let .dragon(d):
-            dragon(d)
+            cued { dragon(d, scaled: cueEmoji != nil) }
         case let .flower(f):
-            glyph(flowerGlyph(f), color: theme.dragonGreen)
+            cued { glyph(flowerGlyph(f), color: theme.dragonGreen, scaled: cueEmoji != nil) }
         case let .season(s):
-            glyph(seasonGlyph(s), color: theme.dragonGreen)
+            cued { glyph(seasonGlyph(s), color: theme.dragonGreen, scaled: cueEmoji != nil) }
+        }
+    }
+
+    /// A small emoji hint for the categories a non-Chinese reader can't parse —
+    /// seasons, flowers, dragons. Follows the same visibility rules as the badge
+    /// (helper marks on, tile ≥ 30pt); nil otherwise so dense strips/decor stay clean.
+    private var cueEmoji: String? {
+        guard showsBadge, width >= 30 else { return nil }
+        switch tile {
+        case let .season(s): return ["", "🌸", "☀️", "🍁", "❄️"][s.rawValue]
+        case .flower:        return "🌺"
+        case .dragon:        return "🐲"
+        default:             return nil
+        }
+    }
+
+    /// Stacks `cueEmoji` under the tile's primary glyph when one applies.
+    @ViewBuilder private func cued<V: View>(@ViewBuilder _ primary: () -> V) -> some View {
+        if let emoji = cueEmoji {
+            VStack(spacing: width * 0.04) {
+                primary()
+                Text(emoji).font(.system(size: width * 0.26))
+            }
+        } else {
+            primary()
         }
     }
 
@@ -192,20 +217,21 @@ public struct MahjongTileView: View {
         .lineLimit(1)
     }
 
-    private func glyph(_ s: String, color: Color) -> some View {
-        Text(s).font(serif(width * 0.62)).foregroundStyle(color).lineLimit(1)
+    private func glyph(_ s: String, color: Color, scaled: Bool = false) -> some View {
+        Text(s).font(serif(width * (scaled ? 0.48 : 0.62))).foregroundStyle(color).lineLimit(1)
     }
 
-    @ViewBuilder private func dragon(_ d: Dragon) -> some View {
+    @ViewBuilder private func dragon(_ d: Dragon, scaled: Bool = false) -> some View {
         switch d {
-        case .red:   glyph("中", color: theme.dragonRed)
-        case .green: glyph("發", color: theme.dragonGreen)
+        case .red:   glyph("中", color: theme.dragonRed, scaled: scaled)
+        case .green: glyph("發", color: theme.dragonGreen, scaled: scaled)
         case .white:
+            let k: CGFloat = scaled ? 0.8 : 1.0
             ZStack {
                 RoundedRectangle(cornerRadius: 3).strokeBorder(theme.dragonWhite, lineWidth: 2)
-                    .frame(width: width * 0.46, height: width * 0.6)
+                    .frame(width: width * 0.46 * k, height: width * 0.6 * k)
                 RoundedRectangle(cornerRadius: 2).strokeBorder(theme.dragonWhite, lineWidth: 1)
-                    .frame(width: width * 0.46 - width * 0.12, height: width * 0.6 - width * 0.12)
+                    .frame(width: (width * 0.46 - width * 0.12) * k, height: (width * 0.6 - width * 0.12) * k)
             }
         }
     }

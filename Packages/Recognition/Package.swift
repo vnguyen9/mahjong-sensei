@@ -12,7 +12,8 @@ let package = Package(
     ],
     targets: [
         .target(name: "Recognition", dependencies: ["MahjongCore"]),
-        .testTarget(name: "RecognitionTests", dependencies: ["Recognition", "MahjongCore"]),
+        .testTarget(name: "RecognitionTests", dependencies: ["Recognition", "MahjongCore"],
+                    resources: [.copy("Fixtures")]),
     ],
     swiftLanguageModes: [.v5]
 )

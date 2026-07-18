@@ -12,7 +12,8 @@ struct CoachView: View {
 
     private var session: ScanSession { coordinator.session }
     private var options: [EfficiencyEngine.DiscardOption] {
-        EfficiencyEngine.rankDiscards(session.hand)
+        // Table-aware: subtract the discard pond + opponents' melds so ukeire is live.
+        EfficiencyEngine.rankDiscards(session.hand, tableSeen: session.seenHistogram)
     }
 
     private struct DiscardRow: Identifiable {
@@ -27,6 +28,7 @@ struct CoachView: View {
             VStack(spacing: 0) {
                 header
                 coachCountWarning
+                tableReadRow
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         handTray
@@ -46,7 +48,7 @@ struct CoachView: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .sheet(item: $explaining) { row in
-            WaitQualitySheet(option: row.option)
+            WaitQualitySheet(option: row.option, unseen: session.unseenCount)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.hidden)
                 .presentationBackground(.clear)
@@ -72,10 +74,11 @@ struct CoachView: View {
 
     @ViewBuilder private var coachCountWarning: some View {
         if session.countStatus(for: .coach) != .valid {
+            let need = 14 - 3 * session.myMelds.count
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(MJColor.amberLowConf)
-                Text("Coach needs exactly 14 playable tiles — you have \(session.playable.count).")
+                Text("Coach needs \(need) concealed tile\(need == 1 ? "" : "s") here — you have \(session.playable.count).")
                     .font(MJFont.ui(11.5, weight: .medium)).foregroundStyle(MJColor.cream(0.78))
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
@@ -83,6 +86,20 @@ struct CoachView: View {
             .padding(.horizontal, 12).padding(.vertical, 9)
             .background(MJColor.amberLowConf.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .padding(.horizontal, 20).padding(.top, 8)
+        }
+    }
+
+    /// Shows when the table pool is populated — signals the outs are live counts.
+    @ViewBuilder private var tableReadRow: some View {
+        if !session.tablePool.isEmpty {
+            HStack(spacing: 6) {
+                Image(systemName: "square.grid.3x3.fill")
+                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(MJColor.gold(0.85))
+                Text("Reading \(session.tablePool.count) table tile\(session.tablePool.count == 1 ? "" : "s") — outs below are live.")
+                    .font(MJFont.ui(11, weight: .medium)).foregroundStyle(MJColor.cream(0.7))
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 20).padding(.top, 6)
         }
     }
 
@@ -100,6 +117,13 @@ struct CoachView: View {
                                 .shadow(color: MJColor.gold(0.6), radius: 5)
                         }
                     }
+            }
+            // Exposed melds sit locked to the right, dimmed — not discardable.
+            ForEach(Array(session.myMelds.enumerated()), id: \.offset) { _, meld in
+                Rectangle().fill(MJColor.gold(0.3)).frame(width: 1, height: 22).padding(.horizontal, 1)
+                ForEach(Array(meld.tiles.enumerated()), id: \.offset) { _, t in
+                    MahjongTileView(t, theme: .jade, width: 20).opacity(0.7)
+                }
             }
         }
         .frame(maxWidth: .infinity)
@@ -165,10 +189,13 @@ struct CoachView: View {
     private func shantenLabel(_ n: Int) -> String { n <= 0 ? "tenpai" : "\(n)-shanten" }
 
     private func note(for row: DiscardRow) -> String {
+        if row.option.shantenAfter <= 0, row.option.ukeireCount == 0 {
+            return "Dead wait — every winning tile is already on the table. Reshape if you can."
+        }
         switch row.tag {
-        case .best:  return "Best efficiency — \(row.option.ukeireCount) tiles push the hand forward."
+        case .best:  return "Best efficiency — \(row.option.ukeireCount) live tiles push the hand forward."
         case .avoid: return "Sets you back to \(shantenLabel(row.option.shantenAfter)) — breaks your shape."
-        default:     return "Playable, but keeps fewer tiles working (\(row.option.ukeireCount))."
+        default:     return "Playable, but keeps fewer tiles working (\(row.option.ukeireCount) live)."
         }
     }
 }
@@ -176,6 +203,13 @@ struct CoachView: View {
 /// Screen 13 — wait quality: which tiles the chosen discard accepts.
 private struct WaitQualitySheet: View {
     let option: EfficiencyEngine.DiscardOption
+    let unseen: Int
+
+    /// Rough per-draw chance, as a whole-percent string.
+    private var oddsText: String {
+        let p = EfficiencyEngine.winOdds(liveOuts: option.ukeireCount, unseen: unseen)
+        return "\(Int((p * 100).rounded()))%"
+    }
 
     var body: some View {
         ZStack {
@@ -206,9 +240,15 @@ private struct WaitQualitySheet: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .mjCard()
 
-                    Text("\(option.ukeireCount) live tiles advance the hand — the wider the wait, the sooner you win.")
-                        .font(MJFont.ui(11.5)).foregroundStyle(MJColor.cream(0.65))
-                        .fixedSize(horizontal: false, vertical: true)
+                    if option.ukeireCount == 0 {
+                        Text("No live tiles remain for this wait — every copy is already on the table. It can't complete as-is.")
+                            .font(MJFont.ui(11.5)).foregroundStyle(MJColor.amberWarn)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("\(option.ukeireCount) live tiles advance the hand — about \(oddsText) you draw one on your next pick.")
+                            .font(MJFont.ui(11.5)).foregroundStyle(MJColor.cream(0.65))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .padding(20)
                 .padding(.bottom, 30)

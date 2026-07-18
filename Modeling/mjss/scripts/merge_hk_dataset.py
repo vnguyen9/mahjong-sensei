@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import shutil
 import zipfile
 from collections import Counter
@@ -12,9 +13,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 RAW = ROOT / "data" / "raw"
-OUT = ROOT / "data" / "processed" / "hk_merged"
+DEFAULT_OUT = ROOT / "data" / "processed" / "hk_merged"
 MAP_PATH = ROOT / "configs" / "hk_tile_map.yaml"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+PHASH_MAX_DIST = 2
 
 
 def load_map() -> dict:
@@ -88,14 +90,62 @@ def remap_label_file(
     return n
 
 
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class Deduper:
+    """Exact (SHA-256) + near-duplicate (pHash) tracker."""
+
+    def __init__(self, enabled: bool, max_dist: int = PHASH_MAX_DIST) -> None:
+        self.enabled = enabled
+        self.max_dist = max_dist
+        self.sha_seen: set[str] = set()
+        self.phashes: list = []
+        self.exact = 0
+        self.near = 0
+        self._imagehash = None
+        self._Image = None
+        if enabled:
+            import imagehash
+            from PIL import Image
+
+            self._imagehash = imagehash
+            self._Image = Image
+
+    def should_skip(self, img: Path, out_split: str) -> str | None:
+        """Return reason string if skip, else None. out_split unused; kept for API clarity."""
+        del out_split  # first-kept wins (source order); later near-dupes dropped
+        if not self.enabled:
+            return None
+        digest = file_sha256(img)
+        if digest in self.sha_seen:
+            self.exact += 1
+            return "exact"
+        ph = self._imagehash.phash(self._Image.open(img))
+        for prev in self.phashes:
+            if ph - prev <= self.max_dist:
+                self.near += 1
+                return "near"
+        self.sha_seen.add(digest)
+        self.phashes.append(ph)
+        return None
+
+
 def merge_source(
     key: str,
     cfg: dict,
     canon_names: list[str],
     exclude: list[str],
     counters: dict[str, Counter],
-) -> tuple[int, int, int]:
-    """Returns (images_kept, boxes, images_skipped_screen)."""
+    out: Path,
+    deduper: Deduper,
+) -> tuple[int, int, int, int]:
+    """Returns (images_kept, boxes, skipped_screen, skipped_dedupe)."""
     zip_path = RAW / cfg["zip"]
     extract_dir = RAW / cfg["extract_dir"]
     if not zip_path.exists():
@@ -103,7 +153,6 @@ def merge_source(
 
     extract_zip(zip_path, extract_dir)
 
-    # Roboflow zips may nest under a single top folder
     root = extract_dir
     if not (root / "train").exists():
         subs = [p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")]
@@ -113,10 +162,9 @@ def merge_source(
                 break
 
     id_map = source_id_to_canonical(cfg["names"], cfg.get("remap"), canonical_index(canon_names))
-    images_kept = boxes = skipped = 0
+    images_kept = boxes = skipped_screen = skipped_dedupe = 0
 
     for split in ("train", "valid", "test"):
-        # unified layout uses val not valid
         out_split = "val" if split == "valid" else split
         lbl_dir = root / split / "labels"
         img_dir = root / split / "images"
@@ -131,32 +179,35 @@ def merge_source(
                 continue
             check_path = f"{img.name}|{rel}"
             if is_screen_path(check_path, exclude):
-                skipped += 1
+                skipped_screen += 1
                 continue
 
-            # Prefix source key to avoid filename collisions across datasets
+            reason = deduper.should_skip(img, out_split)
+            if reason:
+                skipped_dedupe += 1
+                continue
+
             stem = f"{key}_{lbl.stem}"
-            out_img = OUT / out_split / "images" / f"{stem}{img.suffix.lower()}"
-            out_lbl = OUT / out_split / "labels" / f"{stem}.txt"
+            out_img = out / out_split / "images" / f"{stem}{img.suffix.lower()}"
+            out_lbl = out / out_split / "labels" / f"{stem}.txt"
             out_img.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(img, out_img)
             nboxes = remap_label_file(lbl, out_lbl, id_map)
             images_kept += 1
             boxes += nboxes
 
-            # class histogram from remapped file
             for line in out_lbl.read_text().splitlines():
                 if line.strip():
                     cid = int(line.split()[0])
                     counters[out_split][canon_names[cid]] += 1
 
-    return images_kept, boxes, skipped
+    return images_kept, boxes, skipped_screen, skipped_dedupe
 
 
-def write_data_yaml(canon_names: list[str]) -> Path:
-    yaml_path = OUT / "data.yaml"
+def write_data_yaml(out: Path, canon_names: list[str]) -> Path:
+    yaml_path = out / "data.yaml"
     payload = {
-        "path": str(OUT.resolve()),
+        "path": str(out.resolve()),
         "train": "train/images",
         "val": "val/images",
         "test": "test/images",
@@ -167,47 +218,11 @@ def write_data_yaml(canon_names: list[str]) -> Path:
     return yaml_path
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--clean", action="store_true", help="Remove existing merged output first")
-    args = parser.parse_args()
-
-    cfg = load_map()
-    canon_names: list[str] = cfg["names"]
-    exclude: list[str] = cfg.get("screen_exclude_substrings") or []
-
-    if args.clean and OUT.exists():
-        shutil.rmtree(OUT)
-    OUT.mkdir(parents=True, exist_ok=True)
-
-    counters = {"train": Counter(), "val": Counter(), "test": Counter()}
-    total_img = total_box = total_skip = 0
-
-    for key, src in cfg["sources"].items():
-        print(f"\n=== {key} ===")
-        img, box, skip = merge_source(key, src, canon_names, exclude, counters)
-        print(f"  kept images={img} boxes={box} skipped_screen={skip}")
-        total_img += img
-        total_box += box
-        total_skip += skip
-
-    # Ensure rare `back` examples are not train-empty (v5 only puts them in valid).
-    rebalance_back(canon_names)
-
-    yaml_path = write_data_yaml(canon_names)
-    print(f"\nWrote {yaml_path}")
-    print(f"TOTAL images={total_img} boxes={total_box} skipped_screen={total_skip}")
-    for split, ctr in counters.items():
-        print(f"\n{split} class counts ({sum(ctr.values())} boxes):")
-        for name in canon_names:
-            print(f"  {name:4s}: {ctr[name]}")
-
-
-def rebalance_back(canon_names: list[str]) -> None:
+def rebalance_back(out: Path, canon_names: list[str]) -> None:
     """Move most val images that contain `back` into train if train has none."""
     back_id = canon_names.index("back")
-    train_lbl = OUT / "train" / "labels"
-    val_lbl = OUT / "val" / "labels"
+    train_lbl = out / "train" / "labels"
+    val_lbl = out / "val" / "labels"
     if not train_lbl.exists() or not val_lbl.exists():
         return
 
@@ -225,15 +240,73 @@ def rebalance_back(canon_names: list[str]) -> None:
     if train_hits or len(val_hits) <= 1:
         return
 
-    move = val_hits[:-1]
-    for f in move:
-        imgs = list((OUT / "val" / "images").glob(f"{f.stem}.*"))
+    for f in val_hits[:-1]:
+        imgs = list((out / "val" / "images").glob(f"{f.stem}.*"))
         if not imgs:
             continue
         img = imgs[0]
-        shutil.move(str(img), OUT / "train" / "images" / img.name)
+        shutil.move(str(img), out / "train" / "images" / img.name)
         shutil.move(str(f), train_lbl / f.name)
         print(f"  rebalance: moved {f.stem} (back) val -> train")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--clean", action="store_true", help="Remove existing merged output first")
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=DEFAULT_OUT,
+        help="Output dataset directory (default: data/processed/hk_merged)",
+    )
+    parser.add_argument(
+        "--dedupe",
+        action="store_true",
+        help="Skip exact (SHA-256) and near-duplicate (pHash Hamming<=2) images",
+    )
+    args = parser.parse_args()
+
+    out = args.out if args.out.is_absolute() else (ROOT / args.out)
+    cfg = load_map()
+    canon_names: list[str] = cfg["names"]
+    exclude: list[str] = cfg.get("screen_exclude_substrings") or []
+    deduper = Deduper(enabled=args.dedupe)
+
+    if args.clean and out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    counters = {"train": Counter(), "val": Counter(), "test": Counter()}
+    total_img = total_box = total_skip = total_dedupe = 0
+
+    for key, src in cfg["sources"].items():
+        print(f"\n=== {key} ===")
+        img, box, skip, dskip = merge_source(
+            key, src, canon_names, exclude, counters, out, deduper
+        )
+        print(
+            f"  kept images={img} boxes={box} "
+            f"skipped_screen={skip} skipped_dedupe={dskip}"
+        )
+        total_img += img
+        total_box += box
+        total_skip += skip
+        total_dedupe += dskip
+
+    rebalance_back(out, canon_names)
+
+    yaml_path = write_data_yaml(out, canon_names)
+    print(f"\nWrote {yaml_path}")
+    print(
+        f"TOTAL images={total_img} boxes={total_box} "
+        f"skipped_screen={total_skip} skipped_dedupe={total_dedupe}"
+    )
+    if args.dedupe:
+        print(f"  dedupe exact={deduper.exact} near={deduper.near}")
+    for split, ctr in counters.items():
+        print(f"\n{split} class counts ({sum(ctr.values())} boxes):")
+        for name in canon_names:
+            print(f"  {name:4s}: {ctr[name]}")
 
 
 if __name__ == "__main__":

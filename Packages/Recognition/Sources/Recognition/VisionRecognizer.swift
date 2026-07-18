@@ -36,7 +36,11 @@ public struct VisionRecognizer: Recognizer {
             throw RecognizerError.modelNotFound(name)
         }
         let configuration = MLModelConfiguration()
-        configuration.computeUnits = .all       // Neural Engine when available
+        // ANE + CPU, deliberately NOT the GPU: the GPU's MPSGraph compiler aborts
+        // on-device (`MLIR pass manager failed`) for these YOLO26 graphs, and a
+        // conv detector gains nothing from the GPU path anyway. `.all` would let
+        // Core ML pick the GPU and crash mid-inference.
+        configuration.computeUnits = .cpuAndNeuralEngine
         let mlModel = try MLModel(contentsOf: url, configuration: configuration)
         try self.init(model: mlModel, confidenceThreshold: confidenceThreshold)
     }
