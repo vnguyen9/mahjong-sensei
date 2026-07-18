@@ -28,6 +28,7 @@ struct WindExplainerView: View {
 
     private static let windGlyphs = ["東", "南", "西", "北"]
     private static let windNames  = ["East", "South", "West", "North"]
+    private static let windJyut   = ["dūng", "nàahm", "sāi", "bāk"]
 
     private func wind(at seat: Seat) -> Wind {
         Wind(rawValue: (seat.base.rawValue + deal) % 4) ?? seat.base
@@ -90,6 +91,9 @@ struct WindExplainerView: View {
             Text("East round")
                 .font(MJFont.ui(9, weight: .medium))
                 .foregroundStyle(MJColor.cream(0.6))
+            Text("dūng")
+                .font(MJFont.ui(8, weight: .medium))
+                .foregroundStyle(MJColor.gold(0.7))
         }
         .frame(width: 108, height: 108)
         .background {
@@ -121,9 +125,12 @@ struct WindExplainerView: View {
                         .background(MJColor.gold, in: Capsule())
                 }
             }
+            Text("\(Self.windNames[w.rawValue]) · \(Self.windJyut[w.rawValue])")
+                .font(MJFont.ui(8, weight: .semibold))
+                .foregroundStyle(seat.isYou ? MJColor.lightGold : MJColor.gold(0.75))
             Text(roleText)
                 .font(MJFont.ui(8, weight: .medium))
-                .foregroundStyle(MJColor.cream(0.6))
+                .foregroundStyle(MJColor.cream(0.55))
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 6)

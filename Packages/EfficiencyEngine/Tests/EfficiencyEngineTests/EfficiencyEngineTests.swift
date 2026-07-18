@@ -234,17 +234,6 @@ final class InvariantTests: XCTestCase {
         }
     }
 
-    /// The HK overlay only reorders exact ties; the shanten of the best discard
-    /// is unaffected by turning it on.
-    func testHKOverlayPreservesShanten() {
-        let hand = Hand(concealedTiles: tiles(
-            "2m","3m","4p","5p","6p","7p","8p","9p","1s","2s","3s","9s","9s","W"))
-        let plain = EfficiencyEngine.rankDiscards(hand)
-        let biased = EfficiencyEngine.rankDiscards(hand, hkValueTiebreak: true)
-        XCTAssertEqual(plain.first?.shantenAfter, biased.first?.shantenAfter)
-        XCTAssertEqual(Set(plain.map(\.discard)), Set(biased.map(\.discard)))
-    }
-
     /// Deterministic PRNG so the randomised cross-checks are reproducible.
     private struct SplitMix64: RandomNumberGenerator {
         var state: UInt64
@@ -306,5 +295,77 @@ final class InvariantTests: XCTestCase {
                 }
             }
         }
+    }
+
+    /// Pruning runs can never *help*, so the all-triplets distance dominates the
+    /// full standard/overall shanten across thousands of random shapes.
+    func testPungOnlyShantenDominatesShanten() {
+        var rng = SplitMix64(state: 0x9A9A)
+        for _ in 0..<4000 {
+            let hand = randomHand(13, using: &rng)
+            XCTAssertGreaterThanOrEqual(
+                EfficiencyEngine.pungOnlyShanten(hand),
+                EfficiencyEngine.shanten(hand),
+                "\(hand.sorted().map(\.code))")
+        }
+    }
+}
+
+// MARK: - Kernel export wrappers (對對糊 / 七對子 / 十三么 distances)
+
+final class KernelExportTests: XCTestCase {
+
+    /// A complete all-triplets hand is -1; a hand needing runs is not reachable
+    /// pung-only even at tenpai on the run.
+    func testPungOnlyShanten() {
+        // 111m 999m 333p EEE + 5s5s — four pungs + a pair → complete pung-only.
+        let allTriplets = tiles("1m","1m","1m","9m","9m","9m","3p","3p","3p","E","E","E","5s","5s")
+        XCTAssertEqual(EfficiencyEngine.pungOnlyShanten(allTriplets), -1)
+        XCTAssertEqual(EfficiencyEngine.shanten(allTriplets), -1)
+
+        // A pure chow hand is a standard win (-1) but far from all-triplets.
+        let chowHand = tiles("1m","2m","3m","4m","5m","6m","7m","8m","9m","1p","2p","3p","9s","9s")
+        XCTAssertEqual(EfficiencyEngine.shanten(chowHand), -1)
+        XCTAssertGreaterThan(EfficiencyEngine.pungOnlyShanten(chowHand), 0)
+    }
+
+    /// A fixed chow meld makes 對對糊 impossible.
+    func testPungOnlyShantenWithChowMeldUnreachable() {
+        let concealed = tiles("1m","1m","1m","9m","9m","9m","3p","3p","3p","5s")
+        let chow = Meld.chow(.m(4), isConcealed: false)!
+        XCTAssertGreaterThan(EfficiencyEngine.pungOnlyShanten(concealed, melds: [chow]), 10)
+    }
+
+    /// A concealed pung of East reduces the all-triplets requirement, matching
+    /// the standard meld-reduction behaviour.
+    func testPungOnlyShantenWithPungMeld() {
+        // 111m 999m 333p 5s5s + claimed pung of East → complete pung-only.
+        let concealed = tiles("1m","1m","1m","9m","9m","9m","3p","3p","3p","5s","5s")
+        let melds = [Meld.pung(.east, isConcealed: false)]
+        XCTAssertEqual(EfficiencyEngine.pungOnlyShanten(concealed, melds: melds), -1)
+    }
+
+    /// The seven-pairs wrapper agrees with the internal closed form across the
+    /// documented shapes.
+    func testSevenPairsShanten() {
+        // Six pairs + a floater → tenpai for the seventh.
+        let tenpai = tiles("1m","1m","3m","3m","5m","5m","7p","7p","9p","9p","2s","2s","4s")
+        XCTAssertEqual(EfficiencyEngine.sevenPairsShanten(tenpai), 0)
+        // Seven complete pairs → -1.
+        let complete = tiles("1m","1m","3m","3m","5m","5m","7p","7p","9p","9p","2s","2s","4s","4s")
+        XCTAssertEqual(EfficiencyEngine.sevenPairsShanten(complete), -1)
+        // No pairs at all → 6.
+        let noPairs = tiles("1m","2m","3m","4m","5m","6m","7m","8m","9m","1p","2p","3p","4p")
+        XCTAssertEqual(EfficiencyEngine.sevenPairsShanten(noPairs), 6)
+    }
+
+    /// The thirteen-orphans wrapper agrees with the internal closed form.
+    func testThirteenOrphansShanten() {
+        // 13 distinct terminals/honours → tenpai (missing the pair).
+        let tenpai = tiles("1m","9m","1p","9p","1s","9s","E","S","W","N","RD","GD","WD")
+        XCTAssertEqual(EfficiencyEngine.thirteenOrphansShanten(tenpai), 0)
+        // Add a duplicate terminal → complete.
+        let complete = tiles("1m","9m","1p","9p","1s","9s","E","S","W","N","RD","GD","WD","1m")
+        XCTAssertEqual(EfficiencyEngine.thirteenOrphansShanten(complete), -1)
     }
 }

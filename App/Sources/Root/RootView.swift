@@ -18,13 +18,13 @@ struct RootView: View {
             case "correct-emoji": ScanFlowView(debugRoute: .correct, debugHand: MockHands.bonusSampler)
             case "lookup":     ScanFlowView(debugScanMode: .lookup)
             case "context":    ScanFlowView(debugRoute: .context)
-            case "coach":      ScanFlowView(debugRoute: .coach)
-            case "coach-table": ScanFlowView(debugRoute: .coach, debugTable: true)
+            #if DEBUG
+            case let s where s.hasPrefix("coach-live"): Self.coachLiveDebugView(s)
+            #endif
             case "learn":      LearnView()
             case "settings":   SettingsView()
-            case "basics":     NavigationStack { LearnBasicsView() }
+            case "tiles", "basics", "dictionary": NavigationStack { TilesView() }
             case "cheatsheet": NavigationStack { ScoringCheatSheetView() }
-            case "dictionary": NavigationStack { TileDictionaryView() }
             case "winds":      NavigationStack { WindExplainerView() }
             case "rules":      NavigationStack { HouseRulesView() }
             default:           MainTabView()
@@ -42,6 +42,33 @@ struct RootView: View {
         session.start(with: MockHands.winning)
         return session
     }
+
+    #if DEBUG
+    /// Builds a Coach Live debug scene for `MJ_SCREEN=coach-live*` (UI plan
+    /// §15) — presented directly, no cover needed: the Simulator has no
+    /// camera, so `CoachLiveView`'s placeholder feed pane covers this fine,
+    /// and every scene is driven entirely by `MockCoachLive`.
+    ///
+    /// Scene list: `coach-live` (rest split, Map), `-action` / `-think`
+    /// (the other two breathing splits), `-counts` / `-events` (tab
+    /// selected), `-setup` (the setup card), `-handend` (HandEndedCard),
+    /// `-win` (WinBanner) — the plan's 8 named scenes — plus `-corrections`,
+    /// added here to also cover the four correction sheets directly (the
+    /// task brief's own scene list names "corrections" where the plan's
+    /// table names "setup"; both are implemented rather than guessing which
+    /// one to drop).
+    private static func coachLiveDebugView(_ scene: String) -> some View {
+        let session = MockCoachLive.make(scene: scene)
+        let initialTab: LiveTab = scene.hasSuffix("counts") ? .counts : scene.hasSuffix("events") ? .events : .map
+        // Mock scenes land on the live view directly (they're driven by
+        // `MockCoachLive`, not a real begun session); only `-setup` shows the
+        // card. Explicit `.live` because the production default is now `.setup`.
+        let flowState: CoachLiveFlowView.FlowState = scene == "coach-live-setup" ? .setup : .live
+        let sheet: CoachLiveSheet? = scene == "coach-live-corrections" ? .assign : nil
+        return CoachLiveFlowView(session: session, debugFlowState: flowState,
+                                 debugInitialTab: initialTab, debugSheet: sheet)
+    }
+    #endif
 }
 
 /// The three-tab shell with the floating pill tab bar (spec §3.3).

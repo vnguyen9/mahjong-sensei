@@ -2,11 +2,13 @@ import SwiftUI
 import DesignSystem
 
 /// The viewfinder: a full-screen frosted overlay whose blur + jade tint fade away
-/// around a clear **oval** window — no border, no hard edge. Everything outside
-/// the window is blurred; the window shows the live camera (or fake ground) sharp.
+/// around a clear **rounded-rectangle** window — no border, no hard edge. Everything
+/// outside the window is blurred; the window shows the live camera (or fake ground)
+/// sharp. A rounded rect (vs an oval) matches the detection ROI, so the ends of a
+/// wide Score band aren't visually pinched off.
 struct ViewfinderBlurOverlay: View {
     /// The clear window's bounding rect, in this overlay's (full-screen, global)
-    /// coordinate space; the visible opening is the ellipse inscribed in it.
+    /// coordinate space; the visible opening is the rounded rectangle inscribed in it.
     let window: CGRect
     /// How soft the transition from clear to blurred is.
     var feather: CGFloat = 26
@@ -23,7 +25,7 @@ struct ViewfinderBlurOverlay: View {
                 // the feather so the fully-clear core still matches the window.
                 ZStack {
                     Rectangle().fill(.white)
-                    Ellipse()
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
                         .frame(width: window.width + feather / 2, height: window.height + feather / 2)
                         .position(x: window.midX, y: window.midY)
                         .blur(radius: feather)

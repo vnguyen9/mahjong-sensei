@@ -14,9 +14,9 @@ struct LearnView: View {
                     VStack(alignment: .leading, spacing: 16) {
                         header
 
-                        NavigationLink { LearnBasicsView() } label: {
-                            hubCard(title: "The tiles", zh: "牌",
-                                    subtitle: "Suits, honors, and how a hand is built.") {
+                        NavigationLink { TilesView() } label: {
+                            hubCard(title: "Tiles", zh: "牌",
+                                    subtitle: "Suits, honors, how a hand is built — and every tile.") {
                                 MahjongTileView(.p(5), theme: .jade, width: 40, showsBadge: false)
                             }
                         }
@@ -26,14 +26,6 @@ struct LearnView: View {
                             hubCard(title: "Scoring cheat sheet", zh: "番數",
                                     subtitle: "Every faan pattern and what it's worth.") {
                                 faanBadge
-                            }
-                        }
-                        .buttonStyle(.plain)
-
-                        NavigationLink { TileDictionaryView() } label: {
-                            hubCard(title: "Tile dictionary", zh: "字典",
-                                    subtitle: "All 42 faces — names, sounds, and lore.") {
-                                MahjongTileView(.s(1), theme: .jade, width: 40, showsBadge: false)
                             }
                         }
                         .buttonStyle(.plain)

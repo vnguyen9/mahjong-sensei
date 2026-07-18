@@ -38,11 +38,26 @@ enum Shanten {
 
     /// Standard shanten. `melds` are pre-formed groups: each set meld pre-fills
     /// one of the four sets, and a `.pair` meld pre-fills the eye.
-    static func standard(counts: [Int], melds: [Meld]) -> Int {
+    ///
+    /// - Parameter allowChows: when `false`, runs (chows) and their proto-groups
+    ///   (ryanmen/penchan/kanchan) are pruned from the search, leaving only
+    ///   triplet-shaped groups — the 對對糊 (all-triplets) distance. Because this
+    ///   only ever *removes* branches, the pung-only distance can never undercut
+    ///   the full standard shanten.
+    static func standard(counts: [Int], melds: [Meld], allowChows: Bool = true) -> Int {
         let fixedSets = melds.reduce(0) { $0 + ($1.isSet ? 1 : 0) }
         let hasPairMeld = melds.contains { $0.kind == .pair }
         var work = counts
-        return decompose(&work, index: 0, sets: fixedSets, partials: 0, hasPair: hasPairMeld)
+        return decompose(&work, index: 0, sets: fixedSets, partials: 0,
+                         hasPair: hasPairMeld, allowChows: allowChows)
+    }
+
+    /// Standard shanten with runs disabled — the distance to a 對對糊 (all
+    /// triplets) shape. A chow meld already fixed in `melds` makes all-triplets
+    /// impossible, so any such meld yields ``unreachable``.
+    static func pungOnly(counts: [Int], melds: [Meld]) -> Int {
+        if melds.contains(where: { $0.kind == .chow }) { return unreachable }
+        return standard(counts: counts, melds: melds, allowChows: false)
     }
 
     /// Depth-first decomposition maximising completion.
@@ -56,7 +71,8 @@ enum Shanten {
     /// separately. At the leaf, a complete `4 sets + eye` hand scores
     /// `8 − 8 − 0 − 1 = −1`, a 13-tile tenpai scores `0`.
     private static func decompose(_ counts: inout [Int], index: Int,
-                                  sets: Int, partials: Int, hasPair: Bool) -> Int {
+                                  sets: Int, partials: Int, hasPair: Bool,
+                                  allowChows: Bool = true) -> Int {
         var i = index
         while i < Tile.baseClassCount && counts[i] == 0 { i += 1 }
         if i >= Tile.baseClassCount {
@@ -71,42 +87,42 @@ enum Shanten {
         // Pung.
         if canGroup && counts[i] >= 3 {
             counts[i] -= 3
-            best = min(best, decompose(&counts, index: i, sets: sets + 1, partials: partials, hasPair: hasPair))
+            best = min(best, decompose(&counts, index: i, sets: sets + 1, partials: partials, hasPair: hasPair, allowChows: allowChows))
             counts[i] += 3
         }
         // Chow (i, i+1, i+2) inside one suit block.
-        if canGroup && suited && rank <= 6 && counts[i + 1] > 0 && counts[i + 2] > 0 {
+        if allowChows && canGroup && suited && rank <= 6 && counts[i + 1] > 0 && counts[i + 2] > 0 {
             counts[i] -= 1; counts[i + 1] -= 1; counts[i + 2] -= 1
-            best = min(best, decompose(&counts, index: i, sets: sets + 1, partials: partials, hasPair: hasPair))
+            best = min(best, decompose(&counts, index: i, sets: sets + 1, partials: partials, hasPair: hasPair, allowChows: allowChows))
             counts[i] += 1; counts[i + 1] += 1; counts[i + 2] += 1
         }
         // Pair reserved as the eye.
         if !hasPair && counts[i] >= 2 {
             counts[i] -= 2
-            best = min(best, decompose(&counts, index: i, sets: sets, partials: partials, hasPair: true))
+            best = min(best, decompose(&counts, index: i, sets: sets, partials: partials, hasPair: true, allowChows: allowChows))
             counts[i] += 2
         }
         // Pair used as a proto-triplet.
         if canGroup && counts[i] >= 2 {
             counts[i] -= 2
-            best = min(best, decompose(&counts, index: i, sets: sets, partials: partials + 1, hasPair: hasPair))
+            best = min(best, decompose(&counts, index: i, sets: sets, partials: partials + 1, hasPair: hasPair, allowChows: allowChows))
             counts[i] += 2
         }
         // Open proto-run — ryanmen/penchan (i, i+1).
-        if canGroup && suited && rank <= 7 && counts[i + 1] > 0 {
+        if allowChows && canGroup && suited && rank <= 7 && counts[i + 1] > 0 {
             counts[i] -= 1; counts[i + 1] -= 1
-            best = min(best, decompose(&counts, index: i, sets: sets, partials: partials + 1, hasPair: hasPair))
+            best = min(best, decompose(&counts, index: i, sets: sets, partials: partials + 1, hasPair: hasPair, allowChows: allowChows))
             counts[i] += 1; counts[i + 1] += 1
         }
         // Closed proto-run — kanchan (i, i+2).
-        if canGroup && suited && rank <= 6 && counts[i + 2] > 0 {
+        if allowChows && canGroup && suited && rank <= 6 && counts[i + 2] > 0 {
             counts[i] -= 1; counts[i + 2] -= 1
-            best = min(best, decompose(&counts, index: i, sets: sets, partials: partials + 1, hasPair: hasPair))
+            best = min(best, decompose(&counts, index: i, sets: sets, partials: partials + 1, hasPair: hasPair, allowChows: allowChows))
             counts[i] += 1; counts[i + 2] += 1
         }
         // Leave the remaining tile(s) at i ungrouped and advance. Groups whose
         // lowest tile is i were all tried above, so this branch is complete.
-        best = min(best, decompose(&counts, index: i + 1, sets: sets, partials: partials, hasPair: hasPair))
+        best = min(best, decompose(&counts, index: i + 1, sets: sets, partials: partials, hasPair: hasPair, allowChows: allowChows))
 
         return best
     }

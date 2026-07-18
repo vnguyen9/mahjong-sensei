@@ -32,11 +32,36 @@ struct SettingsView: View {
                         }
                         .mjCard(padding: 4)
 
+                        // Debug builds swap the production "Higher accuracy" toggle for a
+                        // full detector-model picker (a pushed screen); Release keeps the toggle.
+                        #if DEBUG
+                        VStack(spacing: 0) {
+                            NavigationLink { ModelPickerView() } label: {
+                                SettingRow(name: "Detector model", value: app.devDetectorModel.label)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .mjCard(padding: 4)
+                        #else
                         VStack(spacing: 0) {
                             SettingToggleRow(
                                 name: "Higher accuracy",
                                 subtitle: "Reads tiles more precisely. A little slower.",
                                 isOn: $app.prefersHighAccuracy)
+                        }
+                        .mjCard(padding: 4)
+                        #endif
+
+                        VStack(spacing: 0) {
+                            SettingToggleRow(
+                                name: "Blur the live feed",
+                                subtitle: "Coach Live softens the camera for privacy.",
+                                isOn: $app.blursLiveFeed)
+                            Divider().overlay(MJColor.gold(0.12))
+                            SettingToggleRow(
+                                name: "Auto-breathing",
+                                subtitle: "The live view grows and shrinks with the action.",
+                                isOn: $app.autoBreathing)
                         }
                         .mjCard(padding: 4)
 

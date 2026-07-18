@@ -1,0 +1,182 @@
+import SwiftUI
+import DesignSystem
+import MahjongCore
+import Recognition
+
+/// Four rounded L-corners framing a zone — the feed's "fixed chrome" bracket
+/// (UI plan §7): 20pt arms, 3pt stroke, 10pt corner radius, none configurable.
+struct CornerBracketShape: Shape {
+    var arm: CGFloat = 20
+    var radius: CGFloat = 10
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        // Never let an arm or elbow exceed half the (small) zone.
+        let a = min(arm, min(rect.width, rect.height) / 2)
+        let r = min(radius, a)
+
+        // Top-left.
+        p.move(to: CGPoint(x: rect.minX, y: rect.minY + a))
+        p.addArc(tangent1End: CGPoint(x: rect.minX, y: rect.minY),
+                 tangent2End: CGPoint(x: rect.minX + a, y: rect.minY), radius: r)
+        p.addLine(to: CGPoint(x: rect.minX + a, y: rect.minY))
+        // Top-right.
+        p.move(to: CGPoint(x: rect.maxX - a, y: rect.minY))
+        p.addArc(tangent1End: CGPoint(x: rect.maxX, y: rect.minY),
+                 tangent2End: CGPoint(x: rect.maxX, y: rect.minY + a), radius: r)
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + a))
+        // Bottom-right.
+        p.move(to: CGPoint(x: rect.maxX, y: rect.maxY - a))
+        p.addArc(tangent1End: CGPoint(x: rect.maxX, y: rect.maxY),
+                 tangent2End: CGPoint(x: rect.maxX - a, y: rect.maxY), radius: r)
+        p.addLine(to: CGPoint(x: rect.maxX - a, y: rect.maxY))
+        // Bottom-left.
+        p.move(to: CGPoint(x: rect.minX + a, y: rect.maxY))
+        p.addArc(tangent1End: CGPoint(x: rect.minX, y: rect.maxY),
+                 tangent2End: CGPoint(x: rect.minX, y: rect.maxY - a), radius: r)
+        p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY - a))
+        return p
+    }
+}
+
+/// Zone corner brackets over the (fixed, full-screen) live feed (UI plan §7).
+///
+/// For each zone the overlay folds `session.zoneBoxes` into a union box (MINE =
+/// hand+bonus+melds, TABLE = pond+opponent melds) — unresolved tiles get one
+/// bracket *each* — maps it through `AspectFillMapping.previewRect` against the
+/// constant full-screen `previewBounds`, pads it, and converts it into the
+/// overlay's local space. A ±4pt stabilizer keeps the tracker's box jitter from
+/// shimmering the brackets; committed moves ease with a short spring.
+///
+/// The amber unresolved brackets are the only hit-testable element — tapping
+/// one opens the existing unresolved-assignment sheet. Everything else is
+/// `allowsHitTesting(false)` so the feed chrome above stays tappable.
+struct ZoneBracketsOverlay: View {
+    @Environment(CoachLiveSession.self) private var session
+    /// The captured global frame of the fixed full-screen preview layer — the
+    /// constant `previewBounds` `AspectFillMapping` needs (it never changes as
+    /// the pane clip animates, so the rects survive split changes).
+    let previewBounds: CGRect
+    let onTapUnresolved: () -> Void
+
+    private static let creamBracket = Color(hex: 0xF0E6D2, alpha: 0.85)
+
+    @State private var mineRect: CGRect?
+    @State private var tableRect: CGRect?
+    @State private var unresolvedRects: [CGRect] = []
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if let r = mineRect {
+                bracket(r, color: MJColor.gold, label: mineLabel,
+                        chipBG: MJColor.gold, chipFG: MJColor.inkOnGold)
+                    .allowsHitTesting(false)
+            }
+            if let r = tableRect {
+                bracket(r, color: Self.creamBracket, label: tableLabel,
+                        chipBG: MJColor.cream, chipFG: MJColor.inkOnGold)
+                    .allowsHitTesting(false)
+            }
+            ForEach(Array(unresolvedRects.enumerated()), id: \.offset) { _, r in
+                Button(action: onTapUnresolved) {
+                    bracket(r, color: MJColor.amberZone, label: unresolvedLabel,
+                            chipBG: MJColor.amberZone, chipFG: MJColor.inkOnAmber)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .animation(.smooth(duration: 0.35), value: mineRect)
+        .animation(.smooth(duration: 0.35), value: tableRect)
+        .animation(.smooth(duration: 0.35), value: unresolvedRects)
+        .onAppear(perform: recompute)
+        .onChange(of: previewBounds) { _, _ in recompute() }
+        .onChange(of: session.orientedImageSize) { _, _ in recompute() }
+        .onChange(of: boxesKey) { _, _ in recompute() }
+    }
+
+    // MARK: - Labels
+
+    private var mineLabel: String {
+        let meldTiles = session.myMelds.reduce(0) { $0 + $1.tiles.filter { !$0.isBonus }.count }
+        let count = session.handTiles.count + (session.drawnTile == nil ? 0 : 1) + meldTiles
+        return "YOURS · \(count)"
+    }
+    private var tableLabel: String { "POND · \(session.pond.count)" }
+    private var unresolvedLabel: String { "\(session.unresolved.count) ? · tap" }
+
+    // MARK: - Bracket + chip
+
+    /// Below this overlay-space y the top chrome lives (back/torch buttons +
+    /// the centered LIVE pill, ~112pt) — a zone label straddling a bracket top
+    /// edge up there would collide with it, so the label tucks inside instead.
+    private static let chromeClearance: CGFloat = 132
+
+    private func bracket(_ rect: CGRect, color: Color, label: String,
+                         chipBG: Color, chipFG: Color) -> some View {
+        let labelInside = rect.minY < Self.chromeClearance
+        return ZStack(alignment: .topLeading) {
+            CornerBracketShape()
+                .stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+                .frame(width: rect.width, height: rect.height)
+            Text(label)
+                .font(MJFont.ui(11, weight: .bold))
+                .foregroundStyle(chipFG)
+                .padding(.vertical, 2).padding(.horizontal, 8)
+                .background(chipBG, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .fixedSize()
+                .offset(x: 8, y: labelInside ? 8 : -13)
+        }
+        .frame(width: rect.width, height: rect.height, alignment: .topLeading)
+        .position(x: rect.midX, y: rect.midY)
+    }
+
+    // MARK: - Mapping + stabilizing
+
+    /// Combined key so any zone-box change (mock or real tracker) triggers a
+    /// remap; `[TileBoundingBox]` is `Equatable`.
+    private var boxesKey: [TileBoundingBox] {
+        session.zoneBoxes.mine + session.zoneBoxes.table + session.zoneBoxes.unresolved
+    }
+
+    private func recompute() {
+        mineRect = stabilize(mineRect, mappedRect(for: session.zoneBoxes.mine))
+        tableRect = stabilize(tableRect, mappedRect(for: session.zoneBoxes.table))
+        let targets = session.zoneBoxes.unresolved.compactMap { mappedRect(for: [$0]) }
+        unresolvedRects = stabilizeList(unresolvedRects, targets)
+    }
+
+    /// Fold `boxes` into their union, map to the preview, pad +6pt, and shift
+    /// into the overlay's local space (which coincides with `previewBounds`).
+    private func mappedRect(for boxes: [TileBoundingBox]) -> CGRect? {
+        guard !boxes.isEmpty, previewBounds.width > 0,
+              session.orientedImageSize.width > 0 else { return nil }
+        let u = unionBox(boxes)
+        let global = AspectFillMapping.previewRect(ofNormalized: u, previewBounds: previewBounds,
+                                                   orientedImageSize: session.orientedImageSize)
+            .insetBy(dx: -6, dy: -6)
+        return global.offsetBy(dx: -previewBounds.minX, dy: -previewBounds.minY)
+    }
+
+    private func unionBox(_ boxes: [TileBoundingBox]) -> TileBoundingBox {
+        let minX = boxes.map(\.x).min() ?? 0
+        let minY = boxes.map(\.y).min() ?? 0
+        let maxX = boxes.map { $0.x + $0.width }.max() ?? 0
+        let maxY = boxes.map { $0.y + $0.height }.max() ?? 0
+        return TileBoundingBox(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    /// Only commit a new rect once an edge has moved past the 4pt jitter gate.
+    private func stabilize(_ old: CGRect?, _ new: CGRect?) -> CGRect? {
+        guard let new else { return nil }
+        guard let old else { return new }
+        let moved = abs(old.minX - new.minX) > 4 || abs(old.minY - new.minY) > 4 ||
+                    abs(old.maxX - new.maxX) > 4 || abs(old.maxY - new.maxY) > 4
+        return moved ? new : old
+    }
+
+    private func stabilizeList(_ old: [CGRect], _ new: [CGRect]) -> [CGRect] {
+        guard old.count == new.count else { return new }
+        return zip(old, new).map { stabilize($0, $1) ?? $1 }
+    }
+}

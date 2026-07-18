@@ -7,7 +7,8 @@ import Recognition
 
 /// Lane 2 · Check & correct (spec screen 7). The reliability gate — nothing is
 /// scored until it passes here. Tap a tile to replace/remove it, drag it away to
-/// discard, or tap the "+" to add one. Mirrors the physical rows the camera saw.
+/// discard, or tap the "+" to add one. Tiles are grouped by suit (萬/筒/索/字/花)
+/// and sorted by number, so a misread stands out and an added tile self-organizes.
 struct CorrectView: View {
     @Environment(ScanCoordinator.self) private var coordinator
     @Environment(\.dismiss) private var dismiss
@@ -58,9 +59,11 @@ struct CorrectView: View {
                 current: target.current,
                 confirmVerb: target.isAdd ? "Add" : "Use",
                 onConfirm: { tile in
-                    switch target {
-                    case let .replace(d): session.replace(id: d.id, with: tile)
-                    case .add:            session.append(tile)
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        switch target {
+                        case let .replace(d): session.replace(id: d.id, with: tile)
+                        case .add:            session.append(tile)
+                        }
                     }
                     editing = nil
                 },
@@ -71,7 +74,7 @@ struct CorrectView: View {
                     editing = nil
                 }
             )
-            .presentationDetents([.height(target.isAdd ? 500 : 460)])
+            .presentationDetents([.height(target.isAdd ? 360 : 416)])
             .presentationBackground(.clear)
         }
     }
@@ -96,7 +99,17 @@ struct CorrectView: View {
         .padding(.horizontal, 20).padding(.top, 16)
     }
 
-    private var rows: [[DetectedTile]] { session.workingRows }
+    /// The hand grouped into per-suit rows (萬/筒/索/字/花), each sorted by number.
+    /// Grouping is semantic (not the physical camera rows), so a misread tile sits
+    /// with its suit-mates and an added tile lands in the right group automatically.
+    private var suitGroups: [(tab: SuitTab, tiles: [DetectedTile])] {
+        SuitTab.allCases.compactMap { tab in
+            let g = session.working
+                .filter { SuitTab(for: $0.tile) == tab }
+                .sorted { $0.tile.classIndex < $1.tile.classIndex }
+            return g.isEmpty ? nil : (tab, g)
+        }
+    }
 
     /// "N tiles · M bonus" — the one fact the old Detected screen carried over.
     private var countSummary: String {
@@ -107,12 +120,10 @@ struct CorrectView: View {
         return s
     }
 
-    /// Slots in the widest rendered row — the longest physical row, or the last
-    /// row plus its ghost "+", whichever is wider.
+    /// Slots in the widest rendered row — the largest suit group (the ghost "+" now
+    /// lives on its own row, so it never widens the tray).
     private var maxSlots: Int {
-        let longest = rows.map(\.count).max() ?? 0
-        let lastPlusGhost = (rows.last?.count ?? 0) + 1
-        return max(1, longest, lastPlusGhost)
+        max(1, suitGroups.map { $0.tiles.count }.max() ?? 0)
     }
 
     /// Adaptive tile width from the widest row, clamped 20–48pt, then pinch-scaled.
@@ -134,26 +145,27 @@ struct CorrectView: View {
     private var tray: some View {
         let w = tileWidth
         return ScrollView(.horizontal, showsIndicators: false) {
-            VStack(spacing: spacing + 6) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
-                    HStack(spacing: spacing) {
-                        ForEach(row) { detected in
-                            TrayTile(detected: detected, width: w,
-                                     flagged: session.flaggedIDs.contains(detected.id),
-                                     onTap: { editing = .replace(detected) },
-                                     onRemove: { removeTile(detected.id) })
-                        }
-                        if idx == rows.count - 1 {
-                            GhostAddTile(width: w) { editing = .add }
+            VStack(alignment: .leading, spacing: spacing + 10) {
+                ForEach(Array(suitGroups.enumerated()), id: \.offset) { _, group in
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(group.tab.label)
+                            .font(MJFont.ui(10, weight: .semibold))
+                            .foregroundStyle(MJColor.gold(0.7))
+                        HStack(spacing: spacing) {
+                            ForEach(group.tiles) { detected in
+                                TrayTile(detected: detected, width: w,
+                                         flagged: session.flaggedIDs.contains(detected.id),
+                                         onTap: { editing = .replace(detected) },
+                                         onRemove: { removeTile(detected.id) })
+                            }
                         }
                     }
                 }
-                if rows.isEmpty {
-                    GhostAddTile(width: w) { editing = .add }
-                }
+                GhostAddTile(width: w) { editing = .add }
+                    .padding(.top, suitGroups.isEmpty ? 0 : 4)
             }
             .padding(.vertical, 10)
-            .frame(minWidth: trayWidth, alignment: .center)
+            .frame(minWidth: trayWidth, alignment: .leading)
         }
         .scrollDisabled(trayFits)
         .onGeometryChange(for: CGFloat.self, of: { $0.size.width }, action: { trayWidth = $0 })
@@ -318,7 +330,9 @@ private struct GhostAddTile: View {
 
 // MARK: - Tile picker sheet (replace / add, with suit tabs + remove)
 
-private struct CorrectionPicker: View {
+/// De-privatized so Coach Live's hand-strip and event-fix sheets can reuse this
+/// verbatim as their tile picker (signature already ideal for both callers).
+struct CorrectionPicker: View {
     let current: Tile?
     let confirmVerb: String
     let onConfirm: (Tile) -> Void
@@ -338,10 +352,11 @@ private struct CorrectionPicker: View {
     }
 
     var body: some View {
-        ZStack {
-            MJColor.sheetGlass.ignoresSafeArea()
+        VStack(spacing: 0) {
+            SheetGrabber()
+                .padding(.top, 8)
+                .padding(.bottom, 6)
             VStack(spacing: 14) {
-                SheetGrabber().padding(.top, 10)
                 Text(onRemove == nil ? "Add a tile" : "Replace tile")
                     .font(MJFont.serif(15, weight: .bold)).foregroundStyle(MJColor.creamHeading)
 
@@ -391,8 +406,13 @@ private struct CorrectionPicker: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(20)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 18)
+            Spacer(minLength: 0)
         }
+        .frame(maxWidth: .infinity)
+        .background(MJColor.sheetGlass.ignoresSafeArea())
+        .presentationDragIndicator(.hidden)
         .preferredColorScheme(.dark)
     }
 }

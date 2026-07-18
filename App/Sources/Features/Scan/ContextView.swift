@@ -80,11 +80,14 @@ struct ContextView: View {
     }
 }
 
-private func windEnglish(_ w: Wind) -> String { ["East", "South", "West", "North"][w.rawValue] }
-private func windGlyph(_ w: Wind) -> String { ["東", "南", "西", "北"][w.rawValue] }
+/// Shared wind label helpers — internal (not `private`) so Coach Live's Map tab,
+/// setup card, and hand-ended rotation line can reuse them instead of duplicating.
+func windEnglish(_ w: Wind) -> String { ["East", "South", "West", "North"][w.rawValue] }
+func windGlyph(_ w: Wind) -> String { ["東", "南", "西", "北"][w.rawValue] }
 
-/// Four-cell seat/round wind selector.
-private struct WindPicker: View {
+/// Four-cell seat/round wind selector. De-privatized so Coach Live's setup card
+/// and hand-ended rotation editor can reuse it verbatim.
+struct WindPicker: View {
     @Binding var selection: Wind
     var body: some View {
         HStack(spacing: 8) {

@@ -7,6 +7,7 @@ import ScoringEngine
 /// a one-line plain-English description, grouped into readable tiers.
 struct ScoringCheatSheetView: View {
     @Environment(\.dismiss) private var dismiss
+    @State private var selected: FaanSelection?
 
     var body: some View {
         ZStack {
@@ -27,6 +28,9 @@ struct ScoringCheatSheetView: View {
         }
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
+        .sheet(item: $selected) { sel in
+            FaanExampleSheet(category: sel.category)
+        }
     }
 
     // MARK: Intro
@@ -39,7 +43,7 @@ struct ScoringCheatSheetView: View {
                 .foregroundStyle(MJColor.cream(0.7))
                 .fixedSize(horizontal: false, vertical: true)
                 .lineSpacing(2)
-            Text("Values shown are Hong Kong Old Style — the Family preset.")
+            Text("Values shown are Hong Kong Old Style — the Family preset. Tap any pattern for an example.")
                 .font(MJFont.ui(11))
                 .foregroundStyle(MJColor.gold(0.75))
         }
@@ -64,7 +68,10 @@ struct ScoringCheatSheetView: View {
 
             VStack(spacing: 0) {
                 ForEach(Array(items.enumerated()), id: \.offset) { i, category in
-                    row(category)
+                    Button { selected = FaanSelection(category) } label: {
+                        row(category)
+                    }
+                    .buttonStyle(.plain)
                     if i < items.count - 1 {
                         Divider().overlay(MJColor.gold(0.12))
                     }
@@ -85,7 +92,7 @@ struct ScoringCheatSheetView: View {
                         .font(MJFont.serif(12, weight: .regular))
                         .foregroundStyle(MJColor.gold(0.75))
                 }
-                Text(description(c))
+                Text(FaanInfo.description(c))
                     .font(MJFont.ui(11.5))
                     .foregroundStyle(MJColor.cream(0.6))
                     .fixedSize(horizontal: false, vertical: true)
@@ -153,36 +160,6 @@ struct ScoringCheatSheetView: View {
             return .big
         default:
             return .common
-        }
-    }
-
-    // MARK: Plain-English descriptions
-
-    private func description(_ c: FaanCategory) -> String {
-        switch c {
-        case .chickenHand:          return "A complete shape with no scoring pattern — worth zero, so it can't clear the minimum."
-        case .selfDraw:             return "You drew your own winning tile from the wall."
-        case .fullyConcealed:       return "You won on a discard, having never revealed a meld."
-        case .seatFlower:           return "A flower or season matching your seat — one faan each."
-        case .noFlowers:            return "You finished without drawing any flower or season."
-        case .winOnKongReplacement: return "You won on the replacement tile drawn after a kong."
-        case .robbingKong:          return "You won by claiming the tile added to another player's kong."
-        case .lastTile:             return "You won on the very last tile of the wall or the last discard."
-        case .dragonPung:           return "A triplet of dragons (中/發/白) — one faan per set, whatever your seat."
-        case .prevailingWindPung:   return "A triplet of the round's prevailing wind."
-        case .seatWindPung:         return "A triplet of your own seat wind."
-        case .allTriplets:          return "Every set is a triplet or kong — no runs at all."
-        case .halfFlush:            return "One number suit plus honor tiles only."
-        case .fullFlush:            return "A single number suit end to end, with no honors."
-        case .smallThreeDragons:    return "Two dragon triplets plus a pair of the third dragon."
-        case .smallFourWinds:       return "Three wind triplets plus a pair of the fourth wind."
-        case .sevenPairs:           return "Seven distinct pairs instead of four sets and a pair."
-        case .bigThreeDragons:      return "Triplets of all three dragons — scored at the limit."
-        case .bigFourWinds:         return "Triplets of all four winds — scored at the limit."
-        case .allHonors:            return "Every tile is a wind or dragon — scored at the limit."
-        case .allTerminals:         return "Every tile is a terminal 1 or 9, no honors — scored at the limit."
-        case .thirteenOrphans:      return "One of each terminal and honor, plus a duplicate — scored at the limit."
-        case .nineGates:            return "A concealed 1-1-1-2-3-4-5-6-7-8-9-9-9 flush — scored at the limit."
         }
     }
 }

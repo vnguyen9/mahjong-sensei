@@ -59,7 +59,10 @@ final class CameraCapture: NSObject {
         if !configured {
             configured = true
             session.beginConfiguration()
-            session.sessionPreset = .hd1280x720
+            // 1080p when the lens supports it — the Score shutter crops the frame to
+            // the reticle band, so more source pixels mean sharper per-tile reads.
+            // Falls back to 720p on lenses that can't do it.
+            session.sessionPreset = session.canSetSessionPreset(.hd1920x1080) ? .hd1920x1080 : .hd1280x720
             if let device = bestBackCamera(),
                let input = try? AVCaptureDeviceInput(device: device),
                session.canAddInput(input) {
@@ -67,6 +70,11 @@ final class CameraCapture: NSObject {
                 videoDevice = device
             }
             videoOutput.alwaysDiscardsLateVideoFrames = true
+            // No `videoSettings` pin — leave the output at iOS's default
+            // `BGRA`, the format the proven scan/lookup path (`VisionRecognizer`
+            // via `ScanCoordinator`) has always used. `MotionDetector` reads
+            // BGRA too (see its own doc), so Coach Live's motion/breathing
+            // signal doesn't need a dedicated pixel format either.
             videoOutput.setSampleBufferDelegate(self, queue: framesQueue)
             if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
             session.commitConfiguration()

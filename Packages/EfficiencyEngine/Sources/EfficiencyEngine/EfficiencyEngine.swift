@@ -30,6 +30,29 @@ public enum EfficiencyEngine {
         Shanten.overall(counts: Shanten.counts(of: tiles), melds: melds)
     }
 
+    /// Shanten toward a 對對糊 (all-triplets) shape only — runs are pruned from
+    /// the search, so this measures distance to a 4-pungs-plus-a-pair hand. Since
+    /// disabling runs only removes ways to complete the hand, this is always
+    /// `>= shanten(tiles, melds:)`. A fixed chow meld makes all-triplets
+    /// impossible and yields a large sentinel. Bonus tiles are ignored.
+    public static func pungOnlyShanten(_ tiles: [Tile], melds: [Meld] = []) -> Int {
+        Shanten.pungOnly(counts: Shanten.counts(of: tiles), melds: melds)
+    }
+
+    /// Shanten toward a 七對子 (seven pairs) shape: `6 − pairs + max(0, 7 −
+    /// kinds)`. Only meaningful for a fully concealed 13/14-tile hand; `melds`
+    /// are not applicable to seven pairs, so callers pass concealed tiles only.
+    public static func sevenPairsShanten(_ tiles: [Tile]) -> Int {
+        Shanten.sevenPairs(counts: Shanten.counts(of: tiles))
+    }
+
+    /// Shanten toward 十三么 (thirteen orphans): `13 − distinct terminal/honour
+    /// kinds − (any such pair ? 1 : 0)`. Only meaningful for a fully concealed
+    /// hand. Bonus tiles are ignored.
+    public static func thirteenOrphansShanten(_ tiles: [Tile]) -> Int {
+        Shanten.thirteenOrphans(counts: Shanten.counts(of: tiles))
+    }
+
     // MARK: Ukeire (accepting tiles)
 
     /// Tiles whose draw strictly lowers the hand's shanten, each mapped to the
@@ -108,18 +131,13 @@ public enum EfficiencyEngine {
     ///   on the table outside this hand (discard pond + opponents' melds), passed
     ///   straight to ``ukeire(_:melds:seen:)`` so the reported ukeire is **live**
     ///   outs. `nil` = own-hand-only (today's behaviour).
-    /// - Parameter hkValueTiebreak: when `true`, exact ties (same shanten *and*
-    ///   `ukeireCount`) are broken by the light HK value overlay
-    ///   (``hkPotentialScore(remaining:melds:)``) before falling back to tile
-    ///   order. Off by default — pure efficiency.
-    public static func rankDiscards(_ hand: Hand, tableSeen: [Int]? = nil,
-                                    hkValueTiebreak: Bool = false) -> [DiscardOption] {
+    public static func rankDiscards(_ hand: Hand, tableSeen: [Int]? = nil) -> [DiscardOption] {
         let melds = hand.melds
         let concealed = hand.concealedTiles.filter { !$0.isBonus }
 
         var seen = Set<Int>()
-        var rows: [(option: DiscardOption, score: Int)] = []
-        rows.reserveCapacity(concealed.count)
+        var options: [DiscardOption] = []
+        options.reserveCapacity(concealed.count)
 
         for tile in concealed {
             guard seen.insert(tile.classIndex).inserted else { continue }   // distinct only
@@ -128,20 +146,17 @@ public enum EfficiencyEngine {
 
             let after = shanten(remaining, melds: melds)
             let accepts = ukeire(remaining, melds: melds, seen: tableSeen)
-            let option = DiscardOption(discard: tile,
-                                       shantenAfter: after,
-                                       ukeireTiles: accepts.keys.sorted(),
-                                       ukeireCount: accepts.values.reduce(0, +))
-            let score = hkValueTiebreak ? hkPotentialScore(remaining: remaining, melds: melds) : 0
-            rows.append((option, score))
+            options.append(DiscardOption(discard: tile,
+                                         shantenAfter: after,
+                                         ukeireTiles: accepts.keys.sorted(),
+                                         ukeireCount: accepts.values.reduce(0, +)))
         }
 
-        rows.sort { a, b in
-            if a.option.shantenAfter != b.option.shantenAfter { return a.option.shantenAfter < b.option.shantenAfter }
-            if a.option.ukeireCount != b.option.ukeireCount { return a.option.ukeireCount > b.option.ukeireCount }
-            if hkValueTiebreak && a.score != b.score { return a.score > b.score }
-            return a.option.discard < b.option.discard
+        options.sort { a, b in
+            if a.shantenAfter != b.shantenAfter { return a.shantenAfter < b.shantenAfter }
+            if a.ukeireCount != b.ukeireCount { return a.ukeireCount > b.ukeireCount }
+            return a.discard < b.discard
         }
-        return rows.map(\.option)
+        return options
     }
 }

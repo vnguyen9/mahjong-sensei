@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
-import CoreML
 import ImageIO
+import HarnessKit
 import MahjongCore
 import Recognition
 
@@ -43,18 +43,9 @@ struct DetectDump {
             exit(2)
         }
 
-        let compiled = try await MLModel.compileModel(at: URL(fileURLWithPath: modelPath))
-        let configuration = MLModelConfiguration()
-        // Override with MJ_COMPUTE=cpu|cpuGPU|all — the Mac GPU/ANE graph compiler
-        // can choke on large graphs where a device wouldn't; cpu isolates that.
-        switch ProcessInfo.processInfo.environment["MJ_COMPUTE"] {
-        case "cpu": configuration.computeUnits = .cpuOnly
-        case "cpuGPU": configuration.computeUnits = .cpuAndGPU
-        case "ane": configuration.computeUnits = .cpuAndNeuralEngine   // device parity
-        default: configuration.computeUnits = .all
-        }
-        let model = try MLModel(contentsOf: compiled, configuration: configuration)
-        let recognizer = try VisionRecognizer(model: model, confidenceThreshold: threshold)
+        // Model load + MJ_COMPUTE override live in HarnessKit now, shared with
+        // video-dump; same compile → configure → load sequence as before.
+        let recognizer = try await HarnessModel.loadRecognizer(modelPath: modelPath, threshold: threshold)
 
         for path in photos {
             let url = URL(fileURLWithPath: path)

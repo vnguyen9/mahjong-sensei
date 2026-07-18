@@ -4,19 +4,52 @@ import Observation
 import MahjongCore
 import Recognition
 
-/// Which destination the scan feeds (the Score / Coach / What's-this toggle on the
-/// scan screen). `.lookup` is a live single-tile identifier — it never scores.
-enum ScanMode: Hashable { case score, coach, lookup }
+/// Which destination the scan feeds (the Score / What's-this toggle on the scan
+/// screen). `.lookup` is a live single-tile identifier — it never scores. Coach
+/// Live (the camera-tracked table coach) is a separate full-screen flow, not a
+/// scan mode — see `CoachLiveFlowView`.
+enum ScanMode: Hashable { case score, lookup }
 
-/// Picks which bundled detector the recognizer loads. Two models ship: a small
-/// fast one and a larger, more accurate (slower) one — the Settings "Higher
-/// accuracy" toggle flips between them without ever naming the models. Defaults
-/// to the accurate model (current testing default).
+/// The three bundled detectors, newest last. `rawValue` is the compiled-resource
+/// base name (`<rawValue>.mlmodelc` in the app bundle) handed straight to
+/// ``VisionRecognizer``. Surfaced only by the Debug-only model switcher in
+/// Settings; production selects via the fast/accurate pair on ``TileDetector``.
+enum DetectorModel: String, CaseIterable, Identifiable {
+    case nanoV1  = "MahjongTileDetector"         // mjss-yolo26n  — small & fast
+    case nanoV3  = "MahjongTileDetectorNanoV3"   // mjss-n-v3     — new nano
+    case largeV2 = "MahjongTileDetectorPro"      // mjss-yolo26l  — the shipping accurate model
+    case largeV3 = "MahjongTileDetectorProV3"    // mjss-l-v3     — new large, under evaluation
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .nanoV1:  return "Nano v1"
+        case .nanoV3:  return "Nano v3"
+        case .largeV2: return "Large v2"
+        case .largeV3: return "Large v3"
+        }
+    }
+    /// One-line descriptor shown under the label in the model-selection screen.
+    var subtitle: String {
+        switch self {
+        case .nanoV1:  return "Small & fast"
+        case .nanoV3:  return "Small & fast · new"
+        case .largeV2: return "Accurate · shipping default"
+        case .largeV3: return "Accurate · under evaluation"
+        }
+    }
+}
+
+/// Picks which bundled detector the recognizer loads. In production the Settings
+/// "Higher accuracy" toggle flips between a small fast model and the larger, more
+/// accurate (slower) one without ever naming them, defaulting to accurate. In
+/// **Debug** builds the dev-only model switcher (Settings) overrides that and picks
+/// one of the three ``DetectorModel`` cases directly.
 enum TileDetector {
     static let defaultsKey = "prefersHighAccuracy"
     /// Compiled-resource base names (`<name>.mlmodelc` in the app bundle).
-    static let fastModel = "MahjongTileDetector"
-    static let accurateModel = "MahjongTileDetectorPro"
+    static let fastModel = DetectorModel.nanoV1.rawValue
+    static let accurateModel = DetectorModel.largeV2.rawValue
 
     /// Unset → true (accurate) so fresh installs and test builds get the big model.
     static var prefersHighAccuracy: Bool {
@@ -24,13 +57,26 @@ enum TileDetector {
         set { UserDefaults.standard.set(newValue, forKey: defaultsKey) }
     }
 
+    /// Dev-only detector override (Debug builds only). Persisted like
+    /// `prefersHighAccuracy`; unset → `.largeV2`, the same model production defaults
+    /// to, so behavior is unchanged until a developer picks another.
+    static let devModelKey = "devDetectorModel"
+    static var devModel: DetectorModel {
+        get { DetectorModel(rawValue: UserDefaults.standard.string(forKey: devModelKey) ?? "") ?? .largeV2 }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: devModelKey) }
+    }
+
     static var preferredModelName: String {
-        prefersHighAccuracy ? accurateModel : fastModel
+        #if DEBUG
+        return devModel.rawValue          // the dev switcher decides in Debug builds
+        #else
+        return prefersHighAccuracy ? accurateModel : fastModel
+        #endif
     }
 }
 
-/// Steps in the scan → score / coach flow.
-enum ScanRoute: Hashable { case correct, context, result, coach }
+/// Steps in the scan → score flow.
+enum ScanRoute: Hashable { case correct, context, result }
 
 /// Result of validating the corrected hand's size (warn-only — never blocks).
 enum HandCountStatus: Equatable {
@@ -149,11 +195,6 @@ final class ScanSession {
             if n == 14 { return .valid }
             if (15...18).contains(n) { return .kongSized(playable: n) }
             return n < 14 ? .tooFew(playable: n) : .tooMany(playable: n)
-        case .coach:
-            // A decision hand is 14 tiles; each exposed meld fills a 3-tile set,
-            // so the concealed target shrinks by 3 per meld (13+draw when melded).
-            let need = 14 - 3 * myMelds.count
-            return n == need ? .valid : (n < need ? .tooFew(playable: n) : .tooMany(playable: n))
         case .lookup:
             return .valid   // identify-only; never scored
         }
@@ -166,14 +207,22 @@ final class ScanSession {
 final class ScanCoordinator {
     var path: [ScanRoute] = []
     let session = ScanSession()
+    /// The back-camera capture, hoisted here (out of `ScanView`'s `@State`) so
+    /// the Coach Live cover can attach a *second* preview layer to the same
+    /// running `AVCaptureSession` — a zero-blink transition, since two sessions
+    /// can't own the camera at once (UI plan §5). `ScanView` reads
+    /// `coordinator.camera`; `ScanView.onDisappear` still owns start/stop for
+    /// tab switches (the cover keeps `ScanView` in the hierarchy, so its
+    /// teardown never fires while Coach Live is up).
+    let camera = CameraCapture()
     /// True while a capture is being recognized (drives the shutter's busy state).
     private(set) var isRecognizing = false
 
-    /// Cached recognizer, loaded lazily off the main thread on first capture.
-    private var recognizer: (any Recognizer)?
-    /// Which bundled model the cached recognizer holds — so a flipped accuracy
-    /// preference triggers a reload instead of serving the stale model.
-    private var loadedModelName: String?
+    /// Loads/caches the preferred bundled detector off the main thread. Shared
+    /// with Coach Live's tracking loop (via the `recognizerProvider` closure
+    /// handed to `CoachLiveSession`) so both honor the same accuracy preference
+    /// and never load two copies of the model.
+    private let recognizerLoader = RecognizerLoader()
 
     /// Recognize `frame` (a live camera buffer or a picked photo), keep only tiles
     /// inside the viewfinder `roi`, and route to the result or coach lane. When
@@ -194,36 +243,103 @@ final class ScanCoordinator {
                 let recognized = (try? await recognizer.recognize(frame)) ?? .empty
                 result = recognized.keepingTiles(insideROI: roi)
             } else {
-                result = (mode == .coach) ? MockHands.coach : MockHands.winning
+                result = MockHands.winning
             }
 
             session.start(with: result)
             session.mode = mode
-            // Empty real captures fall to the check screen rather than the coach.
-            path = (mode == .coach && !result.isEmpty) ? [.coach] : [.correct]
+            path = [.correct]
         }
     }
 
-    /// Identify the single most-confident tile in `frame` (≥ 0.5 confidence) for the
-    /// live "What's this?" lens, considering only detections inside the viewfinder
+    /// Non-nil while the Coach Live cover is up. Constructed headless (no camera
+    /// dependency required — see `CoachLiveSession`); on the Simulator it seeds
+    /// the mock demo scenario since there's no real tracker loop yet.
+    var coachLive: CoachLiveSession?
+
+    func startCoachLive() {
+        #if DEBUG && targetEnvironment(simulator)
+        coachLive = MockCoachLive.make(scene: "coach-live")
+        #else
+        // Real session: reuses the hoisted `camera` (never its own) and the
+        // shared recognizer loader, so the tracking loop and the scan shutter
+        // stay a single camera + single model.
+        let loader = recognizerLoader
+        coachLive = CoachLiveSession(camera: camera, recognizerProvider: { await loader.active() })
+        // Warm the (multi-second) Core ML detector now, while the user is on the
+        // setup card tapping winds — `RecognizerLoader` caches, so the tracking
+        // loop's first `await recognizerProvider()` then returns instantly.
+        Task { _ = await loader.active() }
+        #endif
+    }
+
+    func endCoachLive() {
+        coachLive?.end()
+        coachLive = nil
+    }
+
+    /// Hands a completed live-tracked hand to the existing Score flow: seeds the
+    /// session from the tracked faces, prefills context (winds/melds/self-draw),
+    /// and lands on `ContextView` (one confirmation glance) rather than `.result`
+    /// directly — `ScanRoute.correct` is deliberately skipped since the hand came
+    /// from the tracker, not a fresh scan.
+    @MainActor
+    func beginScoreHandoff(from live: CoachLiveSession) {
+        let faces = live.handTiles.map(\.face) + [live.drawnTile?.face].compactMap { $0 }
+        session.start(with: .row(faces))          // resets winds/melds — set AFTER it
+        session.myMelds = live.myMelds
+        session.tablePool = live.tablePoolAsDetected
+        session.seatWind = live.seatWind
+        session.roundWind = live.roundWind
+        session.isSelfDraw = live.winDetected?.isSelfDraw ?? true
+        session.isDealer = (live.seatWind == .east)
+        session.mode = .score
+        session.capturedPhoto = live.lastFrameSnapshot
+        live.end()                  // stop the tracking loop before we drop the cover
+        path = [.context]           // set path BEFORE clearing coachLive so the
+        coachLive = nil             // cover dismissal reveals ContextView, not the camera.
+    }
+
+    /// Identify the largest (closest-to-camera) tile in `frame` for the live
+    /// "What's this?" lens, considering only detections inside the viewfinder
     /// `roi` — the camera sees the whole (blurred) frame, the user only the window.
-    /// Reuses the cached recognizer and never touches the routing/`isRecognizing`
-    /// state, so it's safe to poll continuously.
+    /// Among reads ≥ 0.5 confidence we pick the biggest bounding box, so a tile
+    /// held up to the lens wins over smaller background tiles. Reuses the cached
+    /// recognizer and never touches the routing/`isRecognizing` state, so it's
+    /// safe to poll continuously.
     @MainActor
     func lookup(_ frame: RecognizerFrame, roi: TileBoundingBox? = nil) async -> DetectedTile? {
         let recognizer = await activeRecognizer()
         guard let result = try? await recognizer.recognize(frame) else { return nil }
         return result.keepingTiles(insideROI: roi).tiles
             .filter { $0.confidence >= 0.5 }
-            .max { $0.confidence < $1.confidence }
+            .max { ($0.box.width * $0.box.height) < ($1.box.width * $1.box.height) }
     }
 
-    /// Loads the preferred bundled ``VisionRecognizer`` (Core ML) off the main
-    /// thread, reloading when the accuracy preference has flipped since last time.
-    /// Falls back accurate → fast → ``MockRecognizer`` so a model that won't load
-    /// (or an unbundled one) degrades gracefully rather than crashing.
+    /// The preferred bundled recognizer (accurate → fast → mock fallback),
+    /// via the shared loader — see ``RecognizerLoader``.
     @MainActor
     private func activeRecognizer() async -> any Recognizer {
+        await recognizerLoader.active()
+    }
+
+    func push(_ route: ScanRoute) { path.append(route) }
+    func restart() { path.removeAll() }
+}
+
+/// Loads and caches the preferred bundled ``VisionRecognizer`` (Core ML) off
+/// the main thread, reloading when the "Higher accuracy" preference has flipped
+/// since last time. Falls back accurate → fast → ``MockRecognizer`` so a model
+/// that won't load (or an unbundled one) degrades gracefully rather than
+/// crashing. An `actor` so the scan shutter/lookup and Coach Live's tracking
+/// loop can share one instance (one loaded model) without a data race — this is
+/// exactly the old `ScanCoordinator.activeRecognizer()` body, lifted out so
+/// both callers reuse it instead of duplicating the fallback chain.
+actor RecognizerLoader {
+    private var recognizer: (any Recognizer)?
+    private var loadedModelName: String?
+
+    func active() async -> any Recognizer {
         let wanted = TileDetector.preferredModelName
         if let recognizer, loadedModelName == wanted { return recognizer }
         let loaded = await Task.detached(priority: .userInitiated) {
@@ -235,9 +351,6 @@ final class ScanCoordinator {
         loadedModelName = wanted
         return loaded
     }
-
-    func push(_ route: ScanRoute) { path.append(route) }
-    func restart() { path.removeAll() }
 }
 
 /// The Scan tab: a NavigationStack driving the whole scan flow.
@@ -248,49 +361,34 @@ struct ScanFlowView: View {
     var debugHand: RecognitionResult? = nil
     /// Debug: open the scan screen already on a given mode (e.g. `.lookup`).
     var debugScanMode: ScanMode? = nil
-    /// Debug: seed a melded coach hand + a discard pool (table-aware coaching).
-    var debugTable: Bool = false
     @State private var coordinator = ScanCoordinator()
 
     var body: some View {
         @Bindable var coordinator = coordinator
         NavigationStack(path: $coordinator.path) {
-            ScanView(initialMode: debugScanMode ?? .score)
+            ScanView(initialMode: debugScanMode ?? .lookup)
                 .navigationDestination(for: ScanRoute.self) { route in
                     switch route {
                     case .correct:  CorrectView()
                     case .context:  ContextView()
                     case .result:   ResultView(session: coordinator.session) { coordinator.restart() }
-                    case .coach:    CoachView()
                     }
                 }
         }
         .environment(coordinator)
-        .onAppear(perform: seedIfDebug)
-    }
-
-    /// Debug: a melded tenpai plus a discard pool, so the table-aware Coach shows
-    /// reduced live outs. Concealed 23m 456p 789p 33s 5s + exposed East pung;
-    /// the pond already holds two 1m + one 4m, thinning the 1m/4m wait.
-    private static func seedCoachTable(_ session: ScanSession) {
-        session.start(with: .row([.m(2), .m(3), .p(4), .p(5), .p(6),
-                                  .p(7), .p(8), .p(9), .s(3), .s(3), .s(5)]))
-        session.myMelds = [.pung(.east)]
-        session.tablePool = [.m(1), .m(1), .m(4), .p(1), .s(9), .west].map {
-            DetectedTile(tile: $0, confidence: 1.0,
-                         box: TileBoundingBox(x: 0, y: 0, width: 0.05, height: 0.05))
+        .fullScreenCover(item: $coordinator.coachLive) { session in
+            CoachLiveFlowView(session: session,
+                              onExit: { coordinator.endCoachLive() },
+                              onScoreHandoff: { coordinator.beginScoreHandoff(from: session) })
         }
+        .onAppear(perform: seedIfDebug)
     }
 
     private func seedIfDebug() {
         guard let debugRoute, coordinator.path.isEmpty else { return }
-        if debugTable {
-            Self.seedCoachTable(coordinator.session)
-        } else {
-            let hand = debugHand ?? (debugRoute == .coach ? MockHands.coach : MockHands.twoRowWinning)
-            coordinator.session.start(with: hand)
-        }
-        coordinator.session.mode = (debugRoute == .coach) ? .coach : .score
+        let hand = debugHand ?? MockHands.twoRowWinning
+        coordinator.session.start(with: hand)
+        coordinator.session.mode = .score
         coordinator.path = [debugRoute]
     }
 }

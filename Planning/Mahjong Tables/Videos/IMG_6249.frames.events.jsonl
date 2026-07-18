@@ -1,0 +1,5 @@
+{"kind":"header","round":"E","schema":"mj-events\/1","seat":"E","source":"IMG_6249.frames.jsonl"}
+{"at":0,"confidence":1,"flags":[],"handIndex":0,"id":0,"kind":{"handStarted":{"mySeatWind":0,"roundWind":0}}}
+{"at":8.5,"confidence":0.8024040050491812,"flags":[],"handIndex":0,"id":1,"kind":{"discard":{"seat":2,"tile":{"dragon":{"_0":1}},"track":{"raw":24}}}}
+{"at":8.5,"confidence":0.669433333495276,"flags":[],"handIndex":0,"id":2,"kind":{"discard":{"seat":3,"tile":{"suited":{"_0":"bamboo","_1":7}},"track":{"raw":25}}}}
+{"at":8.6,"confidence":0.6694333334952758,"flags":[],"handIndex":0,"id":3,"kind":{"discard":{"seat":0,"tile":{"suited":{"_0":"bamboo","_1":1}},"track":{"raw":27}}}}

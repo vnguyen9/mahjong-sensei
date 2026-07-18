@@ -20,6 +20,8 @@ packages:
     path: Packages/ScoringEngine
   EfficiencyEngine:
     path: Packages/EfficiencyEngine
+  CoachEngine:
+    path: Packages/CoachEngine
 
 targets:
   MahjongSensei:
@@ -35,6 +37,7 @@ targets:
       - package: DesignSystem
       - package: ScoringEngine
       - package: EfficiencyEngine
+      - package: CoachEngine
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lumiodatalabs.MahjongSensei
