@@ -4,9 +4,9 @@ import MahjongCore
 import Recognition
 
 /// Manual tile-counter state for Tracker mode (3rd Scan segment, plan §2) — a
-/// running 34-tile "seen" count for the current game. The user aims the
-/// camera at the discards and hits Record; `recordMaxMerge` folds that shot's
-/// detections in. No live/continuous detection — record-triggered only.
+/// running 34-tile "seen" count for the current game. The user frames the
+/// table and hits Record; `recordReplaceFromShot` overwrites counts from that
+/// frame. No live/continuous detection — record-triggered only.
 /// Optionally paired with the user's own hand for real ukeire/win-odds via
 /// the existing engines (`EfficiencyEngine`/`CoachEngine`, wired in a later
 /// chunk). Persisted to disk (`TrackerStore`) so counts survive relaunch;
@@ -15,8 +15,8 @@ import Recognition
 final class TrackerSession {
     /// 34-slot, classIndex-keyed count of tiles seen on the table (discards +
     /// exposed melds) — same convention as `ScanSession.seenHistogram`
-    /// (`ScanFlow.swift:149`), just accumulated across shots instead of
-    /// derived from one recognition.
+    /// (`ScanFlow.swift:149`). Whole-table Record replaces this from one shot
+    /// rather than max-merging across shots.
     var seenHistogram: [Int] = [Int](repeating: 0, count: Tile.baseClassCount)
     /// The user's own hand, if they've chosen to enter one. Empty = none.
     var hand: [Tile] = []
@@ -41,23 +41,22 @@ final class TrackerSession {
         }
     }
 
-    /// Record = "set to max seen" per capture: build a 34-slot histogram of
-    /// this shot's detections (non-bonus only, keyed by `classIndex`), then
-    /// raise (never lower) each slot to that shot's count, clamped to 4 —
-    /// idempotent-ish across repeated shots of the same discards, no
-    /// accumulation double-count. Returns the classIndexes that actually
-    /// changed, for the UI's count-up animation.
+    /// Record = trust this frame: build a 34-slot histogram of this shot's
+    /// detections (non-bonus only, keyed by `classIndex`), clamp each face to
+    /// 0…4, and **replace** the running histogram (including zeroing faces
+    /// not seen). Hand tray is untouched. Returns the classIndexes that
+    /// actually changed, for the UI's count-up animation.
     @discardableResult
-    func recordMaxMerge(_ detections: [DetectedTile]) -> Set<Int> {
+    func recordReplaceFromShot(_ detections: [DetectedTile]) -> Set<Int> {
         var shot = [Int](repeating: 0, count: Tile.baseClassCount)
         for d in detections where !d.tile.isBonus {
             shot[d.tile.classIndex] += 1
         }
         var changed = Set<Int>()
         for i in 0..<Tile.baseClassCount {
-            let merged = min(4, max(seenHistogram[i], shot[i]))
-            if merged != seenHistogram[i] {
-                seenHistogram[i] = merged
+            let next = min(4, shot[i])
+            if next != seenHistogram[i] {
+                seenHistogram[i] = next
                 changed.insert(i)
             }
         }

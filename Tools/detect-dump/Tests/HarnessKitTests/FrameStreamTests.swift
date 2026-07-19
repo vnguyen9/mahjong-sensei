@@ -11,7 +11,7 @@ final class FrameStreamTests: XCTestCase {
     func testHeaderEncodeDecodeRoundTrip() throws {
         let header = FrameStreamHeader(video: "clip.mov", width: 1080, height: 1920,
                                        sourceFPS: 29.97, sampledFPS: 10,
-                                       model: "MahjongTileDetectorPro", threshold: 0.3)
+                                       model: "MahjongTileDetectorNanoV3", threshold: 0.3)
         let line = try FrameStream.line(header)
         XCTAssertTrue(line.last == 0x0A, "each line must be newline-terminated")
 

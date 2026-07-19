@@ -7,6 +7,7 @@ Train **YOLO26n** with Ultralytics on Apple Silicon (MPS) for **Hong Kong–styl
 ```bash
 cd /Users/vumonks/Desktop/mjss
 source .venv/bin/activate
+cd "Image Recognition"
 # pip install -r requirements.txt   # if recreating the venv
 ```
 
@@ -20,6 +21,7 @@ configs/data.yaml              # Ultralytics pointer to merged set
 data/raw/*.yolo26.zip          # Roboflow exports (gitignored)
 data/processed/hk_merged/      # merged YOLO dataset v1 (gitignored)
 data/processed/hk_merged_v2/   # v2 merge + dedupe (gitignored)
+data/processed/hk_merged_v3/   # v3 merge + dedupe (+ v3i/v4i) (gitignored)
 data/exports/*.zip             # Platform upload package (gitignored)
 scripts/merge_hk_dataset.py    # extract + remap + merge (+ optional --dedupe)
 scripts/package_ultralytics_dataset.py  # ZIP for Ultralytics Platform
@@ -58,16 +60,38 @@ A 5-epoch smoke train already reached ~**0.575 mAP50** on val (flowers/`back` st
 
 ## Ultralytics Platform (cloud train)
 
-### Dataset v2 (recommended)
+### Dataset v3 + F/S synthetics (recommended for training)
 
-Rebuild from all Roboflow zips (incl. romanNguyen + bing), remap to 43 HK classes, and drop exact/near-duplicate images:
+v3 merge, then synthetics-only flower/season rebalance (copy-paste crops onto real table scenes; val/test unchanged):
+
+```bash
+cd "Image Recognition"
+python scripts/merge_hk_dataset.py --clean --out data/processed/hk_merged_v3 --dedupe
+python scripts/build_fs_crop_bank.py --clean
+python scripts/synth_fs_copy_paste.py --clean
+python scripts/package_ultralytics_dataset.py \
+  --src data/processed/hk_merged_v3_fsbal \
+  -o data/exports/mjss-hk-mahjong-yolo26-v3-fsbal.zip
+python scripts/train.py   # defaults to fsbal, copy_paste=0.4, cls=0.75
+# Per-class F/S AP: python scripts/compare_fs_ap.py --weights runs/yolo26n-hk-fsbal/weights/best.pt
+```
+
+### Dataset v3 (merge only)
+
+```bash
+python scripts/merge_hk_dataset.py --clean --out data/processed/hk_merged_v3 --dedupe
+python scripts/package_ultralytics_dataset.py \
+  --src data/processed/hk_merged_v3 \
+  -o data/exports/mjss-hk-mahjong-yolo26-v3.zip
+```
+
+### Dataset v2 (previous)
 
 ```bash
 python scripts/merge_hk_dataset.py --clean --out data/processed/hk_merged_v2 --dedupe
 python scripts/package_ultralytics_dataset.py \
   --src data/processed/hk_merged_v2 \
   -o data/exports/mjss-hk-mahjong-yolo26-v2.zip
-# → data/exports/mjss-hk-mahjong-yolo26-v2.zip
 ```
 
 ### Dataset v1 (previous export)
@@ -78,7 +102,7 @@ python scripts/package_ultralytics_dataset.py
 ```
 
 1. Open [Ultralytics Platform](https://platform.ultralytics.com/) → **Annotate** → **New Dataset** (or drag onto Datasets).
-2. Upload `data/exports/mjss-hk-mahjong-yolo26-v2.zip`. Confirm **43 classes** after ingest.
+2. Upload `data/exports/mjss-hk-mahjong-yolo26-v3.zip`. Confirm **43 classes** after ingest.
 3. Start cloud train: **YOLO26n**, imgsz **640**, epochs **~100**. Nano on this set should use only a small slice of ~$25 credits.
 4. Download `best.pt` (and/or export Core ML) when finished.
 
@@ -91,7 +115,7 @@ When training finishes, see **[docs/ios-inference.md](docs/ios-inference.md)** f
 ## Label notes
 
 - Canonical names: Tenhou `m/p/s/z` + `1F–4F` / `1S–4S` + `back`.
-- Source remaps live in `configs/hk_tile_map.yaml` (v83 `B/C/D` → `s/m/p`, roman `bamboo/character/circle`, bing `Nbing`→`Np`, red fives → normal 5s).
+- Source remaps live in `configs/hk_tile_map.yaml` (v83 `B/C/D` → `s/m/p`, bing `Nbing`→`Np`, v3i stick/character/honors, v4i bamboo/character/dot + flowers, red fives → normal 5s). romanNguyen is excluded from the merge.
 - Filenames containing `screenshot` / Soul UI markers are skipped.
 - `--dedupe` uses SHA-256 + pHash (Hamming ≤ 2) across sources.
 - `ref/mahjong_vision` is for later product ideas (board-state / overlay), not for this detector’s classes.

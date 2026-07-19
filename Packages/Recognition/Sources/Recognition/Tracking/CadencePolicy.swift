@@ -24,8 +24,12 @@ import Foundation
 public struct CadencePolicy: Sendable {
     private let config: TrackerConfig
 
-    /// Idle cadence when the scene has been calm for a while (~1 Hz).
-    public var idleInterval: TimeInterval = 1.0
+    /// Idle cadence when the scene has been calm for a while (~0.33 Hz). A
+    /// settled table doesn't change until someone acts, and any motion fires a
+    /// `settleBurst` that re-reads the new state promptly — so idle re-inference
+    /// can be sparse (thermal win). The `ROIScheduler` full-frame safety net
+    /// (~20 s) still bounds staleness.
+    public var idleInterval: TimeInterval = 3.0
     /// Burst cadence while motion is active (~5.5 Hz; inference itself is
     /// 15–30 ms, so drop-if-in-flight rarely binds at this rate).
     public var burstInterval: TimeInterval = 0.18
@@ -43,7 +47,7 @@ public struct CadencePolicy: Sendable {
     /// intervals are deliberately left unscaled at every non-critical tier —
     /// they carry the information a freshly-settled frame needs).
     public var fairMultiplier: Double = 1.5
-    public var seriousIdleInterval: TimeInterval = 2.0
+    public var seriousIdleInterval: TimeInterval = 5.0
     public var seriousBurstInterval: TimeInterval = 0.5
 
     public init(config: TrackerConfig = TrackerConfig()) {

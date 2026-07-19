@@ -12,7 +12,7 @@ import Recognition
 ///
 /// Usage (from the repo root):
 ///   swift run --package-path Tools/detect-dump detect-dump \
-///       [--model App/Sources/Resources/Models/MahjongTileDetector.mlpackage] \
+///       [--model App/Sources/Resources/Models/MahjongTileDetectorNanoV3.mlpackage] \
 ///       [--threshold 0.30] <photo> [<photo> ...]
 @main
 struct DetectDump {
@@ -27,7 +27,7 @@ struct DetectDump {
 
     static func run() async throws {
         var args = Array(CommandLine.arguments.dropFirst())
-        var modelPath = "App/Sources/Resources/Models/MahjongTileDetector.mlpackage"
+        var modelPath = "App/Sources/Resources/Models/MahjongTileDetectorNanoV3.mlpackage"
         var threshold = 0.30
         var photos: [String] = []
         while !args.isEmpty {

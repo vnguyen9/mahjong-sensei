@@ -230,79 +230,7 @@ sources:
       0s: 5s
       # all other names are identity (omit or list explicitly in script)
 
-  roman:
-    zip: Mahjong.v1i.yolo26_romanNguyen.zip
-    extract_dir: Mahjong-v1-roman
-    names:
-      - bamboo_1
-      - bamboo_2
-      - bamboo_3
-      - bamboo_4
-      - bamboo_5
-      - bamboo_6
-      - bamboo_7
-      - bamboo_8
-      - bamboo_9
-      - character_1
-      - character_2
-      - character_3
-      - character_4
-      - character_5
-      - character_6
-      - character_7
-      - character_8
-      - character_9
-      - circle_1
-      - circle_2
-      - circle_3
-      - circle_4
-      - circle_5
-      - circle_6
-      - circle_7
-      - circle_8
-      - circle_9
-      - east
-      - green
-      - north
-      - red
-      - south
-      - west
-      - white
-    remap:
-      bamboo_1: 1s
-      bamboo_2: 2s
-      bamboo_3: 3s
-      bamboo_4: 4s
-      bamboo_5: 5s
-      bamboo_6: 6s
-      bamboo_7: 7s
-      bamboo_8: 8s
-      bamboo_9: 9s
-      character_1: 1m
-      character_2: 2m
-      character_3: 3m
-      character_4: 4m
-      character_5: 5m
-      character_6: 6m
-      character_7: 7m
-      character_8: 8m
-      character_9: 9m
-      circle_1: 1p
-      circle_2: 2p
-      circle_3: 3p
-      circle_4: 4p
-      circle_5: 5p
-      circle_6: 6p
-      circle_7: 7p
-      circle_8: 8p
-      circle_9: 9p
-      east: 1z
-      south: 2z
-      west: 3z
-      north: 4z
-      white: 5z
-      green: 6z
-      red: 7z
+  # roman (Mahjong.v1i.yolo26_romanNguyen.zip) excluded — low label/image quality
 
   bing:
     zip: Mahjong.v1i.yolo26.zip
@@ -335,6 +263,125 @@ sources:
       bai: 5z
       fa: 6z
       zhong: 7z
+
+  # Partial 11-class Roboflow set (specific tiles + honors only).
+  v3i:
+    zip: Mahjong.v3i.yolo26.zip
+    extract_dir: Mahjong-v3i
+    names:
+      - 1stick
+      - 7Character
+      - 9sticks
+      - Dot
+      - bai
+      - east
+      - fa
+      - mid
+      - north
+      - south
+      - west
+    remap:
+      1stick: 1s
+      7Character: 7m
+      9sticks: 9s
+      Dot: 1p  # unlabeled rank in source; treated as 1-dot
+      bai: 5z
+      east: 1z
+      fa: 6z
+      mid: 7z  # zhong / red dragon
+      north: 4z
+      south: 2z
+      west: 3z
+
+  v4i:
+    zip: Mahjong.v4i.yolo26.zip
+    extract_dir: Mahjong-v4i
+    names:
+      - Bambooflower
+      - Chrysanthemumflower
+      - Orchidflower
+      - Plumflower
+      - bamboo1
+      - bamboo2
+      - bamboo3
+      - bamboo4
+      - bamboo5
+      - bamboo6
+      - bamboo7
+      - bamboo8
+      - bamboo9
+      - character1
+      - character2
+      - character3
+      - character4
+      - character5
+      - character6
+      - character7
+      - character8
+      - character9
+      - dot1
+      - dot2
+      - dot3
+      - dot4
+      - dot5
+      - dot6
+      - dot7
+      - dot8
+      - dot9
+      - dragongreen
+      - dragonred
+      - dragonwhite
+      - fallflower
+      - springflower
+      - summerflower
+      - windeast
+      - windnorth
+      - windsouth
+      - windwest
+      - winterflower
+    remap:
+      bamboo1: 1s
+      bamboo2: 2s
+      bamboo3: 3s
+      bamboo4: 4s
+      bamboo5: 5s
+      bamboo6: 6s
+      bamboo7: 7s
+      bamboo8: 8s
+      bamboo9: 9s
+      character1: 1m
+      character2: 2m
+      character3: 3m
+      character4: 4m
+      character5: 5m
+      character6: 6m
+      character7: 7m
+      character8: 8m
+      character9: 9m
+      dot1: 1p
+      dot2: 2p
+      dot3: 3p
+      dot4: 4p
+      dot5: 5p
+      dot6: 6p
+      dot7: 7p
+      dot8: 8p
+      dot9: 9p
+      windeast: 1z
+      windsouth: 2z
+      windwest: 3z
+      windnorth: 4z
+      dragonwhite: 5z
+      dragongreen: 6z
+      dragonred: 7z
+      Plumflower: 1F
+      Orchidflower: 2F
+      Chrysanthemumflower: 3F
+      Bambooflower: 4F
+      springflower: 1S
+      summerflower: 2S
+      fallflower: 3S
+      winterflower: 4S
 
 # Filename / path substrings treated as screen / game-UI (skip image).
 screen_exclude_substrings:

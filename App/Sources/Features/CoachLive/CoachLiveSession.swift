@@ -225,6 +225,91 @@ final class CoachLiveSession: Identifiable {
     /// path) reads as all-zero rather than requiring the HUD to unwrap.
     var trackerDiagnostics: Recognition.TrackerDiagnostics { tracker?.diagnostics ?? Recognition.TrackerDiagnostics() }
 
+    #if DEBUG
+    /// Chunk D (v2.5 §7, Phase C "shadow mode") — the placeholder-model
+    /// `PhysicalCensus` pipeline, run beside (never instead of) the trusted
+    /// v2 `tracker`. Lazily constructed the first time `startARLoop`
+    /// resolves a recognizer post table-lock (see `updateShadowCensus`) —
+    /// `nil` until then, and always `nil` on the mock path (nothing calls
+    /// `updateShadowCensus` there).
+    private var shadowCensus: ShadowCensusEngine?
+    /// A default 0.9m plane-local square stand-in for the real
+    /// `TableCalibrationController`/`CalibratedTable` confirmation flow
+    /// (Chunk C) — wiring the real user-confirmed quad into this loop is a
+    /// later integration; shadow mode only needs SOME calibrated zones to
+    /// exercise the census pipeline. Derived once, lazily, alongside
+    /// `shadowCensus` itself.
+    private var shadowCensusTable: CalibratedTable?
+    /// Debug-HUD-only summary of `shadowCensus.latestSnapshot`
+    /// (`LiveFeedPane.debugHUD`) — never read by any production UI, and
+    /// nothing in `updateShadowCensus` ever writes to `tracker` or any
+    /// other published production property.
+    var shadowCensusSummary: String = "—"
+    /// A/B escape hatch mirroring `useROIScheduler` — flips the shadow
+    /// census off without touching the trusted v2 loop at all. Default OFF:
+    /// the shadow pass runs the locator per zone PLUS the 43-class classifier
+    /// once per tile crop (≤40) every settle tick — a ~45×-inference thermal
+    /// multiplier on top of the production tracker. Toggle on only for A/B.
+    var runShadowCensus = false
+
+    /// The real Stage-1 locator: the bundled single-class `tile` model
+    /// (`MahjongTileLocatorV3`), loaded once and shared by the census engine.
+    /// `PrototypeLocator` keeps only its box + confidence, so a one-class
+    /// model works through the same seam as the 43-class placeholder. Nil
+    /// until the first `updateShadowCensus`; falls back to the caller's
+    /// 43-class recognizer if the locator model isn't bundled (see
+    /// `resolveLocatorRecognizer`).
+    private var shadowLocatorRecognizer: (any Recognizer)?
+    /// True once we've attempted to load `shadowLocatorRecognizer` (so a
+    /// failed/absent load falls back to the 43-class recognizer exactly once
+    /// rather than re-attempting the bundle lookup every frame).
+    private var shadowLocatorResolved = false
+
+    /// User-confirmed table from the DEBUG calibration flow (Chunk C).
+    /// Preferred by `updateShadowCensus` over `makeDefaultShadowCensusTable()`;
+    /// nil until the user confirms, so the census stays green off the square.
+    private var confirmedShadowCensusTable: CalibratedTable?
+    /// Drives the DEBUG-only calibration cover in `CoachLiveView`. Set once on
+    /// table lock (in `startARLoop`), cleared on confirm/rescan. `Identifiable`
+    /// so `.fullScreenCover(item:)` can carry the locked-plane snapshot the
+    /// view needs without publishing the raw transform separately.
+    var shadowCalibrationRequest: ShadowCalibrationRequest?
+
+    struct ShadowCalibrationRequest: Identifiable {
+        let id = UUID()
+        let lockedPlaneTransform: simd_float4x4
+    }
+
+    /// Drives the DEBUG ARKit-native calibration cover (`ARCalibrationView`).
+    /// The calibration screen runs its OWN self-contained ARKit session, so we
+    /// pause `arCapture` while it's up to avoid two live `ARSession`s. On
+    /// confirm it sets `calibratedTableGeometry`, which the NEXT `.tableSpace`
+    /// tracker build consumes (calibrate before lock, or after a rescan).
+    var showARCalibration = false
+
+    @MainActor
+    func beginARCalibration() {
+        arCapture?.pause()
+        showARCalibration = true
+    }
+
+    @MainActor
+    func finishARCalibration(_ geometry: TrackerConfig.TableGeometry?) {
+        if let geometry { calibratedTableGeometry = geometry }
+        showARCalibration = false
+        arCapture?.resume()
+    }
+    #endif
+
+    /// User-confirmed table geometry from the ARKit-native calibration flow
+    /// (`ARCalibrationView`). `TableGeometry`'s three scalars are orientation-
+    /// normalized (extent in metres, hand-band depth / pond radius as fractions),
+    /// so a geometry captured during calibration transfers cleanly onto the play
+    /// loop's own plane lock. `nil` → the tracker build uses the default square
+    /// geometry, so the flow stays green before any calibration. Consumed once,
+    /// at the `.tableSpace` tracker build in `startARLoop`.
+    var calibratedTableGeometry: TrackerConfig.TableGeometry?
+
     /// Mirrors key pipeline transitions to Console.app (subsystem matches the
     /// bundle id) — plan §3: works even off a connected debugger.
     private static let logger = Logger(subsystem: "com.lumiodatalabs.MahjongSensei", category: "coachlive")
@@ -675,7 +760,9 @@ final class CoachLiveSession: Identifiable {
                         ScoringEngine.isWinningShape(Hand(concealedTiles: concealed, melds: melds))
                     }
                     config.coordinateSpace = .tableSpace
-                    config.tableGeometry = TrackerConfig.TableGeometry()
+                    // Prefer the user's ARKit-calibrated geometry; fall back to
+                    // the default square so the flow stays green pre-calibration.
+                    config.tableGeometry = self.calibratedTableGeometry ?? TrackerConfig.TableGeometry()
                     self.trackerConfig = config
 
                     let newTracker = TableTracker(config: config)
@@ -695,6 +782,19 @@ final class CoachLiveSession: Identifiable {
                     self.zoneLastPromptedAt = [:]
                     self.rescanPrompt = nil
                     arCapture.enterSweeping()
+
+                    #if DEBUG
+                    // Chunk C: on first lock, offer the DEBUG shadow-census
+                    // calibration cover (`CoachLiveView`). One-shot — this
+                    // whole block runs once, when `tracker` goes non-nil.
+                    // Shadow-only: it never gates the production sweep/tracker.
+                    if self.runShadowCensus,
+                       self.confirmedShadowCensusTable == nil,
+                       self.shadowCalibrationRequest == nil,
+                       let locked = arCapture.lockedPlaneTransform {
+                        self.shadowCalibrationRequest = ShadowCalibrationRequest(lockedPlaneTransform: locked)
+                    }
+                    #endif
 
                     let sessionStart = CACurrentMediaTime()
                     self.zoneTrackingStartedAt = sessionStart
@@ -1014,6 +1114,15 @@ final class CoachLiveSession: Identifiable {
                         // `visibleRegion` gate.
                         let outcome = tracker.ingest(projected, at: CACurrentMediaTime(), motion: sample)
                         self.logAndSnapshot(outcome, frame: frame.pixelBuffer, tracker: tracker)
+                        #if DEBUG
+                        // Chunk D shadow census (v2.5 §7, Phase C) — full-
+                        // frame/settle ticks only, never the ROI-crop path
+                        // below; awaited AFTER the trusted v2 ingest above
+                        // so a slow/broken shadow pass can never delay or
+                        // disrupt it.
+                        await self.updateShadowCensus(recognizer: rec, frame: frame, planeTransform: planeTransform,
+                                                      trackingNormal: arCapture.captureStage != .relocalizing)
+                        #endif
 
                     case let .crops(rects):
                         // Cap 2 crops/tick (thermal/latency budget) even
@@ -1900,6 +2009,115 @@ final class CoachLiveSession: Identifiable {
             lastFrameSnapshot = ScanView.photo(from: buffer)
         }
     }
+
+    #if DEBUG
+    /// Chunk D shadow pass (v2.5 §7) — runs the placeholder-model census
+    /// pipeline for one already-resolved recognizer/frame, fire-and-forget
+    /// from `startARLoop`'s full-frame/settle ticks only. `recognizer` is
+    /// the SAME instance the v2 loop just resolved (never re-resolves its
+    /// own — `recognizerProvider()` may not be cheap to call twice).
+    /// `ShadowCensusEngine.observe` never throws, so no `do/catch` is
+    /// needed here to protect the caller — any internal failure is folded
+    /// into the engine's own `PhysicalCensus` (§8), never propagated.
+    /// Touches only shadow state (`shadowCensus`/`shadowCensusTable`/
+    /// `shadowCensusSummary`/`shadowLocator*`/`confirmedShadowCensusTable`)
+    /// — never `tracker` or any other published production state.
+    /// `@MainActor` (matching `ShadowCensusEngine` itself, and the
+    /// `Task { @MainActor in ... }` this is always called from) so the
+    /// compiler can statically verify same-actor access to `shadowCensus`'s
+    /// state without an extra `await` hop.
+    @MainActor
+    private func updateShadowCensus(recognizer: any Recognizer, frame: ARTableFrame,
+                                    planeTransform: simd_float4x4, trackingNormal: Bool) async {
+        guard runShadowCensus else { return }
+        if shadowCensus == nil {
+            // Stage 1 = the real single-class locator (falls back to the
+            // 43-class `recognizer` if unbundled); Stage 2 = the 43-class
+            // placeholder classifier. One-line swap the code always advertised.
+            let locatorRecognizer = await resolveLocatorRecognizer(fallback: recognizer)
+            shadowCensus = ShadowCensusEngine(locatorRecognizer: locatorRecognizer,
+                                              classifierRecognizer: recognizer)
+        }
+        if shadowCensusTable == nil { shadowCensusTable = Self.makeDefaultShadowCensusTable() }
+        // Prefer the user-confirmed calibration quad; the default square keeps
+        // the pipeline exercised before (or without) any confirmation.
+        let table = confirmedShadowCensusTable ?? shadowCensusTable
+        guard let shadowCensus, let table else { return }
+        await shadowCensus.observe(frame: frame, planeTransform: planeTransform, table: table,
+                                   trackingNormal: trackingNormal, at: CACurrentMediaTime())
+        shadowCensusSummary = Self.shadowCensusSummaryText(shadowCensus.latestSnapshot)
+    }
+
+    /// Load the bundled single-class locator once, off the main actor, and
+    /// cache it. Returns `fallback` (the already-resolved 43-class recognizer)
+    /// if the locator model isn't bundled or won't load — so the census still
+    /// runs (through the placeholder locator) rather than going dark.
+    @MainActor
+    private func resolveLocatorRecognizer(fallback: any Recognizer) async -> any Recognizer {
+        if shadowLocatorResolved { return shadowLocatorRecognizer ?? fallback }
+        shadowLocatorResolved = true
+        let loaded = await Task.detached(priority: .userInitiated) {
+            (try? VisionRecognizer(bundledModelNamed: "MahjongTileLocatorV3")) as (any Recognizer)?
+        }.value
+        if loaded != nil {
+            Self.logger.notice("shadow census: single-class locator loaded (MahjongTileLocatorV3)")
+        } else {
+            Self.logger.notice("shadow census: locator model unbundled — falling back to 43-class recognizer")
+        }
+        shadowLocatorRecognizer = loaded
+        return loaded ?? fallback
+    }
+
+    /// Store the user-confirmed calibration quad and dismiss the cover.
+    @MainActor
+    func confirmShadowCensusTable(_ table: CalibratedTable) {
+        confirmedShadowCensusTable = table
+        shadowCalibrationRequest = nil
+    }
+
+    /// "Rescan": drop the confirmation and re-present a fresh (default-square)
+    /// calibration against the SAME locked plane — plane detection is off
+    /// post-lock, so the transform is stable and there's nothing to re-lock.
+    @MainActor
+    func rescanShadowCalibration() {
+        confirmedShadowCensusTable = nil
+        if let locked = arCapture?.lockedPlaneTransform {
+            shadowCalibrationRequest = ShadowCalibrationRequest(lockedPlaneTransform: locked)
+        }
+    }
+
+    @MainActor
+    func dismissShadowCalibration() { shadowCalibrationRequest = nil }
+
+    /// The census's default-square seed, re-exposed for `TableCalibrationView`'s
+    /// `initialTable` so the view and the `updateShadowCensus` fallback can
+    /// never drift apart.
+    static func debugDefaultShadowCensusTable() -> CalibratedTable { makeDefaultShadowCensusTable() }
+
+    /// A 0.9m plane-local square centered at the table anchor's origin,
+    /// corners near-left/near-right/far-right/far-left with +Z toward the
+    /// user — `TableQuadProposal.Proposal`'s own winding/axis convention
+    /// (see that type's doc), which is what `CalibratedTable.defaultZones`
+    /// expects. Stands in for the real Chunk C calibration UX (see
+    /// `shadowCensusTable`'s doc).
+    private static func makeDefaultShadowCensusTable() -> CalibratedTable {
+        let half: Float = 0.45
+        let corners: [SIMD2<Float>] = [SIMD2(-half, half), SIMD2(half, half), SIMD2(half, -half), SIMD2(-half, -half)]
+        // A 4-element corners array always constructs successfully —
+        // `CalibratedTable.init?(corners:)` only fails on a different count.
+        guard let table = CalibratedTable(corners: corners) else {
+            fatalError("CalibratedTable(corners:) with exactly 4 corners must succeed")
+        }
+        return table
+    }
+
+    private static func shadowCensusSummaryText(_ snapshot: Recognition.CensusSnapshot?) -> String {
+        guard let snapshot else { return "—" }
+        let coverages = snapshot.coverage.values
+        let avgCoveragePercent = coverages.isEmpty ? 0 : Int((coverages.reduce(0, +) / Float(coverages.count)) * 100)
+        return "MINE \(snapshot.mine.total) · TABLE \(snapshot.table.total) · unres \(snapshot.unresolved.count) · cov \(avgCoveragePercent)%"
+    }
+    #endif
 
     /// One projected UI event, plus the pond track it references (for a tile fix).
     private struct ProjectedEvent {

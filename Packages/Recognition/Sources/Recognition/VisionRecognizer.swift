@@ -29,7 +29,7 @@ public struct VisionRecognizer: Recognizer {
     /// Load the bundled compiled detector (`<name>.mlmodelc`). Throws
     /// ``RecognizerError/modelNotFound(_:)`` when the resource is absent — callers
     /// use `try?` to fall back to ``MockRecognizer`` before the model is bundled.
-    public init(bundledModelNamed name: String = "MahjongTileDetector",
+    public init(bundledModelNamed name: String = "MahjongTileDetectorNanoV3",
                 in bundle: Bundle = .main,
                 confidenceThreshold: Double = 0.30) throws {
         guard let url = bundle.url(forResource: name, withExtension: "mlmodelc") else {
@@ -200,5 +200,113 @@ extension RecognizerFrame {
         case let .pixelBuffer(buffer, orientation):
             return VNImageRequestHandler(cvPixelBuffer: buffer, orientation: orientation, options: [:])
         }
+    }
+}
+
+// MARK: - Raw box detection (retains `back`/unmapped boxes for the v2.5 locator)
+
+/// One raw detector box: geometry + confidence + the model's own label
+/// string, independent of whether that label maps to a playable ``Tile``.
+/// The trusted Scan-Score path (``Recognizer/recognize(_:)``) intentionally
+/// drops `back` (face-down) and unrecognized labels because
+/// ``DetectedTile/tile`` is not optional; the v2.5 locator needs every
+/// physical tile, face-down or not, so it reads this parallel, additive
+/// decode path instead.
+public struct RawTileDetection: Sendable, Hashable {
+    public var label: String
+    public var confidence: Double
+    public var box: TileBoundingBox
+
+    public init(label: String, confidence: Double, box: TileBoundingBox) {
+        self.label = label
+        self.confidence = confidence
+        self.box = box
+    }
+}
+
+/// Recognizers that can additionally expose every raw detector box, including
+/// ones whose label has no ``Tile`` mapping (`back`). The v2.5 prototype
+/// locator/classifier adapters look for this via `as?` and fall back to the
+/// plain ``Recognizer/recognize(_:)`` path (which cannot see `back`) when a
+/// wrapped recognizer doesn't implement it — e.g. ``MockRecognizer`` in tests.
+public protocol RawBoxDetecting: Sendable {
+    func detectRawBoxes(_ frame: RecognizerFrame) async throws -> [RawTileDetection]
+}
+
+extension VisionRecognizer: RawBoxDetecting {
+    /// Same inference call as ``recognize(_:)``, decoded WITHOUT dropping
+    /// boxes whose label has no ``Tile`` mapping (`back`). ``recognize(_:)``
+    /// itself is untouched — this is a fully additive decode path sharing the
+    /// same model, threshold, and letterbox geometry.
+    public func detectRawBoxes(_ frame: RecognizerFrame) async throws -> [RawTileDetection] {
+        let model = self.model
+        let threshold = self.confidenceThreshold
+        let geometry = LetterboxGeometry(orientedImageSize: frame.orientedPixelSize)
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let request = VNCoreMLRequest(model: model)
+                    request.imageCropAndScaleOption = .scaleFit
+                    try frame.makeHandler().perform([request])
+                    let raw = VisionRecognizer.decodeRawBoxes(from: request.results,
+                                                               threshold: threshold, geometry: geometry)
+                    continuation.resume(returning: raw)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Pull the raw output tensor and decode every row above `threshold`,
+    /// regardless of whether its label maps to a ``Tile`` (mirrors
+    /// ``decodeTiles(from:threshold:geometry:)`` but keeps `back`).
+    static func decodeRawBoxes(from results: [VNObservation]?, threshold: Double,
+                               geometry: LetterboxGeometry) -> [RawTileDetection] {
+        guard let array = results?
+            .lazy
+            .compactMap({ ($0 as? VNCoreMLFeatureValueObservation)?.featureValue.multiArrayValue })
+            .first else { return [] }
+        return decodeRawBoxes(from: array, threshold: threshold, geometry: geometry)
+    }
+
+    static func decodeRawBoxes(from array: MLMultiArray, threshold: Double,
+                               geometry: LetterboxGeometry) -> [RawTileDetection] {
+        guard array.shape.count == 3, array.shape[2].intValue >= 6 else { return [] }
+        let rows = array.shape[1].intValue
+        let rowStride = array.strides[1].intValue
+        let colStride = array.strides[2].intValue
+
+        var raw: [RawTileDetection] = []
+        array.withUnsafeBufferPointer(ofType: Float32.self) { buf in
+            for i in 0..<rows {
+                let row = i * rowStride
+                let confidence = Double(buf[row + 4 * colStride])
+                guard confidence >= threshold else { continue }
+                let classIndex = Int(buf[row + 5 * colStride].rounded())
+                guard classIndex >= 0, classIndex < HKDetectorLabels.ordered.count else { continue }
+                let label = HKDetectorLabels.ordered[classIndex]
+                let box = geometry.normalizedBox(
+                    x1: Double(buf[row + 0 * colStride]), y1: Double(buf[row + 1 * colStride]),
+                    x2: Double(buf[row + 2 * colStride]), y2: Double(buf[row + 3 * colStride]))
+                raw.append(RawTileDetection(label: label, confidence: confidence, box: box))
+            }
+        }
+        return suppressingRawOverlaps(raw)
+    }
+
+    /// Same class-agnostic greedy NMS as ``suppressingOverlaps(_:iouThreshold:)``,
+    /// operating on ``RawTileDetection`` so `back` boxes get the identical
+    /// duplicate-suppression treatment as mapped ones.
+    static func suppressingRawOverlaps(_ detections: [RawTileDetection],
+                                       iouThreshold: Double = 0.55) -> [RawTileDetection] {
+        let ranked = detections.sorted {
+            $0.confidence != $1.confidence ? $0.confidence > $1.confidence : $0.box.x < $1.box.x
+        }
+        var kept: [RawTileDetection] = []
+        for detection in ranked where kept.allSatisfy({ iou($0.box, detection.box) <= iouThreshold }) {
+            kept.append(detection)
+        }
+        return kept
     }
 }

@@ -314,6 +314,14 @@ struct LiveFeedPane: View {
             Text("rec: \(session.diagnostics.recognizerType) · mode \(session.arCapture != nil && !session.usingFallbackCapture ? "AR" : "2D")")
             Text(session.diagnostics.roiPlan)
             Text("err(\(session.recognizerErrorCount)): \(session.lastPipelineError ?? "—")")
+            #if DEBUG
+            Text("census: \(session.shadowCensusSummary)")
+            let geo = session.calibratedTableGeometry
+            Text("cal: \(geo.map { String(format: "ext %.2f · band %.2f · pond %.2f", $0.extent, $0.handBandDepth, $0.pondRadius) } ?? "—")")
+            Button("Calibrate table (AR)") { session.beginARCalibration() }
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(MJColor.cream(1))
+            #endif
         }
         .font(.system(size: 10, design: .monospaced))
         .foregroundStyle(MJColor.cream(0.9))

@@ -10,10 +10,12 @@ final class CadenceMotionTests: XCTestCase {
 
     // MARK: - CadencePolicy
 
-    func testIdleCadenceIsRoughlyOneHertz() {
+    func testIdleCadenceUsesIdleInterval() {
         var policy = CadencePolicy()
-        XCTAssertEqual(policy.decide(motionLevel: 0, thermal: .nominal, timeSinceLastInference: 0.5), .skip)
-        XCTAssertEqual(policy.decide(motionLevel: 0, thermal: .nominal, timeSinceLastInference: 1.0), .infer)
+        // Relaxed idle cadence: infer only once a full `idleInterval` has passed
+        // with no motion (asserted symbolically so it tracks the tuned value).
+        XCTAssertEqual(policy.decide(motionLevel: 0, thermal: .nominal, timeSinceLastInference: policy.idleInterval / 2), .skip)
+        XCTAssertEqual(policy.decide(motionLevel: 0, thermal: .nominal, timeSinceLastInference: policy.idleInterval), .infer)
     }
 
     func testMotionAboveActiveSwitchesToBurstCadence() {

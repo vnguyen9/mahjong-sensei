@@ -133,18 +133,21 @@ struct ScanView: View {
         switch mode {
         case .score:   return "Lay your hand flat, face-up"
         case .lookup:  return "Point the camera at one tile"
-        case .tracker: return "Aim at the discards, then Record"
+        case .tracker: return "Frame the table, then Record"
         }
     }
 
     /// The viewfinder window (and, in Score, the capture crop) size per mode. A
     /// hand laid flat is a long horizontal strip, so Score gets a wide, short band
     /// spanning nearly the screen; Lens frames a single tile, so it stays tight.
-    /// Tracker reuses Score's wide band — it's framing a spread-out discard pile.
+    /// Tracker gets a near–full-frame window so a 0.5× whole-table shot (hand +
+    /// pond) fits in one Record.
     private func reticleSize(for mode: ScanMode, in screen: CGSize) -> CGSize {
         switch mode {
-        case .score, .tracker: return CGSize(width: max(240, screen.width - 32), height: 132)
-        case .lookup:          return CGSize(width: 280, height: 150)
+        case .score:   return CGSize(width: max(240, screen.width - 32), height: 132)
+        case .tracker: return CGSize(width: max(240, screen.width - 32),
+                                     height: min(screen.height * 0.58, screen.height - 320))
+        case .lookup:  return CGSize(width: 280, height: 150)
         }
     }
 

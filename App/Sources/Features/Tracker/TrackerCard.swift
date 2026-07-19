@@ -30,6 +30,9 @@ struct TrackerCard: View {
     /// Tiles this shot's Record just changed — flashed via `TileCountGrid`'s
     /// gold highlight ring for a moment, then cleared (nice-to-have per plan).
     @State private var justChanged: Set<Tile> = []
+    /// Deduped tile count from the latest Record — shown briefly so overcount
+    /// is obvious without drawing detection boxes.
+    @State private var shotReadout: String?
 
     private var tracker: TrackerSession { coordinator.tracker }
 
@@ -86,7 +89,7 @@ struct TrackerCard: View {
         VStack(spacing: 10) {
             HStack(spacing: 8) {
                 Circle().fill(MJColor.gold).frame(width: 6, height: 6)
-                Text(isBusy ? "Reading discards…" : "Aim at the discards")
+                Text(recordStatusText)
                     .font(MJFont.ui(12, weight: .semibold))
                     .foregroundStyle(MJColor.cream(0.85))
             }
@@ -123,9 +126,15 @@ struct TrackerCard: View {
         }
     }
 
+    private var recordStatusText: String {
+        if isBusy { return "Reading the table…" }
+        if let shotReadout { return shotReadout }
+        return "Frame the table"
+    }
+
     /// Recognizes the latest live frame within the reticle band via the
     /// tiled native-res recognizer (`ScanCoordinator.recordScan`, chunk 1) and
-    /// folds it into the tracker's running counts. A no-op if there's no live
+    /// replaces the tracker's counts from that shot. A no-op if there's no live
     /// buffer yet (e.g. the Simulator, or before the camera warms up) — "Test
     /// with a photo" below is the fallback path there.
     private func recordTapped() {
@@ -141,7 +150,7 @@ struct TrackerCard: View {
                                                              orientedImageSize: orientedSize)
             }
             let detections = await coordinator.recordScan(buffer: buffer, roi: roi)
-            apply(coordinator.tracker.recordMaxMerge(detections))
+            commit(detections)
         }
     }
 
@@ -155,10 +164,29 @@ struct TrackerCard: View {
                   let image = UIImage(data: data), let cgImage = image.cgImage else { return }
             let orientation = CGImagePropertyOrientation(image.imageOrientation)
             isBusy = true
-            let detections = await coordinator.recognizeAllTiles(frame: .image(cgImage, orientation: orientation))
+            let detections = TiledTileRecognizer.accepting(
+                await coordinator.recognizeAllTiles(frame: .image(cgImage, orientation: orientation)))
             isBusy = false
-            apply(coordinator.tracker.recordMaxMerge(detections))
+            commit(detections)
             photoItem = nil
+        }
+    }
+
+    /// Replace histogram from this shot, flash changed faces, and show
+    /// `Found N tiles this shot` briefly.
+    private func commit(_ detections: [DetectedTile]) {
+        let faceUp = detections.filter { !$0.tile.isBonus }
+        showShotReadout(count: faceUp.count)
+        apply(coordinator.tracker.recordReplaceFromShot(detections))
+    }
+
+    private func showShotReadout(count: Int) {
+        shotReadout = "Found \(count) tiles this shot"
+        Task {
+            try? await Task.sleep(for: .milliseconds(1500))
+            if shotReadout == "Found \(count) tiles this shot" {
+                shotReadout = nil
+            }
         }
     }
 

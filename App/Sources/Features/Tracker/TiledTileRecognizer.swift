@@ -14,15 +14,29 @@ import Recognition
 /// the same crop → recognize → map-back → dedupe chain.
 enum TiledTileRecognizer {
     /// Grid dimensions — device-tunable constants (plan calls for real-device
-    /// QA to retune these against a live discard pile; start 2×3).
-    static let gridCols = 2
-    static let gridRows = 3
+    /// QA to retune these against a live whole-table shot; 3×4 keeps far tiles
+    /// sharp once the Tracker ROI grew to near full-frame).
+    static let gridCols = 3
+    static let gridRows = 4
     /// Fractional padding each grid cell is grown by (of its own width/height,
     /// on every side) before cropping — fed straight into `ROICropMapper
     /// .cropRect`'s own `padding` param, same convention it already uses for
     /// AR zone rects. This is what makes adjacent crops overlap, so a tile
     /// straddling a cell boundary still lands whole in at least one of them.
     static let overlap = 0.15
+    /// Same bar as What’s-this? lookup — whole-table FOV + dense tiling needs
+    /// a higher gate than the detector’s raw 0.30 default or wood/shadow FPs
+    /// flood the count grid.
+    static let confidenceThreshold = 0.5
+    /// Normalized oriented-frame area band for a plausible single tile.
+    static let minBoxArea = 0.0008
+    static let maxBoxArea = 0.08
+    /// Cross-crop NMS IoU — lower than the old 0.5 so the same physical tile
+    /// seen in overlapping padded cells merges more aggressively.
+    static let iouThreshold = 0.3
+    /// Same-class near-duplicate: drop if centers are within this fraction of
+    /// the larger box’s diagonal (catches IoU-just-under-threshold pairs).
+    static let sameClassCenterFraction = 0.6
 
     /// Reused across calls — constructing a `CIContext` per crop is
     /// expensive (see `PixelBufferCropper`'s own doc).
@@ -60,10 +74,20 @@ enum TiledTileRecognizer {
             // Fallback: a single full-frame recognize, filtered to roi — never
             // worse than today's non-tiled path.
             let result = await recognize(RecognizerFrame.buffer(buffer, orientation: .right))
-            return result.keepingTiles(insideROI: roi).tiles
+            return accepting(result.keepingTiles(insideROI: roi).tiles)
         }
 
-        return deduplicatingOverlaps(merged)
+        return accepting(deduplicatingOverlaps(merged))
+    }
+
+    /// Confidence + box-area gate — used after tiled NMS and on the photo
+    /// single-pass path so both Record entry points share the same bar.
+    static func accepting(_ tiles: [DetectedTile]) -> [DetectedTile] {
+        tiles.filter { det in
+            guard det.confidence >= confidenceThreshold else { return false }
+            let area = det.box.width * det.box.height
+            return area >= minBoxArea && area <= maxBoxArea
+        }
     }
 
     /// A plain, non-overlapping `gridCols`×`gridRows` partition of `region`
@@ -86,19 +110,22 @@ enum TiledTileRecognizer {
         return cells
     }
 
-    // MARK: - Dedupe (greedy class-agnostic NMS)
+    // MARK: - Dedupe (greedy class-agnostic NMS + same-class center rule)
 
     /// De-duplicates detections that came from overlapping grid crops — the
     /// same physical tile can land in more than one crop's padded region.
-    /// Greedy NMS: rank by confidence, keep a box only if it doesn't overlap
-    /// (IoU ≥ 0.5) any box already kept. A small App-side reimplementation of
-    /// `CoachLiveSession.deduplicatingOverlaps`/`boxIoU` (not shared/imported
-    /// — Tracker doesn't depend on CoachLive).
-    private static func deduplicatingOverlaps(_ tiles: [DetectedTile], iouThreshold: Double = 0.5) -> [DetectedTile] {
+    /// Greedy NMS by confidence, then a same-class center-distance rule for
+    /// near-duplicates whose IoU sits just under `iouThreshold`.
+    private static func deduplicatingOverlaps(_ tiles: [DetectedTile]) -> [DetectedTile] {
         let ranked = tiles.sorted { $0.confidence > $1.confidence }
         var kept: [DetectedTile] = []
-        for tile in ranked where kept.allSatisfy({ boxIoU($0.box, tile.box) < iouThreshold }) {
-            kept.append(tile)
+        for tile in ranked {
+            let isDuplicate = kept.contains { existing in
+                if boxIoU(existing.box, tile.box) >= Self.iouThreshold { return true }
+                guard existing.tile == tile.tile else { return false }
+                return centersNear(existing.box, tile.box, fraction: sameClassCenterFraction)
+            }
+            if !isDuplicate { kept.append(tile) }
         }
         return kept
     }
@@ -109,5 +136,14 @@ enum TiledTileRecognizer {
         let intersection = interW * interH
         let union = a.width * a.height + b.width * b.height - intersection
         return union > 0 ? intersection / union : 0
+    }
+
+    /// True when box centers are within `fraction` of the larger box’s diagonal.
+    private static func centersNear(_ a: TileBoundingBox, _ b: TileBoundingBox, fraction: Double) -> Bool {
+        let dx = a.centerX - b.centerX
+        let dy = a.centerY - b.centerY
+        let dist = (dx * dx + dy * dy).squareRoot()
+        let largerDiag = max(hypot(a.width, a.height), hypot(b.width, b.height))
+        return largerDiag > 0 && dist <= fraction * largerDiag
     }
 }

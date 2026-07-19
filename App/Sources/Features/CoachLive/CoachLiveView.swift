@@ -139,6 +139,36 @@ struct CoachLiveView: View {
             breathing.autoTarget(for: session.phase, animated: false)
         }
         .sheet(item: $sheet) { sheetContent($0) }
+        #if DEBUG
+        // Chunk C (shadow-only): after the AR plane locks, present the table
+        // calibration cover so the DEBUG census runs off a real user-confirmed
+        // quad instead of the default square. Full-screen (not a sheet) so its
+        // corner-handle geometry owns hit-testing.
+        .fullScreenCover(item: Binding(
+            get: { session.shadowCalibrationRequest },
+            set: { if $0 == nil { session.dismissShadowCalibration() } }
+        )) { request in
+            if let arCapture = session.arCapture {
+                TableCalibrationView(
+                    capture: arCapture,
+                    lockedPlaneTransform: request.lockedPlaneTransform,
+                    initialTable: CoachLiveSession.debugDefaultShadowCensusTable(),
+                    onConfirm: { session.confirmShadowCensusTable($0) },
+                    onRescan: { session.rescanShadowCalibration() })
+            }
+        }
+        // ARKit-native table calibration (grey grid + coaching overlay +
+        // point/tap zone marks) — its own self-contained session; produces the
+        // TableGeometry the next tracker build uses.
+        .fullScreenCover(isPresented: Binding(
+            get: { session.showARCalibration },
+            set: { if !$0 { session.finishARCalibration(nil) } }
+        )) {
+            ARCalibrationView(
+                onComplete: { session.finishARCalibration($0) },
+                onCancel: { session.finishARCalibration(nil) })
+        }
+        #endif
         .confirmationDialog("End the live session?", isPresented: $showExitConfirm, titleVisibility: .visible) {
             Button("End session", role: .destructive, action: onExit)
             Button("Keep watching", role: .cancel) {}

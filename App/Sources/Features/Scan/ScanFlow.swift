@@ -18,33 +18,27 @@ enum ScanMode: Hashable { case score, lookup, tracker }
 /// ``VisionRecognizer``. Surfaced only by the Debug-only model switcher in
 /// Settings; production selects via the fast/accurate pair on ``TileDetector``.
 enum DetectorModel: String, CaseIterable, Identifiable {
-    case nanoV1   = "MahjongTileDetector"          // mjss-yolo26n  — small & fast
-    case nanoV3   = "MahjongTileDetectorNanoV3"    // mjss-n-v3     — new nano
-    case smallV3  = "MahjongTileDetectorSmallV3"   // mjss-s-v3     — new small
-    case mediumV3 = "MahjongTileDetectorMediumV3"  // mjss-m-v3     — new medium
-    case largeV2  = "MahjongTileDetectorPro"       // mjss-yolo26l  — the shipping accurate model
-    case largeV3  = "MahjongTileDetectorProV3"     // mjss-l-v3     — new large, under evaluation
+    case nanoV3   = "MahjongTileDetectorNanoV3"    // mjss-n-v3  — default (small & fast)
+    case smallV3  = "MahjongTileDetectorSmallV3"   // mjss-s-v3  — balanced
+    case mediumV3 = "MahjongTileDetectorMediumV3"  // mjss-m-v3  — more accurate
+    case largeV3  = "MahjongTileDetectorProV3"     // mjss-l-v3  — most accurate (opt-in)
 
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .nanoV1:   return "Nano v1"
         case .nanoV3:   return "Nano v3"
         case .smallV3:  return "Small v3"
         case .mediumV3: return "Medium v3"
-        case .largeV2:  return "Large v2"
         case .largeV3:  return "Large v3"
         }
     }
     /// One-line descriptor shown under the label in the model-selection screen.
     var subtitle: String {
         switch self {
-        case .nanoV1:   return "Small & fast"
-        case .nanoV3:   return "Small & fast · new"
-        case .smallV3:  return "Balanced · new"
-        case .mediumV3: return "More accurate · new"
-        case .largeV2:  return "Accurate · shipping default"
-        case .largeV3:  return "Accurate · under evaluation"
+        case .nanoV3:   return "Small & fast · default"
+        case .smallV3:  return "Balanced"
+        case .mediumV3: return "More accurate"
+        case .largeV3:  return "Most accurate"
         }
     }
 }
@@ -57,21 +51,23 @@ enum DetectorModel: String, CaseIterable, Identifiable {
 enum TileDetector {
     static let defaultsKey = "prefersHighAccuracy"
     /// Compiled-resource base names (`<name>.mlmodelc` in the app bundle).
-    static let fastModel = DetectorModel.nanoV1.rawValue
-    static let accurateModel = DetectorModel.largeV2.rawValue
+    /// Nano v3 is the universal default (thermal/speed); the larger v3 model is
+    /// opt-in via the "Higher accuracy" toggle.
+    static let fastModel = DetectorModel.nanoV3.rawValue
+    static let accurateModel = DetectorModel.largeV3.rawValue
 
-    /// Unset → true (accurate) so fresh installs and test builds get the big model.
+    /// Unset → false (nano v3) so fresh installs default to the light, cool model.
     static var prefersHighAccuracy: Bool {
-        get { UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true }
+        get { UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? false }
         set { UserDefaults.standard.set(newValue, forKey: defaultsKey) }
     }
 
     /// Dev-only detector override (Debug builds only). Persisted like
-    /// `prefersHighAccuracy`; unset → `.largeV2`, the same model production defaults
-    /// to, so behavior is unchanged until a developer picks another.
+    /// `prefersHighAccuracy`; unset (or naming a removed model) → `.nanoV3`, the
+    /// universal default, so behavior is unchanged until a developer picks another.
     static let devModelKey = "devDetectorModel"
     static var devModel: DetectorModel {
-        get { DetectorModel(rawValue: UserDefaults.standard.string(forKey: devModelKey) ?? "") ?? .largeV2 }
+        get { DetectorModel(rawValue: UserDefaults.standard.string(forKey: devModelKey) ?? "") ?? .nanoV3 }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: devModelKey) }
     }
 
@@ -375,7 +371,7 @@ final class ScanCoordinator {
     /// `TiledTileRecognizer`'s overlapping native-resolution grid (never
     /// feeds the whole frame straight to the model — see that type's doc),
     /// merges/dedupes across crops, and returns the result for the caller to
-    /// fold into `tracker.recordMaxMerge`.
+    /// fold into `tracker.recordReplaceFromShot`.
     @MainActor
     func recordScan(buffer: CVPixelBuffer, roi: TileBoundingBox? = nil) async -> [DetectedTile] {
         await TiledTileRecognizer.recognize(buffer: buffer, roi: roi) { frame in

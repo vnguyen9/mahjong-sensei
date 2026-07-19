@@ -13,7 +13,7 @@ import Recognition
 ///
 /// Usage (from the repo root):
 ///   swift run --package-path Tools/detect-dump video-dump \
-///       [--model App/Sources/Resources/Models/MahjongTileDetector.mlpackage] \
+///       [--model App/Sources/Resources/Models/MahjongTileDetectorNanoV3.mlpackage] \
 ///       [--fps 10] [--threshold 0.30] [--start <s> --duration <s>] \
 ///       <video> [<video> ...]
 @main
@@ -29,7 +29,7 @@ struct VideoDump {
 
     static func run() async throws {
         var args = Array(CommandLine.arguments.dropFirst())
-        var modelPath = "App/Sources/Resources/Models/MahjongTileDetector.mlpackage"
+        var modelPath = "App/Sources/Resources/Models/MahjongTileDetectorNanoV3.mlpackage"
         var fps = 10.0
         var threshold = 0.30
         var start: Double?
