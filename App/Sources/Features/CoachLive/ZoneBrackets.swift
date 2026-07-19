@@ -48,9 +48,14 @@ struct CornerBracketShape: Shape {
 /// overlay's local space. A ±4pt stabilizer keeps the tracker's box jitter from
 /// shimmering the brackets; committed moves ease with a short spring.
 ///
-/// The amber unresolved brackets are the only hit-testable element — tapping
-/// one opens the existing unresolved-assignment sheet. Everything else is
-/// `allowsHitTesting(false)` so the feed chrome above stays tappable.
+/// The amber unresolved brackets and the MINE/POND **label chips** are the
+/// only hit-testable elements — tapping an unresolved bracket opens the
+/// existing unresolved-assignment sheet; tapping a zone chip opens the
+/// bracket-reassign confirmation (plan A3: "the tiles under THIS bracket are
+/// actually X"). The bracket strokes themselves stay
+/// `allowsHitTesting(false)` (only the small chip label is a tap target) so
+/// the feed chrome above stays tappable and a stray tap near a corner arm
+/// doesn't accidentally fire a reassignment.
 struct ZoneBracketsOverlay: View {
     @Environment(CoachLiveSession.self) private var session
     /// The captured global frame of the fixed full-screen preview layer — the
@@ -58,6 +63,9 @@ struct ZoneBracketsOverlay: View {
     /// the pane clip animates, so the rects survive split changes).
     let previewBounds: CGRect
     let onTapUnresolved: () -> Void
+    /// Tapped MINE/POND chip → which zone it labels — the parent turns this
+    /// into a confirmation dialog and, on confirm, `session.reassignZoneBracket(_:)`.
+    let onTapZoneChip: (ZoneKind) -> Void
 
     private static let creamBracket = Color(hex: 0xF0E6D2, alpha: 0.85)
 
@@ -69,13 +77,13 @@ struct ZoneBracketsOverlay: View {
         ZStack(alignment: .topLeading) {
             if let r = mineRect {
                 bracket(r, color: MJColor.gold, label: mineLabel,
-                        chipBG: MJColor.gold, chipFG: MJColor.inkOnGold)
-                    .allowsHitTesting(false)
+                        chipBG: MJColor.gold, chipFG: MJColor.inkOnGold,
+                        onTapChip: { onTapZoneChip(.mine) })
             }
             if let r = tableRect {
                 bracket(r, color: Self.creamBracket, label: tableLabel,
-                        chipBG: MJColor.cream, chipFG: MJColor.inkOnGold)
-                    .allowsHitTesting(false)
+                        chipBG: MJColor.cream, chipFG: MJColor.inkOnGold,
+                        onTapChip: { onTapZoneChip(.table) })
             }
             ForEach(Array(unresolvedRects.enumerated()), id: \.offset) { _, r in
                 Button(action: onTapUnresolved) {
@@ -112,23 +120,53 @@ struct ZoneBracketsOverlay: View {
     /// edge up there would collide with it, so the label tucks inside instead.
     private static let chromeClearance: CGFloat = 132
 
+    /// `onTapChip` nil (the unresolved-bracket call site) ⇒ the label stays a
+    /// plain, non-interactive `Text` — that whole bracket is instead wrapped
+    /// in its own `Button` by the caller. Non-nil (the MINE/POND call sites)
+    /// ⇒ ONLY the chip becomes a tappable `Button` with a pencil affordance;
+    /// the `CornerBracketShape` stroke is explicitly `allowsHitTesting(false)`
+    /// either way, so it never intercepts a tap meant for the chip or the
+    /// feed chrome beneath it.
     private func bracket(_ rect: CGRect, color: Color, label: String,
-                         chipBG: Color, chipFG: Color) -> some View {
+                         chipBG: Color, chipFG: Color, onTapChip: (() -> Void)? = nil) -> some View {
         let labelInside = rect.minY < Self.chromeClearance
         return ZStack(alignment: .topLeading) {
             CornerBracketShape()
                 .stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
                 .frame(width: rect.width, height: rect.height)
-            Text(label)
-                .font(MJFont.ui(11, weight: .bold))
-                .foregroundStyle(chipFG)
-                .padding(.vertical, 2).padding(.horizontal, 8)
-                .background(chipBG, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .fixedSize()
+                .allowsHitTesting(false)
+            chip(label, chipBG: chipBG, chipFG: chipFG, onTap: onTapChip)
                 .offset(x: 8, y: labelInside ? 8 : -13)
         }
         .frame(width: rect.width, height: rect.height, alignment: .topLeading)
         .position(x: rect.midX, y: rect.midY)
+    }
+
+    @ViewBuilder
+    private func chip(_ label: String, chipBG: Color, chipFG: Color, onTap: (() -> Void)?) -> some View {
+        if let onTap {
+            Button(action: onTap) { chipLabel(label, chipBG: chipBG, chipFG: chipFG, showsPencil: true) }
+                .buttonStyle(.plain)
+        } else {
+            chipLabel(label, chipBG: chipBG, chipFG: chipFG, showsPencil: false)
+        }
+    }
+
+    /// The chip's own visual — a small pencil glyph is the tappability
+    /// affordance on the two reassignable (MINE/POND) chips only.
+    private func chipLabel(_ label: String, chipBG: Color, chipFG: Color, showsPencil: Bool) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(MJFont.ui(11, weight: .bold))
+            if showsPencil {
+                Image(systemName: "pencil")
+                    .font(.system(size: 9, weight: .bold))
+            }
+        }
+        .foregroundStyle(chipFG)
+        .padding(.vertical, 2).padding(.horizontal, 8)
+        .background(chipBG, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .fixedSize()
     }
 
     // MARK: - Mapping + stabilizing

@@ -9,40 +9,58 @@ struct ContextView: View {
 
     var body: some View {
         @Bindable var session = coordinator.session
-        VStack(alignment: .leading, spacing: 18) {
-            header
-            Text("Winds are computed for you.")
-                .font(MJFont.ui(13)).foregroundStyle(MJColor.cream(0.6))
-                .padding(.horizontal, 20)
+        // A scroll region (so a tall hand — e.g. with the Special-win rows —
+        // never clips its top selector) with the CTA as a FIXED FOOTER below
+        // it. Siblings in the VStack, so "See result →" can never overlap or
+        // bleed through the scrolling content, is always visible, and its
+        // bottom padding reserves room for the floating dock. Header is a
+        // pinned top inset.
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("Winds are computed for you.")
+                        .font(MJFont.ui(13)).foregroundStyle(MJColor.cream(0.6))
+                        .padding(.horizontal, 20)
 
-            Group {
-                labeled("Your seat") { WindPicker(selection: $session.seatWind) }
-                labeled("Round wind") { WindPicker(selection: $session.roundWind) }
+                    Group {
+                        labeled("Your seat") { WindPicker(selection: $session.seatWind) }
+                        labeled("Round wind") { WindPicker(selection: $session.roundWind) }
 
-                if session.seatWind == session.roundWind {
-                    doubleWindPill(session.seatWind)
+                        if session.seatWind == session.roundWind {
+                            doubleWindPill(session.seatWind)
+                        }
+
+                        labeled("How did you win?") {
+                            TwoCellPicker(selection: $session.isSelfDraw,
+                                          left: ("Self-draw 自摸", true), right: ("By discard", false))
+                        }
+
+                        HStack {
+                            Text("I'm the dealer")
+                                .font(MJFont.ui(14, weight: .medium)).foregroundStyle(MJColor.creamHeading)
+                            Spacer()
+                            Toggle("", isOn: $session.isDealer).labelsHidden().tint(MJColor.jadeAccent)
+                        }
+                        .mjCard()
+
+                        labeled("Special win (optional)") {
+                            VStack(spacing: 8) {
+                                circumstanceRow("Won on the last tile", "海底撈月", $session.isLastTile)
+                                circumstanceRow("Kong replacement", "槓上開花", $session.isReplacement)
+                                circumstanceRow("Robbing a kong", "搶槓", $session.isRobbingKong)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
                 }
-
-                labeled("How did you win?") {
-                    TwoCellPicker(selection: $session.isSelfDraw,
-                                  left: ("Self-draw 自摸", true), right: ("By discard", false))
-                }
-
-                HStack {
-                    Text("I'm the dealer")
-                        .font(MJFont.ui(14, weight: .medium)).foregroundStyle(MJColor.creamHeading)
-                    Spacer()
-                    Toggle("", isOn: $session.isDealer).labelsHidden().tint(MJColor.jadeAccent)
-                }
-                .mjCard()
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, 20)
-
-            Spacer(minLength: 12)
 
             GoldButton("See result →") { coordinator.push(.result) }
-                .padding(.horizontal, 20).padding(.bottom, 104)
+                .padding(.horizontal, 20).padding(.top, 8).padding(.bottom, 96)
         }
+        .safeAreaInset(edge: .top) { header }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(CapturedBackdrop(photo: session.capturedPhoto, fallback: .content))
         .toolbar(.hidden, for: .navigationBar)
@@ -68,6 +86,19 @@ struct ContextView: View {
             Text(title).eyebrowStyle()
             content()
         }
+    }
+
+    /// A card row for a special-win circumstance: English + 繁中 name and a toggle.
+    private func circumstanceRow(_ english: String, _ zh: String, _ isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(english).font(MJFont.ui(14, weight: .medium)).foregroundStyle(MJColor.creamHeading)
+                Text(zh).font(MJFont.serif(11)).foregroundStyle(MJColor.gold(0.7))
+            }
+            Spacer()
+            Toggle("", isOn: isOn).labelsHidden().tint(MJColor.jadeAccent)
+        }
+        .mjCard()
     }
 
     private func doubleWindPill(_ wind: Wind) -> some View {

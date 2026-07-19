@@ -65,7 +65,7 @@ struct ScanView: View {
             VStack(spacing: 0) {
                 VStack(spacing: 12) {
                     SegmentedToggle(selection: $mode,
-                                    options: [(ScanMode.score, "Score"), (ScanMode.lookup, "Lens")],
+                                    options: [(ScanMode.score, "Score"), (ScanMode.lookup, "What's this?")],
                                     fontSize: 14, hPad: 16, vPad: 9)
                     HintPill(text: hint)
                     CoachLiveButton { coordinator.startCoachLive() }

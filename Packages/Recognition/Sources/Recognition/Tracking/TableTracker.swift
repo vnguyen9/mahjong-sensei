@@ -12,8 +12,10 @@ import MahjongCore
 ///
 /// **Call order per `ingest`** (mirrors `TrackerHarness`'s hand-composed
 /// sequence, the plan's own documented contract):
-/// 1. `store.associate(detections, at:, motion:)` — every frame, motion or
-///    not; tracks survive and vote mid-motion but nothing commits.
+/// 1. `store.associate(detections, at:, motion:, visibleRegion:)` — every
+///    frame, motion or not; tracks survive and vote mid-motion but nothing
+///    commits. `visibleRegion` (Lane B chunk E) is forwarded straight from
+///    `ingest`'s own parameter — see that method's doc.
 /// 2. Update the settle gate (motion below `TrackerConfig.motionSettle` for
 ///    `settleDelay`; `motion == nil` — a still-photo stream — settles
 ///    immediately, no sustain wait).
@@ -116,14 +118,101 @@ public final class TableTracker {
         assembleState()
     }
 
+    // MARK: - Persistence (plan A6: survive relaunch)
+
+    /// Exports the tracker's CONFIRMED state for on-disk persistence across a
+    /// relaunch — a state-EXPORT snapshot, not an internal-state dump (see
+    /// `TrackerSnapshot`'s own doc for the full rationale). Captured tiles
+    /// are exactly `state.myHand + .myBonus + .myMelds + .pond +
+    /// .opponentMelds` — i.e. everything `assembleState` already considers
+    /// confirmed. `.unresolved` is deliberately excluded: it's a transient,
+    /// not-yet-zoned detector guess whose face-confidence/vote state isn't
+    /// faithfully round-trippable through a single published `face` (voting
+    /// is bypassed entirely for a restored, pinned track), so resurrecting
+    /// it on restore would just recreate the exact ambiguity a few fresh
+    /// frames resolve for free. Injected `t` only — never `Date()`.
+    public func snapshot(at t: TimeInterval) -> TrackerSnapshot {
+        let confirmed = state.myHand + state.myBonus + state.myMelds.flatMap { $0 }
+            + state.pond + state.opponentMelds.values.flatMap { $0.flatMap { $0 } }
+        let tiles = confirmed.map { tile in
+            TrackerSnapshot.SnapshotTile(id: tile.id, face: tile.face, box: tile.box, zone: tile.zone,
+                                         seat: tile.seat, firstSeen: tile.firstSeen, lastSeen: tile.lastSeen,
+                                         observationCount: tile.observationCount)
+        }
+        return TrackerSnapshot(mySeatWind: state.mySeatWind, roundWind: state.roundWind, handIndex: handIndex,
+                               dealsSinceRoundStart: dealsSinceRoundStart, events: events, tiles: tiles,
+                               savedAtMono: t)
+    }
+
+    /// Restores a `snapshot` onto a FRESH tracker — one that has never had
+    /// `beginSession`/`ingest` called. This is an alternate session start,
+    /// not a merge: it doesn't route through `beginSession`'s reset at all,
+    /// so anything already on this tracker would leak into the "restored"
+    /// state — which is exactly why a fresh instance is a hard precondition
+    /// rather than a doc suggestion.
+    ///
+    /// Seeds winds/handIndex/the deal counter straight from the snapshot,
+    /// restores the event log verbatim (these events already happened — no
+    /// re-derivation), fast-forwards `TurnEngine`'s event-id counter past
+    /// the restored log's max id, then `TrackStore.restoreTrack`s every
+    /// snapshotted tile under its ORIGINAL id (which itself fast-forwards
+    /// the track-id counter past that id) and locks each one's zone in
+    /// `ZoneModel` the same way `overrideZone` does, so a contradicting
+    /// settled frame right after resume can't immediately vote a restored
+    /// tile back out of its zone. Finally reassembles `state` from the
+    /// freshly-populated tracks.
+    ///
+    /// Deliberately NOT restored: `pendingHandEnd` (a stale hand-end
+    /// proposal — the plan's call is that it re-detects in seconds once
+    /// frames resume, and shipping a possibly-stale confirm/dismiss card is
+    /// worse than that short gap) and `ZoneModel`'s hand-band/pond-centroid
+    /// calibration (left to relearn from fresh frames — the plan's whole
+    /// rationale for a state-EXPORT design over an internal-state snapshot;
+    /// see `TrackerSnapshot`'s doc). `currentTurn` also comes back nil, same
+    /// as a brand-new session — the very next settle re-derives it from
+    /// live evidence. Injected `t` only — never `Date()`.
+    public func restore(_ snapshot: TrackerSnapshot, at t: TimeInterval) {
+        precondition(events.isEmpty && store.tracks.isEmpty,
+                    "TableTracker.restore requires a fresh tracker (never begun/ingested)")
+        now = t
+        handIndex = snapshot.handIndex
+        dealsSinceRoundStart = snapshot.dealsSinceRoundStart
+        handComplete = false
+        pendingHandEnd = nil
+        belowSince = nil
+        burstRegion = nil
+
+        events = snapshot.events
+        turnEngine.fastForward(pastEventID: snapshot.events.map(\.id).max() ?? -1)
+
+        for tile in snapshot.tiles {
+            store.restoreTrack(id: tile.id, face: tile.face, box: tile.box, zone: tile.zone, seat: tile.seat,
+                               firstSeen: tile.firstSeen, lastSeen: tile.lastSeen,
+                               observationCount: tile.observationCount, at: t)
+            zoneModel.markLocked(tile.id)
+        }
+
+        state = TrackedTableState(handIndex: snapshot.handIndex,
+                                  mySeatWind: snapshot.mySeatWind, roundWind: snapshot.roundWind)
+        assembleState()
+    }
+
     // MARK: - Ingest
 
     /// The one ingestion API. `motion` nil ⇒ treated as settled (still-photo
-    /// streams — see the type doc's call-order note).
+    /// streams — see the type doc's call-order note). `visibleRegion` nil
+    /// (default) ⇒ this frame's detections cover the full view, exactly the
+    /// original contract — `usingFallbackCapture`/the image-space harness
+    /// path never passes it. Non-nil (Lane B chunk E — a cropped AR
+    /// recognize pass) ⇒ forwarded straight to `TrackStore.associate`, whose
+    /// doc explains the miss-accrual gate it drives; nothing else in this
+    /// method needs it (zoning/turn/boundary detection all just consume
+    /// whatever `detections`/`store` produced this call).
     @discardableResult
-    public func ingest(_ detections: [DetectedTile], at t: TimeInterval, motion: MotionSample? = nil) -> IngestOutcome {
+    public func ingest(_ detections: [DetectedTile], at t: TimeInterval, motion: MotionSample? = nil,
+                       visibleRegion: TileBoundingBox? = nil) -> IngestOutcome {
         now = t
-        let outcome = store.associate(detections, at: t, motion: motion)
+        let outcome = store.associate(detections, at: t, motion: motion, visibleRegion: visibleRegion)
         if let level = motion?.level, level >= config.motionActive { burstRegion = motion?.dominantRegion }
 
         guard isSettled(motion: motion, at: t) else {
@@ -198,10 +287,34 @@ public final class TableTracker {
     /// Locks the track's zone (and, for `.opponentMeld`, its owner seat)
     /// against future `ZoneModel` re-votes.
     public func overrideZone(track: TrackID, to zone: TileZone, seat: RelativeSeat? = nil) {
-        store.setZone(track, to: zone, seat: seat, locked: true)
-        zoneModel.markLocked(track)
+        applyZoneOverride(track, to: zone, seat: seat)
         appendRevisionEvent(.zoneOverride)
         assembleState()
+    }
+
+    /// Bulk counterpart (plan A3): reassigns every listed track to `zone`
+    /// with the identical per-track lock/vote mechanics `overrideZone(track:)`
+    /// uses, but coalesced into ONE revision event + ONE state reassembly for
+    /// the whole batch — the bracket-reassign correction moves a whole
+    /// cluster (a pond's worth of tracks, say) in a single user gesture, and
+    /// N revision events / N `assembleState()` passes for one gesture would
+    /// be both wasteful and a misleading event log. Empty input is a no-op
+    /// (no event, no assembly) — nothing was actually corrected.
+    public func overrideZone(tracks: [TrackID], to zone: TileZone, seat: RelativeSeat? = nil) {
+        guard !tracks.isEmpty else { return }
+        for track in tracks {
+            applyZoneOverride(track, to: zone, seat: seat)
+        }
+        appendRevisionEvent(.zoneOverride)
+        assembleState()
+    }
+
+    /// Shared lock/vote mechanics behind both `overrideZone` overloads —
+    /// everything except the revision event + state reassembly, which the
+    /// bulk overload coalesces across its whole batch.
+    private func applyZoneOverride(_ track: TrackID, to zone: TileZone, seat: RelativeSeat?) {
+        store.setZone(track, to: zone, seat: seat, locked: true)
+        zoneModel.markLocked(track)
     }
 
     /// Creates a `live`, pinned, zone-locked manual track for a tile the
@@ -305,7 +418,7 @@ public final class TableTracker {
     public func dismissHandEnd() {
         guard pendingHandEnd != nil else { return }
         pendingHandEnd = nil
-        boundaryDetector.dismiss()
+        boundaryDetector.dismiss(at: now)
         appendEvent(.handEndCancelled, confidence: 1.0, at: now)
         appendRevisionEvent(.handEndDismissed)
         assembleState()

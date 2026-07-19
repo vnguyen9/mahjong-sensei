@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import CoreVideo
 import QuartzCore
 import UIKit
 import Observation
@@ -8,6 +9,7 @@ import Recognition
 import CoachEngine
 import EfficiencyEngine
 import ScoringEngine
+import simd
 import os
 
 /// Coach Live's UI-facing session surface — the `@Observable` contract every
@@ -124,6 +126,98 @@ final class CoachLiveSession: Identifiable {
     /// this window (`LiveFeedPane.livePill`) so slow phones don't look frozen.
     /// Never set on the mock path, so MJ_SCREEN scenes are unaffected.
     var isWarmingUp = false
+
+    /// The startup waterfall the small LIVE-pill spinner alone proved too
+    /// subtle for ("Start tracking did nothing") — `StartupStatusOverlay`
+    /// reads this for a prominent center-feed card. Purely additive over
+    /// `isWarmingUp` (kept working exactly as before) — see `startLoop` for
+    /// the transition sites. Mock path never sets this off `.ready`, so
+    /// MJ_SCREEN scenes are unaffected.
+    enum StartupStage: Equatable {
+        case ready, startingCamera, findingTable, loadingDetector, lookingForTiles
+    }
+    var startupStage: StartupStage = .ready
+
+    /// True while the AR loop's `CameraMotionGate` reads the camera pose as
+    /// moving — the loop skips motion-sample/cadence/inference/ingest
+    /// entirely during this window (Lane B chunk D). Drives
+    /// `LiveFeedPane`'s "Hold steady…" chip; never set on the mock/fallback
+    /// paths (no `CameraMotionGate` runs there).
+    var cameraMoving = false
+
+    /// True once `startARLoop`'s never-locks/unavailable fallback has handed
+    /// off to the classic `startLoop` — `arCapture` stays non-nil (this
+    /// session was still constructed with one), but the LOOP actually
+    /// driving the table is the image-space one. Drives the debug HUD's
+    /// one-word "AR"/"2D" mode indicator (`LiveFeedPane.debugHUD`); never
+    /// set true again once set (a session doesn't re-attempt AR mid-flight).
+    var usingFallbackCapture = false
+
+    /// Lane B chunk E: when true (default), `startARLoop` asks
+    /// `ROIScheduler` what to infer each still tick — a full frame, one or
+    /// two cropped zones, or nothing — instead of always recognizing the
+    /// full captured frame. `false` forces the pre-chunk-E behavior (always
+    /// full-frame) — an A/B escape hatch for isolating a recall/thermal
+    /// regression to the ROI path specifically. Never read by
+    /// `startLoop`/the mock path.
+    var useROIScheduler = true
+
+    /// True once the loop's per-tick `MotionSample.meanLuma` has read
+    /// "dark" for `DarkTableDetector`'s sustain window — drives
+    /// `LiveFeedPane`'s "Dark table — turn on flash?" chip. Never set on the
+    /// mock path (no loop runs there).
+    var isDark = false
+    /// Set when the user dismisses the dark-table chip's "×" — suppresses it
+    /// for the rest of the session even if the table stays dark. Reset in
+    /// `begin()` so a fresh session always gets one chance to suggest again.
+    var torchSuggestionDismissed = false
+    /// Pure hysteresis over `isDark` — see `DarkTableDetector`. Single-owner,
+    /// fed by the one `darkTableDetector.update` call site in `startLoop`.
+    private var darkTableDetector = DarkTableDetector()
+    /// Lane B chunk H item 1 (guided sweep): which of the five
+    /// `TableZoneID` regions have been seen ≥60% inside the frame at least
+    /// once THIS sweep — `StartupStatusOverlay`'s sweep card reads
+    /// `.count` against `TableZoneID.allCases.count` for its progress
+    /// affordance. Reset every time a sweep (re)starts (the initial
+    /// post-lock sweep, or a "Rescan table" restart). Never populated on
+    /// the mock/fallback paths.
+    var sweepZonesSeen: Set<TableZoneID> = []
+    /// Set by the sweep card's "Done" link (`finishSweepEarly()`);
+    /// consumed (and reset to `false`) by the very next AR-loop tick,
+    /// ending the sweep immediately regardless of elapsed time/coverage.
+    private var sweepDoneRequested = false
+
+    /// Lane B chunk H item 2 (per-zone staleness): monotonic
+    /// (`CACurrentMediaTime()`-comparable) timestamp each zone was last
+    /// seen ≥60% inside the frame during a still, inferred tracking-mode
+    /// tick. A zone with no entry reads as "stale since tracking began" —
+    /// see `zoneTrackingStartedAt`.
+    private var zoneLastSeenOnScreen: [TableZoneID: TimeInterval] = [:]
+    /// Whether a zone has EVER carried live tracks this session — the
+    /// staleness prompt only nags about zones the tracker actually has (or
+    /// had) a stake in, not geometry the table simply never had tiles in.
+    /// Updated every publish (`applyState`).
+    private var zoneEverHadTracks: Set<TableZoneID> = []
+    /// Per-zone rescan-prompt cooldown: the timestamp a zone was last
+    /// actually shown, so it doesn't re-fire within 90s of its own last
+    /// showing (a DIFFERENT stale zone can still interrupt sooner).
+    private var zoneLastPromptedAt: [TableZoneID: TimeInterval] = [:]
+    /// When the current tracker started (table-lock time, real or
+    /// resumed) — the staleness baseline for a zone that's never once been
+    /// seen this session.
+    private var zoneTrackingStartedAt: TimeInterval = 0
+
+    /// Lane B chunk H item 2's directional rescan-prompt chip, or `nil`
+    /// when nothing's stale enough (or the throttle/action-phase gates
+    /// suppress it). `LiveFeedPane` renders it under the pill, priority
+    /// below `holdSteadyChip`, above `darkTableChip`. Never set on the
+    /// mock/fallback paths (no per-zone tracking runs there).
+    struct RescanPrompt: Equatable {
+        var zone: TableZoneID
+        var text: String
+    }
+    var rescanPrompt: RescanPrompt?
+
     /// Dev-only diagnostics the loop records every tick — powers the
     /// triple-tap debug HUD; see `LiveDiagnostics`.
     var diagnostics = LiveDiagnostics()
@@ -141,7 +235,21 @@ final class CoachLiveSession: Identifiable {
     var lastFrameSnapshot: UIImage?
 
     // MARK: Camera — the UI needs only `.session` (preview) and `.setTorch(_:)`.
+    // Retained even when `arCapture` drives the live loop: it's still the
+    // permanent fallback (never-locks degrade, Lane B chunk D) and the
+    // continuity device Scan resumes on exit (chunk G) — `ScanFlow` owns its
+    // lifecycle (`stop()`/`requestAndStart()`) around the AR session's own.
     let camera: CameraCapture
+
+    /// ARKit table capture (Lane B) — `nil` on the mock/headless path
+    /// (`CoachLiveMock`, MJ_SCREEN, and the Simulator's `ScanCoordinator`
+    /// entry all construct a session without one) and on any real session
+    /// built before Lane B's device wiring landed. Non-nil ⇒ `begin()`/
+    /// `resume(from:)` drive the AR loop (`startARLoop`) instead of the
+    /// classic image-space camera loop (`startLoop`, which stays the
+    /// permanent fallback both for plane-lock failure and for this literal
+    /// nil case).
+    let arCapture: ARTableCapture?
 
     // MARK: - Live loop (real device path only)
 
@@ -174,6 +282,11 @@ final class CoachLiveSession: Identifiable {
     private static let pollInterval: Duration = .milliseconds(120)
     private var lastPublishedRevision = -1
     private var lastPublishTime: TimeInterval = 0
+
+    // Persistence (plan A6: survive relaunch) — throttled disk snapshot,
+    // real path only. See `persistIfDue`.
+    private static let persistInterval: TimeInterval = 5.0
+    private var lastPersistTime: TimeInterval = 0
     /// Rising-edge latch so the win banner fires once and honors "Keep playing".
     private var wasHandComplete = false
 
@@ -191,8 +304,10 @@ final class CoachLiveSession: Identifiable {
     /// Events-tab tile fix can `pin` the underlying track.
     private var eventTileTrackByBackingID: [Int: TrackID] = [:]
 
-    init(camera: CameraCapture, recognizerProvider: (@Sendable () async -> any Recognizer)? = nil) {
+    init(camera: CameraCapture, arCapture: ARTableCapture? = nil,
+        recognizerProvider: (@Sendable () async -> any Recognizer)? = nil) {
         self.camera = camera
+        self.arCapture = arCapture
         self.recognizerProvider = recognizerProvider
     }
 
@@ -200,24 +315,86 @@ final class CoachLiveSession: Identifiable {
 
     /// Starts a session at the given winds.
     ///
-    /// On the real (camera-backed) path this builds the tracker, injects the
-    /// win predicate + wait-impact annotator, begins a tracker session, and
-    /// spins up the polling loop (`startLoop`). On the mock/headless path
-    /// (`recognizerProvider == nil`) it stays the original stub — assign the
-    /// winds and let `CoachLiveMock` drive the published state directly.
+    /// On the real (camera-backed) path this spins up the polling loop —
+    /// `startARLoop` (which itself defers building the tracker until the
+    /// table plane locks) when `arCapture` is set, else the classic
+    /// `startLoop` (which builds the tracker immediately, injecting the win
+    /// predicate + wait-impact annotator and beginning the tracker session
+    /// up front). On the mock/headless path (`recognizerProvider == nil`) it
+    /// stays the original stub — assign the winds and let `CoachLiveMock`
+    /// drive the published state directly.
     func begin(roundWind: Wind, seatWind: Wind) {
         self.roundWind = roundWind
         self.seatWind = seatWind
         phase = .rest
+        // Fresh session ⇒ fresh chance to suggest the torch, even if a prior
+        // session on this same instance had it dismissed.
+        torchSuggestionDismissed = false
+        isDark = false
+        darkTableDetector = DarkTableDetector()
+
+        guard let recognizerProvider, tracker == nil else { return }
+        // Fresh start supersedes any stale resume — a new `begin()` means the
+        // user explicitly chose not to (or had nothing to) resume.
+        Task { await CoachLiveSessionStore.shared.clear() }
+        isWarmingUp = true
+        startupStage = .startingCamera
+        if arCapture != nil {
+            startARLoop(recognizerProvider: recognizerProvider)
+        } else {
+            startLoop(recognizerProvider: recognizerProvider)
+        }
+    }
+
+    /// Restores a previously persisted session (plan A6 resume) instead of
+    /// starting empty: winds/event log/confirmed tiles from
+    /// `persisted.snapshot` become this session's starting point. Real
+    /// (camera-backed) path only, exactly like `begin()` — the mock/headless
+    /// path (`recognizerProvider == nil`, e.g. `CoachLiveSetupView`'s
+    /// synthetic MJ_SCREEN resumable) has no tracker to restore onto and
+    /// simply stays put.
+    func resume(from persisted: PersistedCoachLiveSession) {
+        seatWind = persisted.snapshot.mySeatWind
+        roundWind = persisted.snapshot.roundWind
+        phase = .rest
+        torchSuggestionDismissed = false
+        isDark = false
+        darkTableDetector = DarkTableDetector()
 
         guard let recognizerProvider, tracker == nil else { return }
         isWarmingUp = true
-        startLoop(recognizerProvider: recognizerProvider)
+        startupStage = .startingCamera
+
+        // Cross-mode resume guard (Lane B chunk D): a table-space archive's
+        // boxes are anchor-local metres, an image-space archive's are
+        // oriented-image fractions — restoring the wrong one onto this
+        // session's capture mode would plant every tile at a nonsense
+        // position. Degrade to a fresh start (still at the archive's winds)
+        // rather than restore geometry that doesn't mean what it looks like.
+        let currentMode: PersistedCoachLiveSession.CoordinateSpaceMarker = arCapture != nil ? .tableSpace : .imageSpace
+        var restoring: PersistedCoachLiveSession? = persisted
+        if persisted.coordinateSpace != currentMode {
+            Self.logger.notice("resume archive coordinate space (\(persisted.coordinateSpace.rawValue, privacy: .public)) doesn't match the current capture mode (\(currentMode.rawValue, privacy: .public)) — starting fresh instead")
+            restoring = nil
+        }
+
+        if arCapture != nil {
+            startARLoop(recognizerProvider: recognizerProvider, restoredFrom: restoring)
+        } else {
+            startLoop(recognizerProvider: recognizerProvider, restoredFrom: restoring)
+        }
     }
 
     // MARK: - Live loop
 
-    private func startLoop(recognizerProvider: @escaping @Sendable () async -> any Recognizer) {
+    /// `restoredFrom` non-nil ⇒ a resume (plan A6): seeds the tracker via
+    /// `TableTracker.restore` instead of `beginSession` and immediately
+    /// republishes the restored state (+ advice) synchronously so the live
+    /// view never shows a blank table while the first tick warms up. Every
+    /// other line — the loop task body itself — is unchanged by which branch
+    /// ran, exactly the same polling/cadence/publish machinery either way.
+    private func startLoop(recognizerProvider: @escaping @Sendable () async -> any Recognizer,
+                           restoredFrom persisted: PersistedCoachLiveSession? = nil) {
         var config = TrackerConfig()
         // Injection 1 (plan §2): the win check — Recognition never imports
         // ScoringEngine, so the app supplies it as a closure.
@@ -235,7 +412,14 @@ final class CoachLiveSession: Identifiable {
         advisorCache = AdvisorCache()
 
         let start = CACurrentMediaTime()
-        tracker.beginSession(mySeatWind: seatWind, roundWind: roundWind, at: start)
+        if let persisted {
+            tracker.restore(persisted.remapped(toNowMono: start), at: start)
+            let state = tracker.state
+            applyState(state, pending: tracker.pendingHandEnd, log: tracker.events)
+            Task { @MainActor [weak self] in await self?.refreshAdvice(for: state) }
+        } else {
+            tracker.beginSession(mySeatWind: seatWind, roundWind: roundWind, at: start)
+        }
 
         let motionActive = config.motionActive
         let basePolicy = CadencePolicy(config: config)   // Sendable — safe to capture
@@ -257,6 +441,9 @@ final class CoachLiveSession: Identifiable {
                     try? await Task.sleep(for: Self.pollInterval)
                     continue
                 }
+                // First frame the camera has actually delivered — the camera
+                // itself is up; next the detector needs to load.
+                if self.startupStage == .startingCamera { self.startupStage = .loadingDetector }
                 let now = CACurrentMediaTime()
                 if self.orientedImageSize == .zero {
                     self.orientedImageSize = RecognizerFrame.buffer(buffer, orientation: .right).orientedPixelSize
@@ -266,6 +453,13 @@ final class CoachLiveSession: Identifiable {
                 // both the breathing phase and the cadence decision.
                 let sample = motion.sample(buffer, at: now)
                 if sample == nil { self.diagnostics.nilMotionSampleCount += 1 }
+                // A5: dark-table torch suggestion — the one call site feeding
+                // `DarkTableDetector`'s hysteresis; `meanLuma` rides the same
+                // per-tick motion sample, so this costs nothing extra to read.
+                if let luma = sample?.meanLuma {
+                    self.darkTableDetector.update(meanLuma: luma, at: now)
+                    self.isDark = self.darkTableDetector.isDark
+                }
                 let level = sample?.level ?? 0
                 self.diagnostics.motionLevel = level
                 self.updatePhase(active: level >= motionActive)
@@ -314,6 +508,7 @@ final class CoachLiveSession: Identifiable {
                     // First real inference completed — the camera is delivering
                     // frames and the detector is loaded; drop the "Starting…" pill.
                     self.isWarmingUp = false
+                    if self.startupStage == .loadingDetector { self.startupStage = .lookingForTiles }
                     self.diagnostics.lastRawDetectionCount = result.tiles.count
                     self.diagnostics.lastTopDetections = result.tiles
                         .sorted { $0.confidence > $1.confidence }
@@ -335,9 +530,664 @@ final class CoachLiveSession: Identifiable {
                     }
                 }
 
-                await self.publishIfDue(now: CACurrentMediaTime())
-                try? await Task.sleep(for: Self.pollInterval)
+                await self.finishTick(loopStart: start)
             }
+        }
+    }
+
+    /// Shared end-of-tick bookkeeping for both loops (`startLoop`'s
+    /// image-space camera path and `startARLoop`'s AR path): coalesced
+    /// publish, the final startup-overlay promotion, and the shared poll
+    /// sleep. Extracted verbatim from `startLoop`'s original tail — a pure
+    /// relocation, not a behavior change.
+    @MainActor
+    private func finishTick(loopStart: TimeInterval) async {
+        await publishIfDue(now: CACurrentMediaTime())
+        // Final startup promotion: once tiles are actually on the table
+        // there's nothing left to wait for, and a genuinely empty table (or
+        // a slow first settle) shouldn't leave the overlay up forever — 10s
+        // after loop start is the safety net.
+        if startupStage != .ready, liveTileCount > 0 || CACurrentMediaTime() - loopStart >= 10 {
+            startupStage = .ready
+        }
+        try? await Task.sleep(for: Self.pollInterval)
+    }
+
+    /// The AR-driven live loop (Lane B chunk D; guided sweep + freeze-while-
+    /// relocalizing added chunk H). Mirrors `startLoop`'s overall shape
+    /// (same 120ms poll, same cadence/breathing/dark/publish machinery
+    /// feeding the same published surface — `finishTick` is shared) but
+    /// sources frames from `self.arCapture` instead of `camera`, defers
+    /// building the tracker until the table plane locks (`config
+    /// .coordinateSpace = .tableSpace`), gates every tick on
+    /// `CameraMotionGate` (skip motion-sample/cadence/inference/ingest
+    /// entirely while the phone is visibly moving), and projects detections
+    /// through `Recognition.TableProjection`/`DetectionProjector` before
+    /// `tracker.ingest`. Falls back to `startLoop` — verbatim, no
+    /// special-casing needed there — when the table never locks within 25s
+    /// or ARKit reports `.unavailable` (in practice only the Simulator, and
+    /// only if it were ever reached with a live `arCapture`, which
+    /// `ScanCoordinator.startCoachLive` never does — see that method).
+    ///
+    /// Table lock hands off to the guided sweep (`arCapture
+    /// .enterSweeping()`), not straight to tracking — while
+    /// `captureStage == .sweeping` a dedicated per-tick recipe (relaxed
+    /// motion tolerance, no cadence throttling, always full-frame, bypasses
+    /// `ROIScheduler`) runs instead of the shared tracking-mode logic below
+    /// it; see the inline comment at that branch. `captureStage ==
+    /// .relocalizing` freezes the tick entirely (no motion sample, no
+    /// inference, no ingest) until ARKit's pose is trustworthy again.
+    ///
+    /// Reads `self.arCapture` fresh each tick (rather than capturing the
+    /// non-`Sendable` `ARTableCapture` instance directly into the `Task`
+    /// closure) — the same "go through `self`" discipline `startLoop`
+    /// already uses for `self.tracker`/`self.camera`.
+    private func startARLoop(recognizerProvider: @escaping @Sendable () async -> any Recognizer,
+                             restoredFrom persisted: PersistedCoachLiveSession? = nil) {
+        let loopStart = CACurrentMediaTime()
+        let arLockDeadline = loopStart + 25
+
+        loopTask = Task { @MainActor [weak self] in
+            var cadence = CadencePolicy()
+            var motionGate = CameraMotionGate()
+            // Lane B chunk H: the guided sweep tolerates faster panning
+            // than steady-state tracking (~2× the default thresholds) —
+            // its own gate instance so tracking's tighter thresholds never
+            // get mutated by sweep-mode tuning. `CameraMotionGate` only
+            // exposes a no-arg `init()` (its two thresholds are plain,
+            // mutable `var`s meant to be tuned after construction), hence
+            // the local factory rather than a memberwise initializer call.
+            func freshSweepMotionGate() -> CameraMotionGate {
+                var gate = CameraMotionGate()
+                gate.linearThreshold = 0.24
+                gate.angularThreshold = 50
+                return gate
+            }
+            var sweepMotionGate = freshSweepMotionGate()
+            let motion = MotionDetector()
+            var roiScheduler = ROIScheduler()
+            let pixelBufferCropper = PixelBufferCropper()
+            var recognizer: (any Recognizer)?
+            var lastInference = CACurrentMediaTime() - 10   // due immediately once tracking starts
+            var wasMoving = false
+            var forceNextInference = false
+            var wasSweeping = false
+            var sweepStartedAt: TimeInterval?
+
+            pollLoop: while !Task.isCancelled {
+                guard let self, !self.isEnded, let arCapture = self.arCapture else { break }
+                if self.isPaused {
+                    try? await Task.sleep(for: .milliseconds(200))
+                    continue
+                }
+                self.diagnostics.loopTicks += 1
+
+                // Startup overlay: `.starting` → `.findingTable` the instant
+                // ARKit is delivering frames and hunting for the table.
+                if self.startupStage == .startingCamera, arCapture.captureStage == .findingTable {
+                    self.startupStage = .findingTable
+                }
+
+                // Never-locks / unsupported fallback — checked every tick
+                // before the table locks (once locked, `self.tracker` is
+                // non-nil and this branch never runs again).
+                if self.tracker == nil, arCapture.captureStage == .unavailable || CACurrentMediaTime() >= arLockDeadline {
+                    Self.logger.notice("AR table capture unavailable/never locked (stage: \(String(describing: arCapture.captureStage), privacy: .public)) — falling back to image-space capture")
+                    self.usingFallbackCapture = true
+                    arCapture.pause()
+                    #if !targetEnvironment(simulator)
+                    self.camera.requestAndStart()
+                    #endif
+                    // Deliberately DON'T forward `persisted` into the fallback:
+                    // an AR-path `persisted` is always a `.tableSpace` archive
+                    // (the `resume(from:)` cross-mode guard drops any
+                    // `.imageSpace` one before ever reaching here), and
+                    // `startLoop` builds an `.imageSpace` tracker — restoring
+                    // anchor-local-metre boxes into an oriented-image-fraction
+                    // tracker would plant every restored tile at a nonsense
+                    // position. Degrade to a fresh start at the archive's winds
+                    // (already applied in `resume`), matching that guard's own
+                    // "start fresh rather than restore mismatched geometry" call.
+                    self.startLoop(recognizerProvider: recognizerProvider, restoredFrom: nil)
+                    break pollLoop
+                }
+
+                guard let frame = arCapture.latestFrame else {
+                    self.diagnostics.nilBufferCount += 1
+                    try? await Task.sleep(for: Self.pollInterval)
+                    continue
+                }
+                if self.orientedImageSize == .zero {
+                    self.orientedImageSize = frame.orientedImageSize
+                }
+                let now = CACurrentMediaTime()
+
+                // Table lock → build the tracker HERE, in table space, then
+                // begin/restore the session. Nothing above this point ever
+                // ingests — `self.tracker` staying nil IS "still hunting."
+                if self.tracker == nil {
+                    guard arCapture.lockedPlaneTransform != nil else {
+                        try? await Task.sleep(for: Self.pollInterval)
+                        continue
+                    }
+                    var config = TrackerConfig()
+                    config.winPredicate = { concealed, melds in
+                        ScoringEngine.isWinningShape(Hand(concealedTiles: concealed, melds: melds))
+                    }
+                    config.coordinateSpace = .tableSpace
+                    config.tableGeometry = TrackerConfig.TableGeometry()
+                    self.trackerConfig = config
+
+                    let newTracker = TableTracker(config: config)
+                    newTracker.waitImpactAnnotator = Self.waitImpactAnnotator
+                    self.tracker = newTracker
+                    self.advisorCache = AdvisorCache()
+                    self.startupStage = .loadingDetector
+                    // Lane B chunk H item 1: table lock hands off to the
+                    // guided sweep, not straight to tracking —
+                    // `enterTracking()` happens once the sweep itself ends
+                    // (below), either via the "Done" link or the
+                    // elapsed+coverage exit condition. Fresh staleness
+                    // bookkeeping for the fresh tracker.
+                    self.sweepZonesSeen = []
+                    self.zoneLastSeenOnScreen = [:]
+                    self.zoneEverHadTracks = []
+                    self.zoneLastPromptedAt = [:]
+                    self.rescanPrompt = nil
+                    arCapture.enterSweeping()
+
+                    let sessionStart = CACurrentMediaTime()
+                    self.zoneTrackingStartedAt = sessionStart
+                    if let persisted {
+                        newTracker.restore(persisted.remapped(toNowMono: sessionStart), at: sessionStart)
+                        let state = newTracker.state
+                        self.applyState(state, pending: newTracker.pendingHandEnd, log: newTracker.events)
+                        await self.refreshAdvice(for: state)
+                    } else {
+                        newTracker.beginSession(mySeatWind: self.seatWind, roundWind: self.roundWind, at: sessionStart)
+                    }
+                    lastInference = sessionStart - 10   // due immediately
+                }
+
+                guard let tracker = self.tracker else {
+                    try? await Task.sleep(for: Self.pollInterval)
+                    continue
+                }
+
+                // Lane B chunk H item 3: freeze everything while ARKit is
+                // relocalizing — the camera pose is untrustworthy until
+                // tracking recovers, so motion gating/projection/ingest
+                // would all be working off bad data this tick.
+                // `StartupStatusOverlay` shows its own "re-finding your
+                // table…" copy by reading `arCapture.captureStage` directly
+                // (independent of `startupStage`, which only governs the
+                // once-through pre-`.ready` startup waterfall).
+                if arCapture.captureStage == .relocalizing {
+                    self.cameraMoving = false
+                    await self.finishTick(loopStart: loopStart)
+                    continue
+                }
+
+                // Lane B chunk H item 1: the guided sweep — a self-contained
+                // per-tick recipe (relaxed motion tolerance, no cadence
+                // throttling, always full-frame, bypasses `ROIScheduler`
+                // entirely) that either loops via `continue`, or, on its
+                // exit condition, falls through into the shared
+                // tracking-mode logic below THIS SAME tick: setting
+                // `forceNextInference` there folds into `justSettled`
+                // just below, which both bypasses cadence AND forces
+                // `ROIScheduler` to pick `.fullFrame` — the "one final
+                // full-frame inference on entering tracking" the plan
+                // calls for, immediate rather than waiting a full poll.
+                if arCapture.captureStage == .sweeping {
+                    if !wasSweeping {
+                        // Fresh sweep (the initial post-lock one, or a
+                        // "Rescan table" restart) — neither motion gate's
+                        // ring should carry poses from whatever mode
+                        // preceded this.
+                        sweepStartedAt = now
+                        motionGate = CameraMotionGate()
+                        sweepMotionGate = freshSweepMotionGate()
+                        wasSweeping = true
+                    }
+                    self.cameraMoving = false   // the sweep card carries its own messaging
+
+                    let jerking = sweepMotionGate.update(transform: frame.cameraTransform, at: frame.timestamp)
+                    let doneTapped = self.sweepDoneRequested
+                    self.sweepDoneRequested = false
+                    let elapsed = now - (sweepStartedAt ?? now)
+                    let coverageComplete = Set(TableZoneID.allCases).isSubset(of: self.sweepZonesSeen)
+
+                    if doneTapped || (elapsed >= 12 && coverageComplete) {
+                        wasSweeping = false
+                        motionGate = CameraMotionGate()
+                        arCapture.enterTracking()
+                        forceNextInference = true
+                        // Deliberately NOT `continue` here — falls through.
+                    } else if jerking {
+                        // Too fast even for the sweep's relaxed tolerance —
+                        // a genuine jerk, not a deliberate slow pan; skip
+                        // ingest this tick.
+                        await self.finishTick(loopStart: loopStart)
+                        continue
+                    } else if let planeTransform = arCapture.lockedPlaneTransform {
+                        if recognizer == nil {
+                            recognizer = await recognizerProvider()
+                            let typeName = recognizer.map { String(describing: type(of: $0)) } ?? "nil"
+                            self.diagnostics.recognizerType = typeName
+                            self.detectorUnavailable = recognizer is MockRecognizer
+                            Self.logger.notice("recognizer resolved: \(typeName, privacy: .public), detectorUnavailable=\(self.detectorUnavailable, privacy: .public)")
+                        }
+                        if self.isEnded { break pollLoop }
+                        guard let rec = recognizer else {
+                            await self.finishTick(loopStart: loopStart)
+                            continue
+                        }
+
+                        let projection = TableProjection(cameraTransform: frame.cameraTransform, intrinsics: frame.intrinsics,
+                                                         imageResolution: SIMD2<Float>(Float(frame.imageResolution.width),
+                                                                                       Float(frame.imageResolution.height)),
+                                                         planeTransform: planeTransform)
+                        let orientedSize = SIMD2<Double>(Double(frame.orientedImageSize.width),
+                                                         Double(frame.orientedImageSize.height))
+                        let geometry = self.trackerConfig.tableGeometry ?? TrackerConfig.TableGeometry()
+
+                        self.diagnostics.inferencesRun += 1
+                        let recognizerFrame = RecognizerFrame.buffer(frame.pixelBuffer, orientation: .right)
+                        let result: RecognitionResult
+                        do {
+                            result = try await rec.recognize(recognizerFrame)
+                            self.lastPipelineError = nil
+                        } catch {
+                            self.recognizerErrorCount += 1
+                            self.lastPipelineError = String(describing: error)
+                            Self.logger.error("recognize() threw during sweep (\(self.recognizerErrorCount, privacy: .public) total): \(String(describing: error), privacy: .public)")
+                            result = .empty
+                        }
+                        self.isWarmingUp = false
+                        if self.startupStage == .loadingDetector { self.startupStage = .lookingForTiles }
+                        self.diagnostics.lastRawDetectionCount = result.tiles.count
+                        self.diagnostics.lastTopDetections = result.tiles
+                            .sorted { $0.confidence > $1.confidence }
+                            .prefix(3)
+                            .map { "\($0.tile.code)@\(String(format: "%.2f", $0.confidence))" }
+                        if self.isEnded { break pollLoop }
+
+                        let projected = DetectionProjector.projectToTableSpace(
+                            result.tiles, projection: projection, orientedImageSize: orientedSize,
+                            tableExtent: geometry.extent, tileSize: SIMD2<Double>(0.024, 0.032))
+
+                        // The camera is PANNING during the sweep, so unlike
+                        // the still-tick `.fullFrame` path above, "full
+                        // frame" here does NOT mean "the whole table" — a
+                        // tile that panned out of frame early in the sweep
+                        // must be gated as "not looked at" rather than
+                        // scored as a miss (which, with sweep ingest's `2s`
+                        // no-motion grace, can retire the track and age it
+                        // past the tracker's `10s` rebirth window before the
+                        // ~12s sweep even ends). Compute THIS tick's visible
+                        // table region the same way the `.crops` path below
+                        // computes a crop's — nil (no gating; today's
+                        // behavior) only when the camera's pitched too near
+                        // the horizon for the projection to be trustworthy.
+                        let visibleRegion = Self.sweepVisibleRegion(projection: projection, orientedImageSize: orientedSize,
+                                                                    tableExtent: geometry.extent)
+                        let outcome = tracker.ingest(projected, at: CACurrentMediaTime(), motion: nil,
+                                                     visibleRegion: visibleRegion)
+                        self.logAndSnapshot(outcome, frame: frame.pixelBuffer, tracker: tracker)
+
+                        // Coverage: the same ≥60%-inside-frame bar item 2's
+                        // staleness tracker uses for "seen"
+                        // (`ROIScheduler.fractionInsideFrame`).
+                        let zones = ROIScheduler.projectedZoneRects(geometry: geometry, projection: projection,
+                                                                     orientedImageSize: frame.orientedImageSize)
+                        for (id, rect) in zones.identified where ROIScheduler.fractionInsideFrame(rect) >= 0.6 {
+                            self.sweepZonesSeen.insert(id)
+                        }
+
+                        await self.finishTick(loopStart: loopStart)
+                        continue
+                    } else {
+                        await self.finishTick(loopStart: loopStart)
+                        continue
+                    }
+                }
+
+                let moving = motionGate.update(transform: frame.cameraTransform, at: frame.timestamp)
+                // `|| forceNextInference` also covers the sweep-exit
+                // fall-through tick above: it sets `forceNextInference`
+                // (not from a `wasMoving`/`moving` transition), and folding
+                // it in here means `roiScheduler.decide(justSettled:)`
+                // further down picks `.fullFrame` on that SAME tick too —
+                // not just the cadence-level `.infer` bypass.
+                let justSettled = (wasMoving && !moving) || forceNextInference
+                wasMoving = moving
+                self.cameraMoving = moving
+
+                if justSettled {
+                    // Pose changed while we weren't ingesting — brackets need
+                    // re-projecting even though the tracker STATE didn't.
+                    forceNextInference = true
+                    self.updateARZoneBoxes(from: tracker.state)
+                }
+                if moving {
+                    await self.finishTick(loopStart: loopStart)
+                    continue
+                }
+
+                // Local (hand/tile) motion — settle gate + breathing signal,
+                // unchanged from the image-space loop. `sampleField` (not
+                // `sample`) so the SAME grid diff also yields the per-cell
+                // `changed` grid the ROI scheduler needs (chunk E) — calling
+                // both would double-diff against `motion`'s single
+                // `previousGrid` and desync them; see `MotionDetector`'s doc.
+                let field = motion.sampleField(frame.pixelBuffer, at: now)
+                let sample = field?.sample
+                if sample == nil { self.diagnostics.nilMotionSampleCount += 1 }
+                // Prefer ARKit's own light estimate (a real hardware
+                // reading) over the pixel-luma proxy when one's available.
+                if let lux = frame.lightLux {
+                    self.darkTableDetector.update(lightLux: lux, at: now)
+                    self.isDark = self.darkTableDetector.isDark
+                } else if let luma = sample?.meanLuma {
+                    self.darkTableDetector.update(meanLuma: luma, at: now)
+                    self.isDark = self.darkTableDetector.isDark
+                }
+                let level = sample?.level ?? 0
+                self.diagnostics.motionLevel = level
+                self.updatePhase(active: level >= self.trackerConfig.motionActive)
+
+                let thermalBucket = CadencePolicy.Thermal(
+                    processInfoRawValue: ProcessInfo.processInfo.thermalState.rawValue)
+                let wasThrottled = self.thermal == .throttled
+                self.thermal = thermalBucket >= .serious ? .throttled : .nominal
+                if self.thermal == .throttled, !wasThrottled {
+                    Self.logger.notice("thermal throttled — cadence backing off (state: \(thermalBucket.rawValue, privacy: .public))")
+                } else if wasThrottled, self.thermal == .nominal {
+                    Self.logger.notice("thermal recovered — cadence back to nominal")
+                }
+
+                var decision = cadence.decide(motionLevel: level, thermal: thermalBucket,
+                                              timeSinceLastInference: now - lastInference)
+                // Moving→still edge: bypass cadence once to catch the
+                // settled table promptly rather than waiting out idle/burst.
+                if forceNextInference, decision == .skip { decision = .infer }
+                forceNextInference = false
+
+                switch decision {
+                case .suspend:
+                    self.diagnostics.suspendDecisions += 1
+                    self.thermal = .throttled          // thermal `.critical`: inference paused
+                case .skip:
+                    self.diagnostics.skipDecisions += 1
+                case .infer:
+                    self.diagnostics.inferDecisions += 1
+                    lastInference = now
+                    if recognizer == nil {
+                        recognizer = await recognizerProvider()
+                        let typeName = recognizer.map { String(describing: type(of: $0)) } ?? "nil"
+                        self.diagnostics.recognizerType = typeName
+                        self.detectorUnavailable = recognizer is MockRecognizer
+                        Self.logger.notice("recognizer resolved: \(typeName, privacy: .public), detectorUnavailable=\(self.detectorUnavailable, privacy: .public)")
+                    }
+                    if self.isEnded { break pollLoop }
+                    guard let rec = recognizer else { break }
+                    guard let planeTransform = arCapture.lockedPlaneTransform else { break }
+
+                    // Pixel-space ↔ table-space projection for this tick —
+                    // built once, shared by the ROI zone projection, the
+                    // full-frame path, and the crop path's visible-region
+                    // mapping (all need the SAME camera pose).
+                    let projection = TableProjection(cameraTransform: frame.cameraTransform, intrinsics: frame.intrinsics,
+                                                     imageResolution: SIMD2<Float>(Float(frame.imageResolution.width),
+                                                                                   Float(frame.imageResolution.height)),
+                                                     planeTransform: planeTransform)
+                    let orientedSize = SIMD2<Double>(Double(frame.orientedImageSize.width),
+                                                     Double(frame.orientedImageSize.height))
+                    let geometry = self.trackerConfig.tableGeometry ?? TrackerConfig.TableGeometry()
+                    let extent = geometry.extent
+
+                    // Lane B chunk H item 2: zone rects are needed for
+                    // staleness tracking regardless of `useROIScheduler` —
+                    // hoisted out of that flag's block (was chunk E-only).
+                    let zones = ROIScheduler.projectedZoneRects(geometry: geometry, projection: projection,
+                                                                orientedImageSize: frame.orientedImageSize)
+                    self.updateZoneStaleness(tracker: tracker, zones: zones, geometry: geometry,
+                                             projection: projection, orientedSize: orientedSize, now: now)
+
+                    // Lane B chunk E: ask the ROI scheduler what to infer.
+                    // `useROIScheduler == false` always forces the original
+                    // full-frame behavior (an A/B escape hatch).
+                    let plan: ROIScheduler.InferencePlan
+                    if self.useROIScheduler {
+                        let myTurn = tracker.state.currentTurn == .me || tracker.state.myHand.count % 3 == 2
+                        plan = roiScheduler.decide(motionField: field, zones: zones, myTurn: myTurn,
+                                                   justSettled: justSettled, orientedImageSize: frame.orientedImageSize,
+                                                   imageResolution: frame.imageResolution, at: now)
+                    } else {
+                        plan = .fullFrame
+                    }
+                    let roiLabel: String
+                    switch plan {
+                    case .fullFrame: roiLabel = "full"
+                    case .crops: roiLabel = roiScheduler.lastPlanLabels.isEmpty ? "crop" : roiScheduler.lastPlanLabels.joined(separator: "+")
+                    case .none: roiLabel = "none"
+                    }
+                    self.diagnostics.roiPlan = self.useROIScheduler ? "roi: \(roiLabel)" : "roi: off"
+
+                    switch plan {
+                    case .fullFrame:
+                        self.diagnostics.inferencesRun += 1
+                        // Recognize the FULL captured frame — the periodic
+                        // safety net, the moving→still edge, or ROI
+                        // scheduling disabled.
+                        let recognizerFrame = RecognizerFrame.buffer(frame.pixelBuffer, orientation: .right)
+                        let result: RecognitionResult
+                        do {
+                            result = try await rec.recognize(recognizerFrame)
+                            self.lastPipelineError = nil
+                        } catch {
+                            self.recognizerErrorCount += 1
+                            self.lastPipelineError = String(describing: error)
+                            Self.logger.error("recognize() threw (\(self.recognizerErrorCount, privacy: .public) total): \(String(describing: error), privacy: .public)")
+                            result = .empty
+                        }
+                        self.isWarmingUp = false
+                        if self.startupStage == .loadingDetector { self.startupStage = .lookingForTiles }
+                        self.diagnostics.lastRawDetectionCount = result.tiles.count
+                        self.diagnostics.lastTopDetections = result.tiles
+                            .sorted { $0.confidence > $1.confidence }
+                            .prefix(3)
+                            .map { "\($0.tile.code)@\(String(format: "%.2f", $0.confidence))" }
+                        if self.isEnded { break pollLoop }
+
+                        // Pixel-space detections → table-space `DetectedTile`s
+                        // (the seam that keeps `Recognition` ARKit-free — see
+                        // `TableProjection`/`DetectionProjector`'s own docs).
+                        let projected = DetectionProjector.projectToTableSpace(
+                            result.tiles, projection: projection, orientedImageSize: orientedSize,
+                            tableExtent: extent, tileSize: SIMD2<Double>(0.024, 0.032))
+
+                        // The loop is serial, so at most one inference is
+                        // ever in flight — the "drop-if-in-flight" guard is
+                        // structural. Full view this tick — no
+                        // `visibleRegion` gate.
+                        let outcome = tracker.ingest(projected, at: CACurrentMediaTime(), motion: sample)
+                        self.logAndSnapshot(outcome, frame: frame.pixelBuffer, tracker: tracker)
+
+                    case let .crops(rects):
+                        // Cap 2 crops/tick (thermal/latency budget) even
+                        // though `ROIScheduler` may return more candidates.
+                        var mergedImageSpace: [DetectedTile] = []
+                        var visibleRegionRect: TileBoundingBox?
+                        for rect in rects.prefix(2) {
+                            guard let cropBuffer = pixelBufferCropper.crop(frame.pixelBuffer, to: rect) else { continue }
+                            self.diagnostics.inferencesRun += 1
+                            // Crop the NATIVE (un-rotated) buffer, then
+                            // orient it exactly like the full frame — Vision
+                            // rotates+detects the crop on its own terms, so
+                            // its boxes come back normalized to the CROP's
+                            // own oriented size. `ROICropMapper.fullImageBox`
+                            // is the exact inverse chain back to full-image
+                            // oriented space (see that method's own doc).
+                            let cropFrame = RecognizerFrame.buffer(cropBuffer, orientation: .right)
+                            let cropResult: RecognitionResult
+                            do {
+                                cropResult = try await rec.recognize(cropFrame)
+                                self.lastPipelineError = nil
+                            } catch {
+                                self.recognizerErrorCount += 1
+                                self.lastPipelineError = String(describing: error)
+                                Self.logger.error("recognize() threw on ROI crop (\(self.recognizerErrorCount, privacy: .public) total): \(String(describing: error), privacy: .public)")
+                                cropResult = .empty
+                            }
+                            if self.isEnded { break pollLoop }
+                            let mapped = cropResult.tiles.map { tile in
+                                DetectedTile(id: tile.id, tile: tile.tile, confidence: tile.confidence,
+                                            box: ROICropMapper.fullImageBox(fromCropNormalized: tile.box, cropRect: rect,
+                                                                             imageResolution: frame.imageResolution,
+                                                                             orientedImageSize: frame.orientedImageSize),
+                                            inReticle: tile.inReticle)
+                            }
+                            mergedImageSpace.append(contentsOf: mapped)
+
+                            // Table-space visible region: the crop's own
+                            // native rect → oriented-normalized (the exact
+                            // inverse of `ROICropMapper.cropRect`) → table
+                            // space via `TableProjection.tablePoint`, unioned
+                            // across every crop this tick.
+                            let cropOriented = ROICropMapper.orientedNormalizedRect(
+                                fromRawRect: rect, rawSize: frame.imageResolution, orientedSize: frame.orientedImageSize)
+                            if let tableRect = Self.tableSpaceRect(ofOrientedRect: cropOriented, projection: projection,
+                                                                   orientedImageSize: orientedSize, tableExtent: extent) {
+                                visibleRegionRect = visibleRegionRect.map { Self.union($0, tableRect) } ?? tableRect
+                            }
+                        }
+                        self.isWarmingUp = false
+                        if self.startupStage == .loadingDetector { self.startupStage = .lookingForTiles }
+
+                        // Every crop failed outright (pixel crop AND
+                        // table-projection) — nothing learned this tick;
+                        // don't let an empty detection set masquerade as "the
+                        // whole table is empty" (that would accrue full-view
+                        // misses on every track from a plumbing glitch, not
+                        // real evidence).
+                        guard !(mergedImageSpace.isEmpty && visibleRegionRect == nil) else { break }
+
+                        // Overlapping crops (padding) can see the same
+                        // physical tile twice — de-dupe before projecting,
+                        // or it would phantom-birth a ghost track.
+                        let deduped = Self.deduplicatingOverlaps(mergedImageSpace)
+                        self.diagnostics.lastRawDetectionCount = deduped.count
+                        self.diagnostics.lastTopDetections = deduped
+                            .sorted { $0.confidence > $1.confidence }
+                            .prefix(3)
+                            .map { "\($0.tile.code)@\(String(format: "%.2f", $0.confidence))" }
+                        if self.isEnded { break pollLoop }
+
+                        let projected = DetectionProjector.projectToTableSpace(
+                            deduped, projection: projection, orientedImageSize: orientedSize,
+                            tableExtent: extent, tileSize: SIMD2<Double>(0.024, 0.032))
+                        let outcome = tracker.ingest(projected, at: CACurrentMediaTime(), motion: sample,
+                                                     visibleRegion: visibleRegionRect)
+                        self.logAndSnapshot(outcome, frame: frame.pixelBuffer, tracker: tracker)
+
+                    case .none:
+                        break
+                    }
+                }
+
+                await self.finishTick(loopStart: loopStart)
+            }
+        }
+    }
+
+    /// Lane B chunk H item 2 — updates per-zone `zoneLastSeenOnScreen` off
+    /// this tick's projected zone rects (≥60% inside the frame counts as
+    /// "seen," the same bar the guided sweep's coverage tracker uses), then
+    /// decides whether a directional rescan-prompt chip should appear.
+    /// Called once per still, INFERRED tracking-mode tick (never during
+    /// `.sweeping`, which has its own coverage tracker above). The "seen"
+    /// update itself runs regardless of `phase` — camera-pose visibility
+    /// doesn't care whether tiles are mid-move — but the PROMPT decision is
+    /// gated on `phase != .action` per the plan's throttle rules (never
+    /// interrupt while tiles are visibly moving).
+    ///
+    /// Simplification worth flagging for device QA: "inferred tick" here
+    /// means the cadence policy decided `.infer` (this method's one call
+    /// site), not that this SPECIFIC zone was the one actually recognized
+    /// this tick (relevant only when `useROIScheduler` crops to a subset of
+    /// zones) — a zone counts as "seen" whenever it was geometrically
+    /// ≥60% on screen during any inferred tick, regardless of which zone(s)
+    /// `ROIScheduler` chose to crop. Good enough for a proactive UX nudge;
+    /// not meant to be a precise audit trail.
+    private func updateZoneStaleness(tracker: TableTracker, zones: ROIScheduler.ZoneRects,
+                                     geometry: TrackerConfig.TableGeometry, projection: TableProjection,
+                                     orientedSize: SIMD2<Double>, now: TimeInterval) {
+        for (id, rect) in zones.identified where ROIScheduler.fractionInsideFrame(rect) >= 0.6 {
+            zoneLastSeenOnScreen[id] = now
+        }
+
+        guard phase != .action else { return }   // never prompt while tiles are moving
+
+        // Auto-clear: the currently-prompted zone just came back into view.
+        if let current = rescanPrompt, zoneLastSeenOnScreen[current.zone] == now {
+            rescanPrompt = nil
+        }
+        guard rescanPrompt == nil else { return }   // at most one prompt visible
+
+        let hasUnresolvedPressure = !tracker.state.unresolved.isEmpty
+        let centers = ROIScheduler.zoneCenters(geometry: geometry)
+
+        for zone in TableZoneID.allCases {
+            let staleSince = zoneLastSeenOnScreen[zone] ?? zoneTrackingStartedAt
+            guard now - staleSince > 45 else { continue }
+            guard zoneEverHadTracks.contains(zone) || hasUnresolvedPressure else { continue }
+            let cooldownUntil = (zoneLastPromptedAt[zone] ?? -.infinity) + 90
+            guard now >= cooldownUntil else { continue }
+            guard let center = centers[zone],
+                  let projected = projection.normalizedOrientedPoint(ofTablePoint: center, orientedImageSize: orientedSize),
+                  let direction = Self.rescanDirection(for: projected)
+            else { continue }
+            zoneLastPromptedAt[zone] = now
+            rescanPrompt = RescanPrompt(zone: zone,
+                                        text: "Pan \(direction.verb) to check \(zone.displayName) \(direction.arrow)")
+            break
+        }
+    }
+
+    /// Which way a zone's projected table-space center fell outside the
+    /// visible `[0,1]` frame — `updateZoneStaleness`'s pure classification;
+    /// `LiveFeedPane` never sees this directly, only the assembled
+    /// `RescanPrompt.text`. Picks whichever axis overflowed more.
+    private enum RescanDirection {
+        case left, right, up, down
+        var verb: String {
+            switch self {
+            case .left: return "left"
+            case .right: return "right"
+            case .up: return "up"
+            case .down: return "down"
+            }
+        }
+        var arrow: String {
+            switch self {
+            case .left: return "←"
+            case .right: return "→"
+            case .up: return "↑"
+            case .down: return "↓"
+            }
+        }
+    }
+
+    private static func rescanDirection(for projected: SIMD2<Double>) -> RescanDirection? {
+        let overflowX = projected.x < 0 ? -projected.x : max(0, projected.x - 1)
+        let overflowY = projected.y < 0 ? -projected.y : max(0, projected.y - 1)
+        guard overflowX > 0 || overflowY > 0 else { return nil }   // on screen — no direction to give
+        if overflowX >= overflowY {
+            return projected.x < 0 ? .left : .right
+        } else {
+            return projected.y < 0 ? .up : .down
         }
     }
 
@@ -362,6 +1212,27 @@ final class CoachLiveSession: Identifiable {
         guard state.revision != lastPublishedRevision, now - lastPublishTime >= Self.publishInterval else { return }
         applyState(state, pending: tracker.pendingHandEnd, log: tracker.events)
         await refreshAdvice(for: state)
+        persistIfDue(now: now)
+    }
+
+    /// Throttled disk persistence (plan A6) — real path only (`tracker` is
+    /// nil on the mock path, so this is a no-op there; MJ_SCREEN scenes never
+    /// touch disk). At most once per `persistInterval` unless `force`
+    /// (`pauseLoop()` forces it — backgrounding is exactly when a kill is
+    /// most likely, so that save can't be starved by the throttle).
+    /// Snapshotting itself is synchronous and cheap (the same cost as a
+    /// correction's `assembleState`); only the JSON write happens off-main,
+    /// via the store actor. `savedAt` is stamped here, app-side — the
+    /// tracker itself is forbidden from touching a wall clock.
+    private func persistIfDue(now: TimeInterval, force: Bool = false) {
+        guard let tracker else { return }
+        guard force || now - lastPersistTime >= Self.persistInterval else { return }
+        lastPersistTime = now
+        let coordinateSpace: PersistedCoachLiveSession.CoordinateSpaceMarker =
+            trackerConfig.coordinateSpace == .tableSpace ? .tableSpace : .imageSpace
+        let persisted = PersistedCoachLiveSession(snapshot: tracker.snapshot(at: now), savedAt: Date(),
+                                                  coordinateSpace: coordinateSpace)
+        Task { await CoachLiveSessionStore.shared.save(persisted) }
     }
 
     /// Wait-impact annotator (plan §4.6). Pure `@Sendable` — depends only on
@@ -416,6 +1287,64 @@ final class CoachLiveSession: Identifiable {
         case .table:
             seenHistogram[face.classIndex] += 1
             seenTotal += 1
+        }
+        recomputeAdvice()
+    }
+
+    /// Bracket-reassign correction (plan A3): the whole cluster wrapped by
+    /// one zone bracket actually belongs to the other. `zone` is which chip
+    /// was tapped — `.table` (the POND chip) offers "these are my hand" and
+    /// moves every currently-pond track to `.myHand`; `.mine` (the MINE chip)
+    /// offers "these are the pond" and moves every currently-hand(+bonus)
+    /// track to `.pond`. (The observed failure this fixes is the POND
+    /// bracket wrapping the user's own rank — not the reverse — but both
+    /// directions are offered since either can go wrong.)
+    ///
+    /// Real path: snapshot the CURRENT opposite-zone track ids straight off
+    /// `tracker.state` (not any cached UI list), one bulk `overrideZone`
+    /// call, one republish. Mock path: mirrors the same move locally (pond
+    /// entries → synthesized-TrackID hand tiles, or hand tiles → pond
+    /// entries — there's no separate mock `myBonus` list, so only
+    /// `handTiles`/`drawnTile` participate on that side) and recomputes
+    /// advice — same dual-path convention as `assignUnresolved`.
+    func reassignZoneBracket(_ zone: ZoneKind) {
+        if let tracker {
+            let ids: [TrackID]
+            let target: TileZone
+            switch zone {
+            case .table:   // POND chip tapped → "these are my hand"
+                ids = tracker.state.pond.map(\.id)
+                target = .myHand
+            case .mine:    // MINE chip tapped → "these are the pond"
+                ids = (tracker.state.myHand + tracker.state.myBonus).map(\.id)
+                target = .pond
+            }
+            tracker.overrideZone(tracks: ids, to: target)
+            publishAfterCorrection()
+            return
+        }
+        switch zone {
+        case .table:
+            let moved = pond
+            pond = []
+            for entry in moved {
+                let box = TileBoundingBox(x: 0.5, y: 0.84, width: 0.06, height: 0.1)
+                handTiles.append(TrackedTile(id: nextTrackID(), face: entry.tile, box: box,
+                                             zone: .myHand, state: .live, firstSeen: 0, lastSeen: 0))
+                if seenHistogram.indices.contains(entry.tile.classIndex) {
+                    seenHistogram[entry.tile.classIndex] = max(0, seenHistogram[entry.tile.classIndex] - 1)
+                }
+            }
+            seenTotal = seenHistogram.reduce(0, +)
+        case .mine:
+            let moved = handTiles + (drawnTile.map { [$0] } ?? [])
+            handTiles = []
+            drawnTile = nil
+            for track in moved {
+                pond.append(PondEntry(tile: track.face))
+                seenHistogram[track.face.classIndex] += 1
+            }
+            seenTotal = seenHistogram.reduce(0, +)
         }
         recomputeAdvice()
     }
@@ -544,21 +1473,116 @@ final class CoachLiveSession: Identifiable {
         handBoundary = nil
     }
 
-    /// Ends the session: cancels the tracking loop. The camera is owned by
-    /// `ScanView` (the §5 hoist) and keeps running for the return to Scan, so
-    /// it's deliberately NOT stopped here; the idle timer is reset by
+    /// Ends the session: cancels the tracking loop and pauses the AR capture
+    /// (if any — chunk G's `ScanCoordinator.endCoachLive()`/
+    /// `beginScoreHandoff` then restart Scan's own camera). The fallback
+    /// `camera` itself is owned by `ScanView` (the §5 hoist) and keeps
+    /// running for the return to Scan on THAT path, so it's deliberately NOT
+    /// stopped here; the idle timer is reset by
     /// `CoachLiveFlowView.onDisappear` + `ScanCoordinator.endCoachLive()`.
-    /// Idempotent — safe to call from multiple teardown paths.
+    /// Idempotent — safe to call from multiple teardown paths. A clean end
+    /// (score handoff, exit) clears the persisted archive (plan A6) — only a
+    /// KILL should ever leave one behind for `CoachLiveSetupView` to resume.
     func end() {
         isEnded = true
         loopTask?.cancel()
         loopTask = nil
+        // `ARTableCapture` is `@MainActor`-isolated; `CoachLiveSession`
+        // itself isn't (its intent methods are called directly from SwiftUI
+        // action closures, which already run on the main actor at runtime
+        // but aren't statically typed `@MainActor` all the way through) —
+        // `assumeIsolated` bridges that gap without spreading `@MainActor`
+        // through this whole class's call graph. Every call site of `end()`
+        // is a SwiftUI teardown path (view `onDisappear`/coordinator
+        // methods), so this is always true in practice.
+        MainActor.assumeIsolated { arCapture?.pause() }
+        if tracker != nil {
+            Task { await CoachLiveSessionStore.shared.clear() }
+        }
     }
 
-    /// scenePhase → background: idle the loop (the flow view stops the camera).
-    func pauseLoop() { isPaused = true }
+    /// scenePhase → background: idle the loop and force a persist —
+    /// backgrounding is exactly when the app is most likely to be killed
+    /// next, so that save can't be starved by the throttle.
+    func pauseLoop() {
+        isPaused = true
+        persistIfDue(now: CACurrentMediaTime(), force: true)
+    }
     /// scenePhase → foreground: resume polling.
     func resumeLoop() { isPaused = false }
+
+    /// scenePhase → background, whole-capture version (Lane B chunk G):
+    /// pauses the loop AND whichever capture backend is actually live, so
+    /// `CoachLiveFlowView` never needs to reach into capture internals (or
+    /// know which backend this session is running) to do the right thing.
+    func sceneDidBackground() {
+        pauseLoop()
+        MainActor.assumeIsolated { arCapture?.pause() }
+        #if !targetEnvironment(simulator)
+        // `isARCaptureActive` (not `arCapture == nil`): after the never-locks
+        // fallback (`usingFallbackCapture`) `arCapture` is still non-nil but
+        // the loop is actually driven by `camera`, so the camera — not the
+        // (already-paused) AR session — is what must be stopped here.
+        if !isARCaptureActive { camera.stop() }
+        #endif
+    }
+
+    /// scenePhase → active, the mirror image of `sceneDidBackground()`. Never
+    /// restarts `camera` while `arCapture` is live — doing so would fight
+    /// ARKit for the capture device — and, symmetrically, never re-runs the AR
+    /// session once we've degraded to the image-space `camera` fallback
+    /// (`usingFallbackCapture`): resuming ARKit there would reclaim the capture
+    /// device out from under the fallback camera loop.
+    func sceneDidActivate() {
+        resumeLoop()
+        if isARCaptureActive {
+            MainActor.assumeIsolated { arCapture?.resume() }
+        }
+        #if !targetEnvironment(simulator)
+        if !isARCaptureActive { camera.requestAndStart() }
+        #endif
+    }
+
+    /// True when the AR capture loop (not the mock/headless path, and not
+    /// a session that's degraded to the image-space fallback) is actually
+    /// driving this session — Lane B chunk H gates the "Rescan table" link
+    /// (`CoachLiveView`'s state pane) on this, since `rescanTable()` only
+    /// makes sense on this path.
+    var isARCaptureActive: Bool { arCapture != nil && !usingFallbackCapture }
+
+    /// "Rescan table" (Lane B chunk H item 3): re-enters the guided sweep
+    /// stage without resetting the tracker — the sweep card reappears
+    /// (`StartupStatusOverlay` reads `arCapture.captureStage` directly, so
+    /// no extra plumbing is needed) and the AR loop resumes full-frame
+    /// sweep ingestion on its next tick. A no-op off the AR path.
+    func rescanTable() {
+        guard isARCaptureActive else { return }
+        MainActor.assumeIsolated { arCapture?.enterSweeping() }
+    }
+
+    /// The sweep card's "Done" link — ends the guided sweep early even if
+    /// the elapsed-time/coverage exit condition hasn't cleared yet.
+    /// Consumed (and reset) by the AR loop's very next tick. A no-op off
+    /// the AR/sweeping path (the link isn't shown there).
+    func finishSweepEarly() { sweepDoneRequested = true }
+
+    /// Dismisses the current rescan-prompt chip's "×". The zone's normal
+    /// 90s re-prompt cooldown already started when the prompt was first
+    /// shown (see `updateZoneStaleness`), so dismissal doesn't need to
+    /// touch it — this is "not right now," not "never again."
+    func dismissRescanPrompt() { rescanPrompt = nil }
+
+    /// Torch control that works whichever capture backend is live: AR mode
+    /// routes through `ARTableCapture.setTorch` (community-proven alongside
+    /// ARKit — see that method's own doc for the verify-on-device caveat),
+    /// the fallback path through `CameraCapture.setTorch`.
+    func setTorch(_ on: Bool) {
+        if let arCapture {
+            MainActor.assumeIsolated { arCapture.setTorch(on) }
+        } else {
+            camera.setTorch(on)
+        }
+    }
 
     // MARK: - Publish (real path: TrackedTableState → UI surface)
 
@@ -640,10 +1664,31 @@ final class CoachLiveSession: Identifiable {
         seenTotal = state.seenHistogram.reduce(0, +)
 
         // Zone geometry for the bracket overlay (§7): union boxes per zone.
-        zoneBoxes = ZoneBoxes(
-            mine: (state.myHand + state.myBonus + state.myMelds.flatMap { $0 }).map(\.box),
-            table: state.pond.map(\.box) + state.opponentMelds.values.flatMap { $0.flatMap { $0 } }.map(\.box),
-            unresolved: state.unresolved.map(\.box))
+        // Table-space (AR) mode re-projects those union rects through the
+        // CURRENT camera pose first (Lane B chunk D/F — see
+        // `updateARZoneBoxes`), so brackets stay glued to the table through
+        // camera movement; image-space mode (the harness/fallback default)
+        // is byte-for-byte unchanged — `DetectedTile.box` already lives in
+        // the exact oriented-image space `ZoneBracketsOverlay` expects.
+        if trackerConfig.coordinateSpace == .tableSpace {
+            updateARZoneBoxes(from: state)
+            // Lane B chunk H item 2: "ever had tracks" per `TableZoneID` —
+            // the edge↔seat mapping is `ZoneModel`'s own fixed table-space
+            // convention (left edge → `.left`, far/low-y edge → `.across`,
+            // right edge → `.right`; see that type's doc).
+            if !state.myHand.isEmpty || !state.myBonus.isEmpty || state.myMelds.contains(where: { !$0.isEmpty }) {
+                zoneEverHadTracks.insert(.hand)
+            }
+            if !state.pond.isEmpty { zoneEverHadTracks.insert(.pond) }
+            if !(state.opponentMelds[.left]?.isEmpty ?? true) { zoneEverHadTracks.insert(.meldLeft) }
+            if !(state.opponentMelds[.right]?.isEmpty ?? true) { zoneEverHadTracks.insert(.meldRight) }
+            if !(state.opponentMelds[.across]?.isEmpty ?? true) { zoneEverHadTracks.insert(.meldFar) }
+        } else {
+            zoneBoxes = ZoneBoxes(
+                mine: (state.myHand + state.myBonus + state.myMelds.flatMap { $0 }).map(\.box),
+                table: state.pond.map(\.box) + state.opponentMelds.values.flatMap { $0.flatMap { $0 } }.map(\.box),
+                unresolved: state.unresolved.map(\.box))
+        }
 
         applyEvents(log)
 
@@ -661,6 +1706,199 @@ final class CoachLiveSession: Identifiable {
             winDetected = WinInfo(isSelfDraw: true, winningTile: drawnTile?.face)
         }
         wasHandComplete = state.isMyHandComplete
+    }
+
+    /// AR-only (Lane B chunk D/F): re-projects each zone's TABLE-space union
+    /// rect into normalized oriented-image space off the CURRENT camera pose
+    /// (`arCapture.latestFrame`/`.lockedPlaneTransform` — NOT the pose the
+    /// detections that produced `state` were captured against, which may be
+    /// stale by the time this publishes) so `ZoneBracketsOverlay` — which
+    /// only ever understands oriented-image-space boxes — keeps working
+    /// completely unchanged. Leaves `zoneBoxes` as-is (rather than clearing
+    /// it) when there's no current pose to project against yet, so brackets
+    /// don't flash away for a single tick. Also the entry point for the
+    /// camera moving→still edge's forced refresh (`startARLoop`) — that call
+    /// re-projects the LAST published state's boxes without waiting for a
+    /// new tracker revision, since the pose (not the state) is what changed.
+    ///
+    /// Plain (nonisolated) method, like `applyState` itself — the
+    /// `arCapture`-touching body is wrapped in `MainActor.assumeIsolated`
+    /// (see `end()`'s doc for why) rather than marking this `@MainActor`,
+    /// which would force `applyState` (and everything that calls it) to
+    /// become `@MainActor`/`async` too.
+    private func updateARZoneBoxes(from state: TrackedTableState) {
+        MainActor.assumeIsolated {
+            guard let arCapture, let planeTransform = arCapture.lockedPlaneTransform,
+                  let frame = arCapture.latestFrame else { return }
+            let projection = TableProjection(cameraTransform: frame.cameraTransform, intrinsics: frame.intrinsics,
+                                             imageResolution: SIMD2<Float>(Float(frame.imageResolution.width),
+                                                                           Float(frame.imageResolution.height)),
+                                             planeTransform: planeTransform)
+            let orientedSize = SIMD2<Double>(Double(frame.orientedImageSize.width), Double(frame.orientedImageSize.height))
+            let extent = trackerConfig.tableGeometry?.extent ?? TrackerConfig.TableGeometry().extent
+
+            let mineBoxes = (state.myHand + state.myBonus + state.myMelds.flatMap { $0 }).map(\.box)
+            let tableBoxes = state.pond.map(\.box) + state.opponentMelds.values.flatMap { $0.flatMap { $0 } }.map(\.box)
+
+            zoneBoxes = ZoneBoxes(
+                mine: Self.projectedTableRect(mineBoxes, projection: projection,
+                                              orientedImageSize: orientedSize, tableExtent: extent).map { [$0] } ?? [],
+                table: Self.projectedTableRect(tableBoxes, projection: projection,
+                                               orientedImageSize: orientedSize, tableExtent: extent).map { [$0] } ?? [],
+                unresolved: state.unresolved.compactMap {
+                    Self.projectedTableRect([$0.box], projection: projection,
+                                            orientedImageSize: orientedSize, tableExtent: extent)
+                })
+        }
+    }
+
+    /// Folds `tableBoxes` (normalized TABLE-space, plane anchor at (0.5,
+    /// 0.5) — `TrackedTile.box` in `.tableSpace` mode) into their union rect,
+    /// converts its 4 corners from table-space-normalized units back to raw
+    /// anchor-local metres (the exact inverse of `DetectionProjector`'s
+    /// `nx = local.x / tableExtent + 0.5`), projects each through
+    /// `projection` into normalized oriented-image space, and returns the
+    /// bounding box of whichever corners projected successfully. A corner
+    /// fails to project when it's off-screen or behind the camera along that
+    /// ray (`TableProjection.normalizedOrientedPoint` returns nil) — dropped
+    /// rather than treated as an error; `nil` only when EVERY corner fails
+    /// (the whole zone is off-screen this frame), which the caller reads as
+    /// "no bracket this frame," matching `ZoneBracketsOverlay`'s existing
+    /// nil-rect contract.
+    private static func projectedTableRect(_ tableBoxes: [TileBoundingBox], projection: TableProjection,
+                                           orientedImageSize: SIMD2<Double>, tableExtent: Double) -> TileBoundingBox? {
+        guard !tableBoxes.isEmpty, tableExtent > 0 else { return nil }
+        let minX = tableBoxes.map(\.x).min()!
+        let minY = tableBoxes.map(\.y).min()!
+        let maxX = tableBoxes.map { $0.x + $0.width }.max()!
+        let maxY = tableBoxes.map { $0.y + $0.height }.max()!
+
+        func local(_ normalized: Double) -> Double { (normalized - 0.5) * tableExtent }
+        let corners = [SIMD2<Double>(local(minX), local(minY)), SIMD2<Double>(local(maxX), local(minY)),
+                       SIMD2<Double>(local(maxX), local(maxY)), SIMD2<Double>(local(minX), local(maxY))]
+        let projected = corners.compactMap {
+            projection.normalizedOrientedPoint(ofTablePoint: $0, orientedImageSize: orientedImageSize)
+        }
+        guard !projected.isEmpty else { return nil }
+        let xs = projected.map(\.x), ys = projected.map(\.y)
+        let pMinX = xs.min()!, pMaxX = xs.max()!, pMinY = ys.min()!, pMaxY = ys.max()!
+        return TileBoundingBox(x: pMinX, y: pMinY, width: pMaxX - pMinX, height: pMaxY - pMinY)
+    }
+
+    /// Lane B chunk E: the table-space (normalized [0,1], plane anchor at
+    /// (0.5, 0.5)) bounding box of an oriented-normalized image rect — the
+    /// exact inverse of `projectedTableRect`: `TableProjection.tablePoint`
+    /// projects each corner onto the locked plane (anchor-local metres),
+    /// then the same `/extent + 0.5` normalization
+    /// `DetectionProjector.projectToTableSpace` uses turns that into
+    /// table-space units. A corner behind the camera or parallel to the
+    /// plane is dropped (`tablePoint` returns nil for it); `nil` only when
+    /// every corner fails (the crop wasn't actually looking at the table
+    /// this frame) — the caller then just skips visibility-gating that
+    /// crop's tracks for this tick, same as a full-view ingest.
+    private static func tableSpaceRect(ofOrientedRect rect: TileBoundingBox, projection: TableProjection,
+                                       orientedImageSize: SIMD2<Double>, tableExtent: Double) -> TileBoundingBox? {
+        let corners = [SIMD2<Double>(rect.x, rect.y), SIMD2<Double>(rect.x + rect.width, rect.y),
+                       SIMD2<Double>(rect.x + rect.width, rect.y + rect.height), SIMD2<Double>(rect.x, rect.y + rect.height)]
+        return tableSpaceBoundingBox(ofPoints: corners, projection: projection, orientedImageSize: orientedImageSize,
+                                     tableExtent: tableExtent, minimumProjected: 1)
+    }
+
+    /// Shared by `tableSpaceRect` (a crop's own 4 corners) and
+    /// `sweepVisibleRegion` (the guided sweep's full-frame corners + edge
+    /// midpoints): projects `points` (oriented-normalized image space)
+    /// through `projection.tablePoint`, then normalizes into table-space
+    /// units the same way `DetectionProjector.projectToTableSpace` does
+    /// (`local / tableExtent + 0.5`) — the space `TrackedTile.box`/
+    /// `tracker.ingest`'s `visibleRegion` both live in. `minimumProjected`
+    /// lets each caller decide how many dropped (off-screen/behind-camera)
+    /// points still add up to "trust this region": a single-rect crop only
+    /// has 4 corners to begin with, so any 1 landing is enough signal
+    /// (`tableSpaceRect`'s existing contract); the full-frame sweep case has
+    /// 8 candidates and needs at least 3 to rule out a near-horizon frame
+    /// where the projected box would be wildly skewed.
+    private static func tableSpaceBoundingBox(ofPoints points: [SIMD2<Double>], projection: TableProjection,
+                                              orientedImageSize: SIMD2<Double>, tableExtent: Double,
+                                              minimumProjected: Int) -> TileBoundingBox? {
+        guard tableExtent > 0 else { return nil }
+        let table = points.compactMap { projection.tablePoint(ofNormalizedOrientedPoint: $0, orientedImageSize: orientedImageSize) }
+        guard table.count >= minimumProjected else { return nil }
+        let xs = table.map { $0.x / tableExtent + 0.5 }
+        let ys = table.map { $0.y / tableExtent + 0.5 }
+        let minX = xs.min()!, maxX = xs.max()!, minY = ys.min()!, maxY = ys.max()!
+        return TileBoundingBox(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    /// Lane B chunk H item 1 fix: the guided sweep ingests full-frame while
+    /// the camera PANS, so — unlike the still-tick `.fullFrame`/`.crops`
+    /// paths, which either see the whole table or gate on a crop's own
+    /// small rect — "this tick's view" is itself only PART of the table.
+    /// Projects the oriented-normalized unit rect's 4 corners + 4 edge
+    /// midpoints (8 points; a plain 4-corner rect under-samples a frame
+    /// whose horizon cuts across an edge, e.g. only the bottom edge's
+    /// midpoint lands while both top corners miss) onto the table via
+    /// `tableSpaceBoundingBox`, same recipe the `.crops` branch uses for a
+    /// single crop rect. `minimumProjected: 3` — fewer than 3 of 8 points
+    /// landing means the camera is pitched too near the horizon this tick to
+    /// trust the resulting box; `nil` reproduces today's ungated (full-view)
+    /// ingest for that tick, same as `visibleRegion: nil` everywhere else.
+    private static func sweepVisibleRegion(projection: TableProjection, orientedImageSize: SIMD2<Double>,
+                                           tableExtent: Double) -> TileBoundingBox? {
+        let points: [SIMD2<Double>] = [
+            SIMD2(0, 0), SIMD2(1, 0), SIMD2(1, 1), SIMD2(0, 1),
+            SIMD2(0.5, 0), SIMD2(1, 0.5), SIMD2(0.5, 1), SIMD2(0, 0.5),
+        ]
+        return tableSpaceBoundingBox(ofPoints: points, projection: projection, orientedImageSize: orientedImageSize,
+                                     tableExtent: tableExtent, minimumProjected: 3)
+    }
+
+    /// Union of two normalized boxes — folds each crop's table-space
+    /// coverage into one `visibleRegion` for `tracker.ingest` (chunk E).
+    private static func union(_ a: TileBoundingBox, _ b: TileBoundingBox) -> TileBoundingBox {
+        let minX = min(a.x, b.x), minY = min(a.y, b.y)
+        let maxX = max(a.x + a.width, b.x + b.width), maxY = max(a.y + a.height, b.y + b.height)
+        return TileBoundingBox(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    /// De-duplicates detections that came from overlapping ROI crops
+    /// (padding means adjacent zone crops can share a strip of pixels, so
+    /// the same physical tile can be detected once per crop it falls
+    /// inside) — greedy class-agnostic NMS, the same idea as
+    /// `VisionRecognizer.suppressingOverlaps`'s own within-frame dedup (that
+    /// method is `Recognition`-internal, so this is a small App-side
+    /// reimplementation, not a duplicate of a public API). The full-frame
+    /// plan never needs this — one recognize call can't self-overlap.
+    private static func deduplicatingOverlaps(_ tiles: [DetectedTile], iouThreshold: Double = 0.55) -> [DetectedTile] {
+        let ranked = tiles.sorted { $0.confidence > $1.confidence }
+        var kept: [DetectedTile] = []
+        for tile in ranked where kept.allSatisfy({ Self.boxIoU($0.box, tile.box) <= iouThreshold }) {
+            kept.append(tile)
+        }
+        return kept
+    }
+
+    private static func boxIoU(_ a: TileBoundingBox, _ b: TileBoundingBox) -> Double {
+        let interW = max(0, min(a.x + a.width, b.x + b.width) - max(a.x, b.x))
+        let interH = max(0, min(a.y + a.height, b.y + b.height) - max(a.y, b.y))
+        let intersection = interW * interH
+        let union = a.width * a.height + b.width * b.height - intersection
+        return union > 0 ? intersection / union : 0
+    }
+
+    /// Shared post-`ingest` bookkeeping (chunk E) — both the full-frame and
+    /// crop-merged AR ingest paths need the identical event-log/snapshot
+    /// handling `startARLoop` used to inline once, before ROI branching
+    /// split it in two.
+    private func logAndSnapshot(_ outcome: IngestOutcome, frame buffer: CVPixelBuffer, tracker: TableTracker) {
+        if !outcome.newEvents.isEmpty {
+            Self.logger.debug("tracker committed \(outcome.newEvents.count, privacy: .public) event(s); live=\(tracker.diagnostics.live, privacy: .public) tentative=\(tracker.diagnostics.tentative, privacy: .public) missing=\(tracker.diagnostics.missing, privacy: .public)")
+        }
+        if outcome.newEvents.contains(where: {
+            if case .myHandComplete = $0.kind { return true }; return false
+        }) {
+            // Snapshot the exact winning-hand frame for the score handoff.
+            lastFrameSnapshot = ScanView.photo(from: buffer)
+        }
     }
 
     /// One projected UI event, plus the pond track it references (for a tile fix).
@@ -869,7 +2107,7 @@ struct HandBoundaryPrediction {
     var guessedWinner: Wind?
 }
 
-/// My hand went complete — surfaced as `WinBanner`.
+/// My hand went complete — surfaced as `HandEndedCard` (win mode).
 struct WinInfo {
     var isSelfDraw: Bool
     var winningTile: Tile?
@@ -914,4 +2152,10 @@ struct LiveDiagnostics {
     /// The recognizer's runtime type name (`"VisionRecognizer"` /
     /// `"MockRecognizer"`), resolved once the loop has loaded one.
     var recognizerType = "—"
+    /// Lane B chunk E: the AR loop's most recent `ROIScheduler` decision,
+    /// formatted for the debug HUD — `"roi: full"` / `"roi: hand+pond"` /
+    /// `"roi: none"` / `"roi: off"` (`useROIScheduler == false`). Never set
+    /// on `startLoop`'s image-space path or the mock path (no scheduler
+    /// runs there).
+    var roiPlan = "—"
 }

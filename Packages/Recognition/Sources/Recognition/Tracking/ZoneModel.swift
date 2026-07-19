@@ -37,7 +37,31 @@ import MahjongCore
 ///   tracks, and a 3–4-tile cluster whose faces form a meld shape *and* whose
 ///   centroid sits outside the pond core (Mahalanobis > `pondCoreSigma`) is an
 ///   `opponentMeld`, its owner read off the displacement direction from the
-///   pond centroid; everything else is `pond`.
+///   pond centroid; everything else is `pond` — *unless* the parser found no
+///   hand at all this frame, in which case a genuinely rank-sized, single-row
+///   cluster in the player's-seat band gets a `.myHand` rescue vote instead
+///   (see `isRescuableHandCluster`) rather than defaulting to pond by
+///   omission. This is the interim, image-space fix for the case where
+///   `TableSceneParser.handClusterIndex`'s own count/height gates miss the
+///   rank on a given frame (occlusion, an off camera angle…): the rescue
+///   competes in the vote ring on equal footing instead of letting a single
+///   miss-frame permanently mislabel the rank as pond.
+///
+/// - **Table-space branch (Lane B).** When `config.coordinateSpace` is
+///   `.tableSpace` the vote *source* changes but nothing else does: the boxes
+///   arriving are normalized table-plane coordinates (`DetectionProjector` —
+///   plane anchor at (0.5, 0.5), larger y toward me), so `zoneVotes` bypasses
+///   `TableSceneParser` and the learned image-space calibration entirely and
+///   reads zones straight off fixed `config.tableGeometry`: a ≥3-tile row
+///   hugging my edge is `myHand`/`myBonus`, a 3–4 meld-shaped cluster hugging
+///   one of the other three edges is an `opponentMeld` owned by that edge, a
+///   tile inside the central pond disk is `.pond`, everything else
+///   `.unresolved`. Those per-detection decisions then feed the *same*
+///   `castVote` ledger/hysteresis/resolve machinery — the whole point is that
+///   flicker robustness survives untouched; only where the votes come from is
+///   different. `isBandCalibrated`/`pondCentroid` stay coherent (readiness =
+///   `tableGeometry != nil`; centroid = the mean of current pond-track
+///   centers). The `.imageSpace` path is byte-for-byte the original.
 ///
 /// Composition, not ownership: `ZoneModel` is driven by the `TableTracker`
 /// facade (a later chunk), which on each settled frame calls
@@ -81,6 +105,14 @@ public final class ZoneModel {
     private var pondSxx = 0.0, pondSxy = 0.0, pondSyy = 0.0
     private var foldedPond: Set<TrackID> = []
 
+    // Table-space pond centroid (`.tableSpace` mode only): the mean of the
+    // current pond-zone track centers, recomputed each settled frame. Replaces
+    // the image-space online Gaussian above as `pondCentroid`'s source when the
+    // boxes are table-plane coordinates. Nil until a pond tile exists (mirrors
+    // image-space semantics: the geometry attribution term stays off until the
+    // pond is real).
+    private var tablePondCentroid: (x: Double, y: Double)?
+
     public init(config: TrackerConfig = TrackerConfig()) {
         self.config = config
         seedPondPrior()
@@ -88,19 +120,35 @@ public final class ZoneModel {
 
     // MARK: - Calibration read-out (diagnostics / the facade's geometry seam)
 
-    /// True once the hand band has locked (enough settled frames with a rank).
-    public var isBandCalibrated: Bool { handBand != nil }
+    /// Geometry-readiness readout (drives the facade's `.calibrating`→
+    /// `.playing` phase). Image space: true once the hand band has locked
+    /// (enough settled frames with a rank). Table space: there's no per-frame
+    /// band to accumulate — a set `config.tableGeometry` *is* readiness.
+    public var isBandCalibrated: Bool {
+        switch config.coordinateSpace {
+        case .imageSpace: return handBand != nil
+        case .tableSpace: return config.tableGeometry != nil
+        }
+    }
 
-    /// The locked hand-band y-range, or nil before calibration.
+    /// The locked hand-band y-range, or nil before calibration. Image-space
+    /// only (nil in table space — geometry there is fixed, not learned).
     public var handBandY: ClosedRange<Double>? { handBand }
 
-    /// The current pond centroid in normalized-image coordinates — nil until at
-    /// least one real pond tile has folded in (before that the estimate is pure
-    /// prior and geometry is uninformative). `TurnEngine` reads this for its
-    /// pond-entry geometry evidence; the facade passes it through.
+    /// The current pond centroid in the tracker's active coordinate space — nil
+    /// until at least one real pond tile exists (before that geometry is
+    /// uninformative). `TurnEngine` reads this for its pond-entry geometry
+    /// evidence; the facade passes it through, unchanged across both spaces.
+    /// Image space: the online Gaussian's mean (nil while it's pure prior).
+    /// Table space: the mean of the current pond-zone track centers.
     public var pondCentroid: (x: Double, y: Double)? {
-        guard !foldedPond.isEmpty, pondN > 0 else { return nil }
-        return (pondSx / pondN, pondSy / pondN)
+        switch config.coordinateSpace {
+        case .imageSpace:
+            guard !foldedPond.isEmpty, pondN > 0 else { return nil }
+            return (pondSx / pondN, pondSy / pondN)
+        case .tableSpace:
+            return tablePondCentroid
+        }
     }
 
     // MARK: - The one settled-frame step
@@ -117,16 +165,24 @@ public final class ZoneModel {
                               at t: TimeInterval) {
         guard !detections.isEmpty else { return }
 
-        let scene = TableSceneParser.parse(detections, config: config.sceneConfig)
-        accumulateBand(from: scene)
+        // The parser + hand-band calibration ARE the image-space geometry
+        // model; in table-space mode fixed `TableGeometry` replaces them and the
+        // parser is bypassed entirely (see the type doc's table-space note).
+        let scene: TableScene
+        if config.coordinateSpace == .imageSpace {
+            scene = TableSceneParser.parse(detections, config: config.sceneConfig)
+            accumulateBand(from: scene)
+        } else {
+            scene = .empty
+        }
 
         // detection UUID → owning track (births/rebirths/matches all appear).
         var trackFor: [UUID: TrackID] = [:]
         for m in outcome.matches { trackFor[m.detectionID] = m.track }
 
-        // Each detection's parser bucket, with the table bucket subdivided into
-        // pond / opponentMeld using the current pond Gaussian.
-        let votes = zoneVotes(for: scene, trackFor: trackFor, store: store)
+        // Each detection's zone vote — from the parser buckets (image space) or
+        // the fixed table geometry (table space); both branch inside `zoneVotes`.
+        let votes = zoneVotes(for: scene, detections: detections, trackFor: trackFor, store: store)
 
         // Resolve detection votes to the tracks that own them (a scene detection
         // that never matched a track is simply skipped), then cast in TrackID
@@ -136,6 +192,10 @@ public final class ZoneModel {
             return (id, decision)
         }.sorted { $0.id.raw < $1.id.raw }
         for entry in ordered { castVote(entry.id, entry.decision, store: store, at: t) }
+
+        // Table space has no online pond Gaussian; refresh the centroid from the
+        // zones just written (used by `TurnEngine` later this same commit).
+        if config.coordinateSpace == .tableSpace { recomputeTablePondCentroid(store: store) }
     }
 
     // MARK: - Facade correction / lifecycle support
@@ -160,31 +220,182 @@ public final class ZoneModel {
         ledgers.removeAll()
         locked.removeAll()
         foldedPond.removeAll()
+        tablePondCentroid = nil
         seedPondPrior()
     }
 
     // MARK: - Vote derivation
 
     /// The zone (and, for opponent melds, the owner seat) each detection votes
-    /// for this frame. `mine`→myHand/myBonus, `myMelds`→myMeld,
-    /// `unresolved`→unresolved are direct; `table` is subdivided.
-    private func zoneVotes(for scene: TableScene, trackFor: [UUID: TrackID],
-                           store: TrackStore) -> [UUID: ZoneDecision] {
+    /// for this frame. Branches on `config.coordinateSpace` — and *only* here,
+    /// so the whole downstream ledger/hysteresis/resolve path is shared. Image
+    /// space (the default, byte-for-byte the original): `mine`→myHand/myBonus,
+    /// `myMelds`→myMeld, `unresolved`→unresolved are direct, `table` is
+    /// subdivided (`scene.mine.isEmpty` threaded to `subdivideTable` as the
+    /// zoner-rescue gate). Table space: `zoneVotesTableSpace` reads the fixed
+    /// geometry (the `scene` is unused there — the parser was bypassed).
+    private func zoneVotes(for scene: TableScene, detections: [DetectedTile],
+                           trackFor: [UUID: TrackID], store: TrackStore) -> [UUID: ZoneDecision] {
+        switch config.coordinateSpace {
+        case .imageSpace:
+            var out: [UUID: ZoneDecision] = [:]
+            for d in scene.mine { out[d.id] = ZoneDecision(d.tile.isBonus ? .myBonus : .myHand, nil) }
+            for group in scene.myMelds { for d in group { out[d.id] = ZoneDecision(.myMeld, nil) } }
+            for d in scene.unresolved { out[d.id] = ZoneDecision(.unresolved, nil) }
+            let votes = subdivideTable(scene.table, sceneMineIsEmpty: scene.mine.isEmpty,
+                                       trackFor: trackFor, store: store)
+            for (id, decision) in votes { out[id] = decision }
+            return out
+        case .tableSpace:
+            return zoneVotesTableSpace(detections, trackFor: trackFor, store: store)
+        }
+    }
+
+    // MARK: - Table-space vote derivation (Lane B — fixed geometry, no parser)
+
+    /// Read each detection's zone straight off the locked table geometry
+    /// (`config.tableGeometry`), in the oriented table-space contract the app
+    /// guarantees before ingest: the plane anchor is at (0.5, 0.5), **larger y
+    /// points toward me** (so my edge is the high-y side y = 1, across is the
+    /// low-y side y = 0, left is low x, right is high x — the exact seat
+    /// convention `seatFromDisplacement` uses in image space). Detections are
+    /// physically clustered (the same union-find `TableSceneParser.cluster`,
+    /// which is pure normalized-box geometry) and each cluster read as:
+    ///
+    /// - **myHand / myBonus** — the LARGEST my-edge cluster (centroid within
+    ///   `handBandDepth` of y = 1) that has ≥3 tiles — exactly one cluster
+    ///   wins this per frame, physical union-find clustering (below) is what
+    ///   makes "largest" well-defined. Bonus faces split to `.myBonus`, the
+    ///   rest `.myHand`. A *lone* tile near my edge is deliberately NOT a
+    ///   hand (more likely a discard that slid) — it falls through to the
+    ///   pond/unresolved test.
+    /// - **myMeld** — any OTHER my-edge cluster (same band test), 3–4 tiles,
+    ///   whose voted faces form a meld shape (`MeldClassifier.classify`) — an
+    ///   exposed pung/kong/chow I've claimed, physically distinct from my
+    ///   hand row (a separate union-find cluster: set apart horizontally, or
+    ///   sitting slightly forward/lower-y of the row) so it never merges into
+    ///   the same cluster as the concealed rank. Mirrors the image-space
+    ///   path's `scene.myMelds` (`TableSceneParser`'s rank-line runs).
+    /// - **opponentMeld** — a 3–4 tile cluster hugging one of the *other three*
+    ///   edges (within `handBandDepth` of it) whose voted faces form a meld
+    ///   shape (`MeldClassifier.classify`, mirroring image space's
+    ///   `subdivideTable`). Owner = the edge, not image displacement: left
+    ///   edge → `.left`, far/low-y edge → `.across`, right edge → `.right`.
+    /// - **pond** — any remaining tile within `pondRadius` of (0.5, 0.5).
+    /// - **unresolved** — everything else.
+    ///
+    /// The voted face (not the raw detection's) drives the meld/bonus tests,
+    /// steadier across a flicker, exactly as `subdivideTable` does. Returns
+    /// no votes at all until `tableGeometry` is set (readiness gate — matches
+    /// `isBandCalibrated`).
+    private func zoneVotesTableSpace(_ detections: [DetectedTile],
+                                     trackFor: [UUID: TrackID],
+                                     store: TrackStore) -> [UUID: ZoneDecision] {
+        guard let geometry = config.tableGeometry else { return [:] }
+        let band = geometry.handBandDepth, pondR = geometry.pondRadius
         var out: [UUID: ZoneDecision] = [:]
-        for d in scene.mine { out[d.id] = ZoneDecision(d.tile.isBonus ? .myBonus : .myHand, nil) }
-        for group in scene.myMelds { for d in group { out[d.id] = ZoneDecision(.myMeld, nil) } }
-        for d in scene.unresolved { out[d.id] = ZoneDecision(.unresolved, nil) }
-        for (id, decision) in subdivideTable(scene.table, trackFor: trackFor, store: store) {
-            out[id] = decision
+
+        func votedFace(_ d: DetectedTile) -> Tile {
+            store.track(trackFor[d.id] ?? TrackID(raw: -1))?.face ?? d.tile
+        }
+
+        let clusters = TableSceneParser.cluster(detections, config: config.sceneConfig)
+        let centroids = clusters.map { cluster -> (cx: Double, cy: Double) in
+            (cluster.map(\.box.centerX).reduce(0, +) / Double(cluster.count),
+             cluster.map(\.box.centerY).reduce(0, +) / Double(cluster.count))
+        }
+        let nears = centroids.map { nearestEdge(cx: $0.cx, cy: $0.cy) }
+
+        // The hand row is whichever ≥3-tile my-edge cluster is LARGEST —
+        // computed up front so every other my-edge cluster this frame can be
+        // tested against it (a meld candidate) rather than also claiming
+        // `.myHand`. Ties keep the first (deterministic cluster ordering).
+        let myEdgeIndices = clusters.indices.filter {
+            nears[$0].edge == .my && nears[$0].distance <= band && clusters[$0].count >= 3
+        }
+        let handRowIndex = myEdgeIndices.max { clusters[$0].count < clusters[$1].count }
+
+        for i in clusters.indices {
+            let cluster = clusters[i]
+            let near = nears[i]
+
+            // My hand row: the largest my-edge cluster. Bonus faces → myBonus.
+            if i == handRowIndex {
+                for d in cluster { out[d.id] = ZoneDecision(votedFace(d).isBonus ? .myBonus : .myHand, nil) }
+                continue
+            }
+
+            // My exposed meld: another my-edge cluster (same band test), 3–4
+            // tiles, meld-shaped — an exposed pung/kong/chow set apart from
+            // the hand row.
+            if near.edge == .my, near.distance <= band, (3...4).contains(cluster.count),
+               MeldClassifier.classify(cluster.map(votedFace)) != nil {
+                for d in cluster { out[d.id] = ZoneDecision(.myMeld, nil) }
+                continue
+            }
+
+            // Opponent meld: a 3–4 meld-shaped cluster hugging another edge.
+            if let seat = near.opponentSeat, near.distance <= band, (3...4).contains(cluster.count),
+               MeldClassifier.classify(cluster.map(votedFace)) != nil {
+                for d in cluster { out[d.id] = ZoneDecision(.opponentMeld, seat) }
+                continue
+            }
+
+            // Otherwise decide each tile on its own: central disk → pond, else
+            // unresolved. (A slid lone hand-edge tile lands here too.)
+            for d in cluster {
+                let dx = d.box.centerX - 0.5, dy = d.box.centerY - 0.5
+                let inPond = (dx * dx + dy * dy).squareRoot() <= pondR
+                out[d.id] = ZoneDecision(inPond ? .pond : .unresolved, nil)
+            }
         }
         return out
+    }
+
+    private enum TableEdge { case my, left, right, far }
+
+    /// The table edge a normalized table-space point sits nearest, plus its
+    /// distance to that edge and — for the three non-me edges — the seat that
+    /// edge belongs to (oriented contract: my = high y, across = low y, left =
+    /// low x, right = high x).
+    private func nearestEdge(cx: Double, cy: Double)
+        -> (edge: TableEdge, distance: Double, opponentSeat: RelativeSeat?) {
+        let candidates: [(edge: TableEdge, distance: Double, seat: RelativeSeat?)] = [
+            (.my,    1 - cy, nil),
+            (.far,   cy,     .across),
+            (.left,  cx,     .left),
+            (.right, 1 - cx, .right),
+        ]
+        let best = candidates.min { $0.distance < $1.distance }!
+        return (best.edge, best.distance, best.seat)
+    }
+
+    /// Table-space pond centroid = mean of the current pond-zone track centers.
+    /// Recomputed once per settled frame after zones are written; `nil` when no
+    /// pond track exists. (Image space uses the online Gaussian instead.)
+    private func recomputeTablePondCentroid(store: TrackStore) {
+        let pond = store.tracks.filter { $0.zone == .pond }
+        guard !pond.isEmpty else { tablePondCentroid = nil; return }
+        let n = Double(pond.count)
+        let sx = pond.reduce(0.0) { $0 + $1.box.centerX } / n
+        let sy = pond.reduce(0.0) { $0 + $1.box.centerY } / n
+        tablePondCentroid = (sx, sy)
     }
 
     /// Split the parser's undifferentiated `table` bucket into pond vs opponent
     /// melds. Reuses the parser's own union-find clusterer so "physical group"
     /// means exactly what it means everywhere else; the meld test uses the
     /// tracks' *voted* faces (steadier than a single frame's detection).
-    private func subdivideTable(_ table: [DetectedTile], trackFor: [UUID: TrackID],
+    ///
+    /// `sceneMineIsEmpty` (true exactly when `TableSceneParser.parse` found no
+    /// rank this frame — its `handClusterIndex` count/height gates missed
+    /// everything) arms the interim zoner-rescue: a non-meld cluster that
+    /// clears `isRescuableHandCluster`'s bar votes `.myHand` instead of
+    /// falling through to the unconditional `.pond` default, so a single
+    /// miss-frame from the parser no longer locks the player's own rank into
+    /// the pond bucket. Inactive whenever the parser *did* find a hand this
+    /// frame — a valid `mine` already covers that case correctly.
+    private func subdivideTable(_ table: [DetectedTile], sceneMineIsEmpty: Bool, trackFor: [UUID: TrackID],
                                 store: TrackStore) -> [UUID: ZoneDecision] {
         guard !table.isEmpty else { return [:] }
         var out: [UUID: ZoneDecision] = [:]
@@ -201,11 +412,37 @@ public final class ZoneModel {
             if isMeldShape && maha2 > config.pondCoreSigma * config.pondCoreSigma {
                 let seat = seatFromDisplacement(dx: cx - centroid.0, dy: cy - centroid.1)
                 for d in cluster { out[d.id] = ZoneDecision(.opponentMeld, seat) }
+            } else if sceneMineIsEmpty && isRescuableHandCluster(cluster) {
+                for d in cluster { out[d.id] = ZoneDecision(.myHand, nil) }
             } else {
                 for d in cluster { out[d.id] = ZoneDecision(.pond, nil) }
             }
         }
         return out
+    }
+
+    /// The zoner-rescue gate (see `subdivideTable`'s doc): a table cluster
+    /// reads as a missed hand only if it's unambiguously rank-shaped —
+    /// deliberately narrower than `TableSceneParser.handClusterIndex`'s own
+    /// candidacy test in every dimension it shares, so the rescue only ever
+    /// catches a cluster the parser really should have called `mine`:
+    /// - at least `handRescueMinTiles` tiles (stricter than the parser's own
+    ///   `minHandCount` — a stray handful of table tiles never qualifies);
+    /// - mean center-Y at least `handRescueMinY` — the player's-seat bottom
+    ///   band, not a cluster elsewhere on the table;
+    /// - median tile height at least `sceneConfig.minHandTileHeight` — the
+    ///   same rank-scale floor the parser itself uses;
+    /// - and, reusing `TableSceneParser.lines` (the exact row-split the
+    ///   parser uses to find its own rank line), the cluster forms a single
+    ///   line — a multi-row blob is table content (a wide pond spread, a
+    ///   photo angle that stacks two rows), never a one-line concealed rank.
+    private func isRescuableHandCluster(_ cluster: [DetectedTile]) -> Bool {
+        guard cluster.count >= config.handRescueMinTiles else { return false }
+        let meanY = cluster.map(\.box.centerY).reduce(0, +) / Double(cluster.count)
+        guard meanY >= config.handRescueMinY else { return false }
+        let medianHeight = TableSceneParser.median(cluster.map(\.box.height))
+        guard medianHeight >= config.sceneConfig.minHandTileHeight else { return false }
+        return TableSceneParser.lines(of: cluster, medianHeight: medianHeight, config: config.sceneConfig).count == 1
     }
 
     // MARK: - Vote accumulation + hysteresis

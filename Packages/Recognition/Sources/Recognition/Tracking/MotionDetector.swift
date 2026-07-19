@@ -57,15 +57,26 @@ public final class MotionDetector {
     /// resolution the plan calls for. Own constants, not `TrackerConfig`:
     /// nothing outside this type needs to tune grid resolution (mirrors
     /// `CadencePolicy` owning its own cadence constants rather than
-    /// duplicating them into `TrackerConfig`).
-    private static let gridWidth = 32
-    private static let gridHeight = 18
+    /// duplicating them into `TrackerConfig`). Internal (not `private`) so
+    /// `MotionField`'s public `gridWidth`/`gridHeight` can mirror these
+    /// exact values instead of duplicating the literals.
+    static let gridWidth = 32
+    static let gridHeight = 18
     private static let cellCount = gridWidth * gridHeight
 
     /// EMA smoothing weight on the published `level` (plan §4.2) — smooths
     /// frame-to-frame sensor/compression noise without lagging a real burst
     /// by more than a couple of ticks at the ~8 Hz poll rate.
     private static let emaAlpha = 0.4
+
+    /// Per-cell |Δ| threshold for `MotionField.changed` (Lane B chunk E) —
+    /// deliberately coarser than the aggregate diff's `diff > 0` gate below
+    /// (which feeds `level`/`dominantRegion` and tolerates single-count
+    /// sensor noise by summing across the whole grid): a single noisy cell
+    /// flipping `changed` on its own would make ROI localization worse than
+    /// useless. Not `TrackerConfig`-tunable — an internal detail of this
+    /// type, same as `gridWidth`/`emaAlpha`.
+    private static let changeThreshold = 10.0
 
     private var previousGrid: [UInt8]?
     private var smoothedLevel: Double = 0
@@ -80,24 +91,74 @@ public final class MotionDetector {
     /// doc's "Pixel format" section) or a plane/base address can't be read.
     /// A dropped motion sample degrades the UI's "breathing" cadence
     /// gracefully; it must never crash or block `ingest`.
+    ///
+    /// A thin wrapper over `sampleField(_:at:)` — the exact same grid/diff
+    /// path, just discarding the per-cell `changed` grid that method also
+    /// computes (Lane B chunk E's ROI scheduler). Byte-identical behavior to
+    /// before that field existed: every numeric path (`level`,
+    /// `dominantRegion`, `meanLuma`, the `previousGrid` mutation timing) is
+    /// now computed exactly once, in `sampleField`, not duplicated here.
     public func sample(_ buffer: CVPixelBuffer, at t: TimeInterval) -> MotionSample? {
+        sampleField(buffer, at: t)?.sample
+    }
+
+    /// Like `sample(_:at:)`, but also returns the uncollapsed per-cell change
+    /// grid as a `MotionField` (Lane B chunk E) — see that type's doc. Shares
+    /// every line of the grid-downscale/diff path with `sample`; nothing
+    /// here duplicates that logic.
+    public func sampleField(_ buffer: CVPixelBuffer, at t: TimeInterval) -> MotionField? {
         guard isSupportedFormat(buffer) else { return nil }
         guard let grid = downscaleLumaGrid(buffer) else { return nil }
         defer { previousGrid = grid }
 
+        // Brightness needs no prior frame — computed up front so it's on
+        // BOTH return paths below, including the very first sample of the
+        // session (the dark-table torch chip must be able to react before
+        // any motion diff exists at all).
+        let meanLuma = grid.reduce(0.0) { $0 + Double($1) } / Double(grid.count)
+
         guard let previous = previousGrid else {
-            return MotionSample(t: t, level: 0, dominantRegion: nil)
+            let sample = MotionSample(t: t, level: 0, dominantRegion: nil, meanLuma: meanLuma)
+            return MotionField(sample: sample, changed: [Bool](repeating: false, count: Self.cellCount))
         }
 
+        let diff = diffGrids(grid, against: previous)
+        let rawLevel = diff.totalDiff / Double(Self.cellCount * 255)
+        smoothedLevel = Self.emaAlpha * rawLevel + (1 - Self.emaAlpha) * smoothedLevel
+
+        var region: MotionRegion?
+        if diff.totalDiff > 0 {
+            let order: [MotionRegion] = [.left, .center, .right, .top]
+            var bestIdx = 0
+            for i in 1..<diff.bandSums.count where diff.bandSums[i] > diff.bandSums[bestIdx] { bestIdx = i }
+            region = order[bestIdx]
+        }
+
+        let sample = MotionSample(t: t, level: smoothedLevel, dominantRegion: region, meanLuma: meanLuma)
+        return MotionField(sample: sample, changed: diff.changed)
+    }
+
+    /// One frame's worth of per-cell diffing — the single computation both
+    /// `sample`/`sampleField` build on. `bandSums`/`totalDiff` feed the
+    /// COLLAPSED `level`/`dominantRegion` (via the existing `diff > 0` gate,
+    /// unchanged from before `MotionField` existed); `changed` is the SAME
+    /// per-cell `diff`, uncollapsed, thresholded by `changeThreshold`
+    /// instead — a stricter, independent gate (see that constant's doc for
+    /// why it can't just reuse `diff > 0`).
+    private struct GridDiff { var bandSums: [Double]; var totalDiff: Double; var changed: [Bool] }
+
+    private func diffGrids(_ grid: [UInt8], against previous: [UInt8]) -> GridDiff {
         // band index: 0 = left, 1 = center, 2 = right, 3 = top (see type doc).
         var bandSums = [Double](repeating: 0, count: 4)
         var totalDiff = 0.0
+        var changed = [Bool](repeating: false, count: Self.cellCount)
         let topThird = Self.gridHeight / 3, bottomThird = 2 * Self.gridHeight / 3
         let leftThird = Self.gridWidth / 3
         for row in 0..<Self.gridHeight {
             for col in 0..<Self.gridWidth {
                 let i = row * Self.gridWidth + col
                 let diff = Double(abs(Int(grid[i]) - Int(previous[i])))
+                changed[i] = diff > Self.changeThreshold
                 guard diff > 0 else { continue }
                 totalDiff += diff
                 if row < topThird { bandSums[2] += diff }             // raw top → oriented right
@@ -106,19 +167,7 @@ public final class MotionDetector {
                 if col < leftThird { bandSums[3] += diff }            // raw left → oriented top
             }
         }
-
-        let rawLevel = totalDiff / Double(Self.cellCount * 255)
-        smoothedLevel = Self.emaAlpha * rawLevel + (1 - Self.emaAlpha) * smoothedLevel
-
-        var region: MotionRegion?
-        if totalDiff > 0 {
-            let order: [MotionRegion] = [.left, .center, .right, .top]
-            var bestIdx = 0
-            for i in 1..<bandSums.count where bandSums[i] > bandSums[bestIdx] { bestIdx = i }
-            region = order[bestIdx]
-        }
-
-        return MotionSample(t: t, level: smoothedLevel, dominantRegion: region)
+        return GridDiff(bandSums: bandSums, totalDiff: totalDiff, changed: changed)
     }
 
     // MARK: - vImage downscale

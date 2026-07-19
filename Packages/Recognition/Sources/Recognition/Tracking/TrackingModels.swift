@@ -308,11 +308,67 @@ public struct MotionSample: Sendable, Hashable, Codable {
     public var level: Double
     /// nil when no third of the frame clearly dominates the motion.
     public var dominantRegion: MotionRegion?
+    /// Mean luma (0–255) of the already-downscaled grid this sample was
+    /// built from — available even on the FIRST sample (computed before
+    /// `MotionDetector.sample`'s previous-grid diff guard, since brightness
+    /// needs no prior frame). Feeds the app-side `DarkTableDetector` for the
+    /// torch-suggestion chip (Lane A5); the tracker itself never reads it.
+    public var meanLuma: Double
 
-    public init(t: TimeInterval, level: Double, dominantRegion: MotionRegion? = nil) {
+    public init(t: TimeInterval, level: Double, dominantRegion: MotionRegion? = nil, meanLuma: Double = 255) {
         self.t = t
         self.level = level
         self.dominantRegion = dominantRegion
+        self.meanLuma = meanLuma
+    }
+
+    /// Explicit `CodingKeys` + a hand-written `init(from:)` (paired with the
+    /// still-synthesized `encode(to:)`, which the compiler generates from
+    /// these same keys) so `meanLuma` decodes tolerantly: existing
+    /// `.frames.jsonl` fixtures/goldens and any other archived `MotionSample`
+    /// JSON predate this field and simply won't have it — `decodeIfPresent`
+    /// defaults it to 255 (bright) rather than failing the decode.
+    private enum CodingKeys: String, CodingKey {
+        case t, level, dominantRegion, meanLuma
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        t = try container.decode(TimeInterval.self, forKey: .t)
+        level = try container.decode(Double.self, forKey: .level)
+        dominantRegion = try container.decodeIfPresent(MotionRegion.self, forKey: .dominantRegion)
+        meanLuma = try container.decodeIfPresent(Double.self, forKey: .meanLuma) ?? 255
+    }
+}
+
+/// Per-cell change grid, mirroring the same downscaled 32×18 luma grid
+/// `MotionDetector.sample(_:at:)` diffs internally — additive for Lane B
+/// chunk E's ROI scheduler. Where `MotionSample.level`/`.dominantRegion`
+/// COLLAPSE the per-cell diff into one scalar / one coarse quadrant,
+/// `MotionField.changed` keeps it uncollapsed so the app can intersect it
+/// against projected zone rects and infer only the zones that actually
+/// changed. Deliberately NOT `Codable` — app-consumable only, never written
+/// to a `.frames.jsonl` golden (unlike `MotionSample`, whose `Codable`
+/// conformance the harness/goldens depend on).
+public struct MotionField: Sendable, Hashable {
+    /// Grid width/height — the exact dimensions `MotionDetector`'s internal
+    /// grid uses (see that type's own doc for why 32×18), exposed here so
+    /// app-side ROI code can index `changed` without hardcoding the number.
+    public static let gridWidth = MotionDetector.gridWidth
+    public static let gridHeight = MotionDetector.gridHeight
+
+    public var sample: MotionSample
+    /// Row-major (`row * gridWidth + col`), same RAW (landscape,
+    /// sensor-native, unrotated) buffer space `MotionDetector`'s type doc
+    /// describes for the underlying grid — `true` where this cell's luma
+    /// changed by more than the internal per-cell threshold since the
+    /// previous sampled frame. All `false` on the first sample of a session
+    /// (nothing to diff against yet), exactly like `sample.level == 0`.
+    public var changed: [Bool]
+
+    public init(sample: MotionSample, changed: [Bool]) {
+        self.sample = sample
+        self.changed = changed
     }
 }
 
@@ -364,5 +420,83 @@ public struct IngestOutcome: Sendable {
         self.newEvents = newEvents
         self.stateChanged = stateChanged
         self.settled = settled
+    }
+}
+
+// MARK: - Persistence (plan A6: survive relaunch)
+
+/// A state-EXPORT snapshot of a `TableTracker` session, for on-disk
+/// persistence across a process relaunch — `TableTracker.snapshot(at:)` /
+/// `.restore(_:at:)`. Deliberately NOT an internal-state dump: `TrackStore`'s
+/// vote rings/box history and `ZoneModel`'s hand-band/pond-centroid
+/// calibration are private, order-sensitive bookkeeping, and — since the
+/// camera may well be repropped in a different spot after a relaunch —
+/// re-learning that geometry from a few fresh frames is safer than trusting
+/// stale numbers anyway. What *is* exported is the durable, camera-position-
+/// independent part: winds, the hand/round counters, the append-only event
+/// log, and every CONFIRMED tile's identity/face/box/zone/seat/timestamps
+/// (see `TableTracker.snapshot`'s own doc for exactly what "confirmed"
+/// excludes and why).
+///
+/// Pure data, `Codable` so the app can round-trip it through JSON. Every
+/// timestamp here is the tracker's own monotonic `TimeInterval` — never a
+/// wall clock (the app pairs this with a wall-clock `savedAt` of its own and
+/// remaps every timestamp to the new process's clock origin on load; see
+/// `CoachLiveSessionPersistence.remapped(toNowMono:)`).
+public struct TrackerSnapshot: Sendable, Codable {
+    public var mySeatWind: Wind
+    public var roundWind: Wind
+    /// 0-based hand counter — see `TrackedTableState.handIndex`.
+    public var handIndex: Int
+    /// See `WindRotation`'s own doc for why this is required, caller-owned
+    /// state rather than something derivable from the winds alone.
+    public var dealsSinceRoundStart: Int
+    /// The full append-only event log at save time, restored verbatim (these
+    /// events already happened — nothing about them needs re-deriving).
+    public var events: [GameEvent]
+    /// Every CONFIRMED tile as of save time. `.unresolved` tracks are
+    /// deliberately excluded — see `TableTracker.snapshot`'s doc.
+    public var tiles: [SnapshotTile]
+    /// The tracker's own monotonic clock at save time.
+    public var savedAtMono: TimeInterval
+
+    public init(mySeatWind: Wind, roundWind: Wind, handIndex: Int, dealsSinceRoundStart: Int,
+                events: [GameEvent], tiles: [SnapshotTile], savedAtMono: TimeInterval) {
+        self.mySeatWind = mySeatWind
+        self.roundWind = roundWind
+        self.handIndex = handIndex
+        self.dealsSinceRoundStart = dealsSinceRoundStart
+        self.events = events
+        self.tiles = tiles
+        self.savedAtMono = savedAtMono
+    }
+
+    /// One persisted tile — exactly the fields `TrackStore.restoreTrack`
+    /// needs to resurrect it under its ORIGINAL identity, box, and
+    /// timestamps (as opposed to `insertManualTrack`, which mints a fresh id
+    /// and stamps `firstSeen`/`lastSeen` at insertion time).
+    public struct SnapshotTile: Sendable, Codable {
+        public var id: TrackID
+        public var face: Tile
+        public var box: TileBoundingBox
+        public var zone: TileZone
+        /// Discarder (`.pond`) or owner (`.opponentMeld`); nil elsewhere —
+        /// mirrors `TrackedTile.seat`.
+        public var seat: RelativeSeat?
+        public var firstSeen: TimeInterval
+        public var lastSeen: TimeInterval
+        public var observationCount: Int
+
+        public init(id: TrackID, face: Tile, box: TileBoundingBox, zone: TileZone, seat: RelativeSeat?,
+                    firstSeen: TimeInterval, lastSeen: TimeInterval, observationCount: Int) {
+            self.id = id
+            self.face = face
+            self.box = box
+            self.zone = zone
+            self.seat = seat
+            self.firstSeen = firstSeen
+            self.lastSeen = lastSeen
+            self.observationCount = observationCount
+        }
     }
 }

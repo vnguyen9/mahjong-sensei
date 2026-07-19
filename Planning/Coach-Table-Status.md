@@ -1,81 +1,86 @@
 # Coach Table-Awareness — Status
 
-*Updated 2026-07-18 (Coach Live build)*
+*Updated 2026-07-18 (Coach Live v2: ARKit world-anchored tracking)*
 
 ## The ask
 Coach only saw the player's own 14 tiles. To give real advice it must read the whole table —
 the discard pond and revealed melds — so it can count which winning tiles are actually still
-live, and advise with real odds. Capture should be as automatic as possible (no manual zone
-labeling), building toward a live "watch the game" tracker.
+live, and advise with real odds. Capture should be as automatic as possible, building toward a
+live "watch the game" tracker that survives the phone being picked up and moved.
 
 ## The plan (approved)
 Everything reduces to **two buckets**:
 - **MINE** — my concealed tiles + my own exposed melds (structure matters → drives shanten/ukeire).
 - **TABLE** — all discards + opponents' melds (only counts matter → each visible copy is dead).
 
-The engine already computed live outs as `4 − visible`; feeding it a TABLE histogram makes every
-number table-aware. Automatic zoning is **geometry + Vision on the detector's boxes** (works on
-every device incl. base iPhone 15).
-
 | Stage | What | Status |
 |---|---|---|
-| **D** | Engine + session + coach display (live outs, draw %, dead waits, melded hands) | ✅ Done — advice since upgraded to the faan-EV blend (CoachEngine) |
-| **A** | `TableSceneParser` — auto-zones boxes (size-aware clustering → principal-axis lines/runs) | ✅ Built — real-photo fixtures; tuning continues on real photos |
-| **B** | Vision homography (table → top-down quadrants) + foreground mask | ⏸ **Deferred** — the static-camera calibration inside `ZoneModel` (hand band + pond centroid/covariance) is the stand-in; homography can slot in later as a pre-ingest transform |
-| **C** | **Live tracker** — stable IDs, majority-vote faces, discard/meld event log, live overlay | ✅ **Built** — full stack + Coach Live UI (this build); device QA pending |
-| **E** | Optional Pro-only extras (Foundation-Models verifier, LiDAR), detector retrain | ⏸ Future — less urgent: the large (Pro) model already reads rotated pond tiles the nano misses |
+| **D** | Engine + session + coach display (live outs, draw %, dead waits, melded hands) | ✅ Done — advice runs the faan-EV blend (CoachEngine) |
+| **A** | `TableSceneParser` — auto-zones boxes in image space | ✅ Built — now the *fallback* path (see v2) |
+| **B** | Vision homography | ✅ **Superseded** by the ARKit table-plane projection (v2) |
+| **C** | Live tracker — stable IDs, majority-vote faces, event log, live overlay | ✅ Built + device-proven (pipeline verified live: VisionRecognizer, 14/14 rank tracked) |
+| **v2** | **ARKit world-anchored capture** — see below | ✅ **Built** — device QA pending |
+| **E** | Detector retrain (low-light/rotation recall) | ⏸ Future — ROI native-res crops (v2) expected to recover much of the gap first |
 
-## What has been built (Stage C — Coach Live, 2026-07-18)
+## Coach Live v2 (2026-07-18) — what was built
 
-**Tracker stack** (`Packages/Recognition/Sources/Recognition/Tracking/`, 158/158 package tests):
-- `TrackStore` — ByteTrack-style two-band association for a static camera: stable `TrackID`s
-  through flicker/dropout, rebirth matching (nudged tiles keep their ID — no double counting),
-  confidence-weighted face vote ring with hysteresis; user pins win forever.
-- `ZoneModel` — Stage-A parser votes on settled frames + static-camera calibration (hand band,
-  pond centroid/covariance), zone hysteresis, locked user overrides.
-- `TurnEngine` — **settle-diff** event derivation (nothing commits mid-motion): opponent
-  discards/melds, my draw/discard, win detection; seat attribution = turn-order prior + motion
-  region + pond geometry → softmax confidence, amber-flagged below threshold; evidence-over-prior
-  turn resync (opponent draws are invisible; observed discards self-correct the rotation).
-- `HandBoundaryDetector` + `WindRotation` — semi-auto hand boundaries (mass-disappearance
-  sustained → non-destructive proposal with predicted wind rotation; walk-by protection),
-  HK dealer-repeat rules incl. draws.
-- `TableTracker` facade + corrections API (pin / zone override / insert / remove / amend /
-  delete-event / confirm-hand-end) — corrections stick to track IDs and recompute the histogram.
-- `MotionDetector` (vImage 32×18 luma grid, ~0.5 ms) + `CadencePolicy` (≈1 Hz idle / ≈5.5 Hz
-  burst / settle-burst / thermal suspend) — hours-long sessions by design; assume plugged-in.
+**UX fix bundle (Lane A):**
+- Staged startup loading (`StartupStage` waterfall + center-feed `StartupStatusOverlay`; instant
+  Start-button feedback) — "Start tracking did nothing" fixed.
+- Hand-end nag cooldown (`handEndDismissCooldown` 20s; suppresses re-proposal while the *same*
+  tiles are missing; new evidence overrides) — "keeps asking next hand" fixed.
+- Corrections, full control: tap the MINE/POND bracket chip (pencil affordance) to bulk-reassign
+  the zone (`TableTracker.overrideZone(tracks:)`); Counts tap-to-edit stepper made discoverable
+  (hint line + one-time banner); hand-strip face fix already existed.
+- Interim zoner rescue: a ≥8-tile single-row bottom-band cluster votes `.myHand` when the parser
+  misses the rank (the observed rank→POND lock is dead in both modes).
+- Dark-table torch chip (`MotionSample.meanLuma` → `DarkTableDetector` hysteresis → one-tap
+  flash suggestion; ARKit lux drives it in AR mode).
+- **Session persistence**: `TrackerSnapshot` state-export (TrackID-preserving) + throttled
+  `CoachLiveSessionStore` writes + monotonic-clock remap on restore → the setup card offers
+  "Resume session →" after a kill/crash (<12h). Debug scene `coach-live-setup-resume`.
 
-**Advice engine** (`Packages/CoachEngine`, 28/28 tests + EfficiencyEngine 28/28):
-- EV-blend ranking: P(win) via an absorbing-chain DP × expected payout in base points (2^faan),
-  exact per-wait faan at tenpai (both win channels), `FaanPotential` estimator before tenpai,
-  hard 3-faan guardrail (undeclarable lines rank last at EV 0), bilingual "why" chips.
-  `HKValueOverlay`/`hkValueTiebreak` deleted — subsumed.
+**ARKit capture rebuild (Lane B):** `App/Sources/Features/CoachLive/Capture/`
+- `ARTableCapture` + `PlaneLockPolicy` (pure): world tracking → largest stable horizontal plane
+  → lock (plane detection off after) with **yaw alignment** so table-space +y points toward the
+  player; `CaptureStage` lifecycle; torch + light estimate.
+- `TableProjection`/`DetectionProjector` (Recognition package, simd-only, unit-tested): pixel
+  ray ∩ plane → normalized table coordinates ((0.5,0.5)-anchored); detections ingest as
+  synthetic table-space boxes → `TrackStore`/`TurnEngine` unchanged.
+- `ZoneModel` table-space branch (`TrackerConfig.coordinateSpace` + `TableGeometry`): geometric
+  zones — hand band + my melds at my edge, central pond, per-edge opponent melds. Image space
+  stays the default (harness) and the live fallback (plane never locks / ARKit unavailable →
+  the classic loop, verbatim).
+- `CameraMotionGate`: pose-velocity freeze — nothing ingests while the camera moves ("Hold
+  steady…" chip); full-frame re-sync on settle. **This is the "memory" fix** — table state now
+  survives any camera move.
+- `ARCameraPreview` (Metal/CoreImage blit, 30fps) replaces the AVCapture preview in AR mode;
+  brackets project table-space zone rects through the current pose (overlay code unchanged).
+  Scan tab and Coach Live no longer share a camera (AVCapture ↔ ARSession handover).
+- **Smart ROI inference** (`ROIScheduler` + `ROICropMapper` + `PixelBufferCropper` +
+  `MotionDetector.sampleField`): change-grid ∩ projected zone ROIs → native-resolution crops
+  (3–4× pixel density on far tiles) with a 20s full-frame safety net; partial views are honest —
+  `TableTracker.ingest(visibleRegion:)` stops off-crop tracks from being retired. Bypassable
+  (`useROIScheduler`); harness untouched.
+- **Guided sweep + rescan prompts**: after table lock, a "pan slowly across the table" card
+  (coverage-tracked, Done link, plugged-in hint); per-zone staleness → directional "Pan left to
+  check the pond ←" chips; "Rescan table" link re-enters sweeping anytime.
 
-**Coach Live UI** (`App/Sources/Features/CoachLive/`, replaces the Discard Trainer entirely):
-- Split screen per the approved mockup: breathing live feed (40–72%, motion-driven, drag
-  override), privacy blur (render-server composited), zone corner brackets (gold MINE / cream
-  POND / amber unresolved·tap), Map ⇄ Counts ⇄ Events tabs, hand strip with gold DISCARD ring,
-  advice line + wait chips, hand-ended card, win banner → one-tap Score-flow handoff.
-  Entry: gold button under the Scan screen's (now two-mode) pill. Settings: feed blur +
-  auto-breathing only. 9 `MJ_SCREEN=coach-live*` debug scenes.
-
-**Offline harness** (`Tools/detect-dump`): `video-dump` (video → per-frame detections JSONL) and
-`track-replay` (JSONL → tracker → event timeline + deterministic `.events.jsonl` goldens).
-Negative control frozen: the wall-building clip (`IMG_6249`) produces ≤4 phantom events and no
-hand-end proposal.
+**Verified:** Recognition 197/197 (was 159 at arc start), detect-dump 6/6, negative-control
+golden byte-identical throughout, sim + device builds green, all MJ_SCREEN mock scenes
+unchanged. A cross-seam review pass (orientation math, loop lifecycle, partial-view semantics,
+camera handover, concurrency) ran before handoff.
 
 ## What is still needed
-1. **Device QA at a real table** — the loop, brackets, blur, thermal behavior, and attribution
-   quality only prove out on-device (simulator runs the mock scenes only).
-2. **Real gameplay video** (see `Planning/Mahjong Tables/SHOOTING-GUIDE.md`, "Video for the live
-   tracker") — one full hand start-to-finish is the highest-value footage; it becomes the first
-   real event-golden and drives attribution/threshold tuning. Key learned fact: **framing
-   tightness, not capture resolution, decides pond recall** (everything letterboxes to 640 px).
-3. **Real table photos** for zoner tuning (unchanged ask; task #45).
-4. **Housekeeping**: the entire workstream is **uncommitted** (incl. the gitignored bundled
-   `.mlpackage` detectors — tracking decision still open).
+1. **Device QA of the AR stack** (nothing below runs in the simulator): plane lock quality/
+   timing, brackets staying glued through camera moves, sweep coverage + prompt directions,
+   torch-during-ARSession, motion-gate thresholds, ROI crop recall vs full-frame, thermal over a
+   long session, kill→relaunch resume, Scan↔CoachLive camera handover.
+2. **Real gameplay video** (SHOOTING-GUIDE, "Video for the live tracker") — one full hand is
+   still the highest-value footage for event-golden + attribution tuning.
+3. **Housekeeping**: the entire workstream is **uncommitted** (two-plus arcs now, incl. the
+   gitignored bundled `.mlpackage` detectors — tracking decision still open).
 
 ## Related (separate workstream)
 A learned **faan-maximizing decision model** (self-play RL over a HK simulator) has an approved
-research plan — the deterministic CoachEngine advisor now provides both its baseline and its
-feature extractor; the tracker supplies its inputs. Gated on compute + scope decisions.
+research plan — gated on compute + scope decisions.

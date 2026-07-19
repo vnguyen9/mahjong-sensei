@@ -51,8 +51,9 @@ struct RootView: View {
     ///
     /// Scene list: `coach-live` (rest split, Map), `-action` / `-think`
     /// (the other two breathing splits), `-counts` / `-events` (tab
-    /// selected), `-setup` (the setup card), `-handend` (HandEndedCard),
-    /// `-win` (WinBanner) — the plan's 8 named scenes — plus `-corrections`,
+    /// selected), `-setup` (the setup card), `-handend` (HandEndedCard,
+    /// table-clear), `-win` (HandEndedCard, self-draw win) — the plan's 8
+    /// named scenes — plus `-corrections`,
     /// added here to also cover the four correction sheets directly (the
     /// task brief's own scene list names "corrections" where the plan's
     /// table names "setup"; both are implemented rather than guessing which
@@ -61,9 +62,12 @@ struct RootView: View {
         let session = MockCoachLive.make(scene: scene)
         let initialTab: LiveTab = scene.hasSuffix("counts") ? .counts : scene.hasSuffix("events") ? .events : .map
         // Mock scenes land on the live view directly (they're driven by
-        // `MockCoachLive`, not a real begun session); only `-setup` shows the
-        // card. Explicit `.live` because the production default is now `.setup`.
-        let flowState: CoachLiveFlowView.FlowState = scene == "coach-live-setup" ? .setup : .live
+        // `MockCoachLive`, not a real begun session); only `-setup` (and its
+        // `-resume` variant, plan A6's synthetic resume-card screenshot hook
+        // — see `CoachLiveSetupView.loadResumable`) shows the card. Explicit
+        // `.live` because the production default is now `.setup`.
+        let flowState: CoachLiveFlowView.FlowState =
+            (scene == "coach-live-setup" || scene == "coach-live-setup-resume") ? .setup : .live
         let sheet: CoachLiveSheet? = scene == "coach-live-corrections" ? .assign : nil
         return CoachLiveFlowView(session: session, debugFlowState: flowState,
                                  debugInitialTab: initialTab, debugSheet: sheet)

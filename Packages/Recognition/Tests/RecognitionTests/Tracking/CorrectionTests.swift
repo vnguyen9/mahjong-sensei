@@ -141,6 +141,66 @@ final class CorrectionTests: XCTestCase {
         XCTAssertTrue(tracker.events.contains { if case .stateRevised(.zoneOverride) = $0.kind { return true }; return false })
     }
 
+    // MARK: - bulk overrideZone(tracks:) coalesces into one revision event
+
+    func testBulkOverrideZoneMovesAllTracksAndLocksWithOneRevisionEvent() {
+        var game = ScriptedGame(seed: 5_009)
+        game.deal(myHand: dealHand())
+        game.discard(.right, .s(1), at: 1.0)
+        game.discard(.across, .p(9), at: 2.0)
+        game.discard(.left, .m(9), at: 3.0)
+        let tracker = run(game.frames())
+
+        let pondIDs = tracker.state.pond.map(\.id)
+        XCTAssertGreaterThanOrEqual(pondIDs.count, 3, "sanity: expected a pond of discards to bulk-reassign")
+
+        let revisionEventsBefore = tracker.events.count { if case .stateRevised(.zoneOverride) = $0.kind { return true }; return false }
+
+        tracker.overrideZone(tracks: pondIDs, to: .myHand)
+
+        // All moved: none remain in the pond, all now show up in myHand.
+        XCTAssertTrue(tracker.state.pond.isEmpty, "every bulk-reassigned track left the pond")
+        for id in pondIDs {
+            XCTAssertTrue(tracker.state.myHand.contains { $0.id == id }, "track \(id) moved to myHand")
+        }
+
+        // Exactly one new stateRevised(.zoneOverride) event for the whole batch.
+        let revisionEventsAfter = tracker.events.count { if case .stateRevised(.zoneOverride) = $0.kind { return true }; return false }
+        XCTAssertEqual(revisionEventsAfter, revisionEventsBefore + 1,
+                       "one bulk call appends exactly one revision event, not N")
+
+        // Zone-locked: contradicting settled ingest at the same spots doesn't
+        // move them back to the pond.
+        for i in 0..<8 {
+            let t = 10.0 + Double(i) * 0.9
+            let detections = pondIDs.compactMap { id -> DetectedTile? in
+                guard let track = tracker.store.tracks.first(where: { $0.id == id }) else { return nil }
+                return DetectedTile(tile: track.face, confidence: 0.9, box: track.box)
+            }
+            tracker.ingest(detections, at: t, motion: MotionSample(t: t, level: 0))
+        }
+        for id in pondIDs {
+            XCTAssertTrue(tracker.state.myHand.contains { $0.id == id }, "locked zone survives contradicting votes")
+        }
+        XCTAssertTrue(tracker.state.pond.allSatisfy { !pondIDs.contains($0.id) },
+                      "none of the bulk-reassigned tracks drifted back to the pond")
+    }
+
+    func testBulkOverrideZoneIsNoOpForEmptyInput() {
+        var game = ScriptedGame(seed: 5_010)
+        game.deal(myHand: dealHand())
+        game.discard(.right, .s(1), at: 1.0)
+        let tracker = run(game.frames())
+
+        let eventCountBefore = tracker.events.count
+        let revisionBefore = tracker.state.revision
+
+        tracker.overrideZone(tracks: [], to: .myHand)
+
+        XCTAssertEqual(tracker.events.count, eventCountBefore, "empty input appends no event")
+        XCTAssertEqual(tracker.state.revision, revisionBefore, "empty input triggers no state reassembly")
+    }
+
     // MARK: - amendEvent recomputes the seen histogram (stays correct)
 
     private func expectedHistogram(_ state: TrackedTableState) -> [Int] {

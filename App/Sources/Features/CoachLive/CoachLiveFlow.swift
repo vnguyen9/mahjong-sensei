@@ -8,6 +8,8 @@ import MahjongCore
 enum CoachLivePrefs {
     static let blurKey = "coachLiveBlursFeed"
     static let breatheKey = "coachLiveAutoBreathes"
+    static let correctionHintKey = "coachLiveHasSeenCorrectionHint"
+    static let pluggedInHintKey = "coachLiveHasSeenPluggedInHint"
 
     /// Unset → true (blur on) — privacy default.
     static var blursFeed: Bool {
@@ -18,6 +20,20 @@ enum CoachLivePrefs {
     static var autoBreathes: Bool {
         get { UserDefaults.standard.object(forKey: breatheKey) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: breatheKey) }
+    }
+    /// Unset → false (show the one-time correction tip once) — see
+    /// `CorrectionHintBanner`. `MockCoachLive.make` marks this seen at
+    /// construction so MJ_SCREEN/mock scenes never show it (plan A3).
+    static var hasSeenCorrectionHint: Bool {
+        get { UserDefaults.standard.bool(forKey: correctionHintKey) }
+        set { UserDefaults.standard.set(newValue, forKey: correctionHintKey) }
+    }
+    /// Unset → false (show the guided-sweep card's "keep it plugged in"
+    /// caption once, ever) — Lane B chunk H item 3. `StartupStatusOverlay`
+    /// marks this seen the instant it shows the caption.
+    static var hasSeenPluggedInHint: Bool {
+        get { UserDefaults.standard.bool(forKey: pluggedInHintKey) }
+        set { UserDefaults.standard.set(newValue, forKey: pluggedInHintKey) }
     }
 }
 
@@ -85,23 +101,17 @@ struct CoachLiveFlowView: View {
             session.end()
         }
         .onChange(of: scenePhase) { _, phase in
-            // Backgrounding suspends the camera anyway; pause the loop and drop
-            // the session explicitly, and bring both back on return. `.inactive`
+            // Backgrounding suspends the camera/AR session anyway; pause the
+            // loop and whichever capture backend is live, and bring both
+            // back on return — `session.sceneDidBackground()`/
+            // `.sceneDidActivate()` (Lane B chunk G) so this view never
+            // needs to know AR vs the image-space fallback. `.inactive`
             // (control center, banners) is left alone so brief interruptions
             // don't kill the feed.
             switch phase {
-            case .background:
-                session.pauseLoop()
-                #if !targetEnvironment(simulator)
-                session.camera.stop()
-                #endif
-            case .active:
-                session.resumeLoop()
-                #if !targetEnvironment(simulator)
-                session.camera.requestAndStart()
-                #endif
-            default:
-                break
+            case .background: session.sceneDidBackground()
+            case .active: session.sceneDidActivate()
+            default: break
             }
         }
         .preferredColorScheme(.dark)

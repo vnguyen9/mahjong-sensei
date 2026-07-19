@@ -36,19 +36,24 @@ struct CountsTab: View {
     private var waitTiles: Set<Tile> { session.advice?.currentWaitTileSet ?? [] }
 
     var body: some View {
-        GeometryReader { geo in
-            let width = tileWidth(for: geo.size)
-            let pipScale = min(1, width / Self.maxTile)
-            VStack(spacing: Self.rowSpacing) {
-                ForEach(Array(Self.rows.enumerated()), id: \.offset) { _, row in
-                    HStack(spacing: Self.colSpacing) {
-                        ForEach(row, id: \.self) { tile in
-                            cell(tile, width: width, pipScale: pipScale)
+        VStack(spacing: 4) {
+            GeometryReader { geo in
+                let width = tileWidth(for: geo.size)
+                let pipScale = min(1, width / Self.maxTile)
+                VStack(spacing: Self.rowSpacing) {
+                    ForEach(Array(Self.rows.enumerated()), id: \.offset) { _, row in
+                        HStack(spacing: Self.colSpacing) {
+                            ForEach(row, id: \.self) { tile in
+                                cell(tile, width: width, pipScale: pipScale)
+                            }
                         }
                     }
                 }
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
             }
-            .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
+            Text("tap a tile to fix its count")
+                .font(MJFont.ui(11))
+                .foregroundStyle(MJColor.cream(0.5))
         }
     }
 

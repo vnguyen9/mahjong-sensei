@@ -13,6 +13,19 @@ final class HandBoundaryTests: XCTestCase {
         [.m(1), .m(2), .m(3), .m(4), .m(5), .p(2), .p(3), .p(4), .s(6), .s(7), .s(8), .east, .west]
     }
 
+    /// `n` distinct, well-separated detections — the same shape
+    /// `testReappearanceAutoCancelsPendingProposal` hand-builds, factored out
+    /// for the dismiss-cooldown tests below, which need to drive `TrackStore`
+    /// + `HandBoundaryDetector` directly (same rationale: a real clear/dismiss
+    /// timeline needs settled-but-empty frames, which `ScriptedGame` can't
+    /// produce cleanly).
+    private func distinctTiles(_ n: Int) -> [DetectedTile] {
+        (0..<n).map { i in
+            DetectedTile(tile: Tile(classIndex: i)!, confidence: 0.9,
+                        box: TileBoundingBox(x: Double(i) * 0.09, y: 0.5, width: 0.05, height: 0.08))
+        }
+    }
+
     /// A minimal settle-gated driver (mirrors `TrackerHarness`'s own private
     /// `isSettled`) so `HandBoundaryDetector` can be exercised directly on a
     /// `ScriptedGame` stream without pulling in `ZoneModel`/`TurnEngine` —
@@ -192,6 +205,147 @@ final class HandBoundaryTests: XCTestCase {
         let harness = BoundaryHarness()
         harness.run(frames)
         XCTAssertTrue(harness.outcomes.isEmpty, "nothing fires while motion never settles — the occlusion guard")
+    }
+
+    // MARK: - Dismiss cooldown (A2)
+
+    func testDismissedProposalDoesNotReproposeWhileTableStaysClearWithinCooldown() {
+        let store = TrackStore()
+        let config = TrackerConfig()
+        let detector = HandBoundaryDetector(config: config)
+        let calm = MotionSample(t: 0, level: 0)
+        let tiles = distinctTiles(10)
+
+        var t = 0.0
+        for _ in 0..<5 {
+            store.associate(tiles, at: t, motion: MotionSample(t: t, level: 0))
+            detector.evaluateSettled(store: store, at: t)
+            t += 0.2
+        }
+        XCTAssertEqual(store.tracks.filter { $0.state == .live }.count, 10, "sanity: all 10 promoted to live")
+
+        // Clear: nothing detected, sustained past handClearSustain — the
+        // first proposal.
+        var dismissedAt: TimeInterval?
+        let firstDeadline = t + config.handClearSustain + 1.0
+        while t < firstDeadline {
+            store.associate([], at: t, motion: calm)
+            if detector.evaluateSettled(store: store, at: t).proposed != nil { dismissedAt = t; break }
+            t += 0.3
+        }
+        XCTAssertNotNil(dismissedAt, "a sustained clear must propose before it can be dismissed")
+        let da = dismissedAt!
+        detector.dismiss(at: da)
+        XCTAssertFalse(detector.isProposed)
+
+        // Table stays fully clear (the exact same 10 tiles still missing)
+        // well within handEndDismissCooldown — must never re-propose, even
+        // though the raw missing-fraction/sustain thresholds are met the
+        // entire time.
+        var reproposed = false
+        let cooldownDeadline = da + config.handEndDismissCooldown - 1.0
+        while t < cooldownDeadline {
+            t += 0.5
+            store.associate([], at: t, motion: calm)
+            if detector.evaluateSettled(store: store, at: t).proposed != nil { reproposed = true; break }
+        }
+        XCTAssertFalse(reproposed, "a dismissed proposal must not re-fire over the same missing set within the cooldown")
+    }
+
+    func testCooldownExpiryWithTableStillClearReproposes() {
+        let store = TrackStore()
+        let config = TrackerConfig()
+        let detector = HandBoundaryDetector(config: config)
+        let calm = MotionSample(t: 0, level: 0)
+        let tiles = distinctTiles(10)
+
+        var t = 0.0
+        for _ in 0..<5 {
+            store.associate(tiles, at: t, motion: MotionSample(t: t, level: 0))
+            detector.evaluateSettled(store: store, at: t)
+            t += 0.2
+        }
+
+        var dismissedAt: TimeInterval?
+        let firstDeadline = t + config.handClearSustain + 1.0
+        while t < firstDeadline {
+            store.associate([], at: t, motion: calm)
+            if detector.evaluateSettled(store: store, at: t).proposed != nil { dismissedAt = t; break }
+            t += 0.3
+        }
+        XCTAssertNotNil(dismissedAt, "a sustained clear must propose before it can be dismissed")
+        let da = dismissedAt!
+        detector.dismiss(at: da)
+
+        // Drive well past cooldown + a fresh sustain window, table still
+        // fully clear the entire time — once the cooldown lapses the same
+        // clear must be free to propose again.
+        var reproposedAt: TimeInterval?
+        let deadline = da + config.handEndDismissCooldown + config.handClearSustain + 2.0
+        while t < deadline {
+            t += 0.5
+            store.associate([], at: t, motion: calm)
+            if detector.evaluateSettled(store: store, at: t).proposed != nil { reproposedAt = t; break }
+        }
+        XCTAssertNotNil(reproposedAt, "once the dismiss cooldown lapses, a still-clear table must re-propose")
+        XCTAssertGreaterThanOrEqual(reproposedAt! - da, config.handEndDismissCooldown,
+                                    "re-proposal must never happen before the cooldown has elapsed")
+    }
+
+    func testNewMissingTracksBeyondDismissedSetReproposeBeforeCooldownExpires() {
+        let store = TrackStore()
+        let config = TrackerConfig()
+        let detector = HandBoundaryDetector(config: config)
+        let calm = MotionSample(t: 0, level: 0)
+        let allTiles = distinctTiles(12)
+        let firstEight = Array(allTiles.prefix(8))
+        let lastFour = Array(allTiles.suffix(4))
+
+        var t = 0.0
+        for _ in 0..<5 {
+            store.associate(allTiles, at: t, motion: MotionSample(t: t, level: 0))
+            detector.evaluateSettled(store: store, at: t)
+            t += 0.2
+        }
+        XCTAssertEqual(store.tracks.filter { $0.state == .live }.count, 12, "sanity: all 12 promoted to live")
+
+        // Clear only the first 8 of 12 (8/12 ≈ 0.667 ≥ handClearFraction,
+        // 8 ≥ handClearMinTiles) — sustained past handClearSustain, the
+        // first proposal, whose `goneAtProposal` is exactly those 8.
+        var dismissedAt: TimeInterval?
+        let firstDeadline = t + config.handClearSustain + 1.0
+        while t < firstDeadline {
+            store.associate(lastFour, at: t, motion: calm)   // only the last 4 stay visible
+            if detector.evaluateSettled(store: store, at: t).proposed != nil { dismissedAt = t; break }
+            t += 0.3
+        }
+        XCTAssertNotNil(dismissedAt, "clearing 8 of 12 tracks must propose")
+        let da = dismissedAt!
+        detector.dismiss(at: da)
+
+        // A few more ticks with the exact same 8 missing — stays suppressed
+        // (mirrors the subset test above; here as a sanity precondition for
+        // what follows).
+        for _ in 0..<3 {
+            t += 0.5
+            store.associate(lastFour, at: t, motion: calm)
+            XCTAssertNil(detector.evaluateSettled(store: store, at: t).proposed, "same missing set must stay suppressed")
+        }
+
+        // Now the remaining 4 also vanish — genuinely new missing tracks
+        // outside the dismissed set — must lift the cooldown immediately and
+        // propose again once sustained, well before handEndDismissCooldown
+        // (20s) would otherwise have elapsed since the dismissal.
+        var reproposedAt: TimeInterval?
+        let secondDeadline = t + config.handClearSustain + 2.0
+        while t < secondDeadline {
+            t += 0.3
+            store.associate([], at: t, motion: calm)   // all 12 now missing
+            if detector.evaluateSettled(store: store, at: t).proposed != nil { reproposedAt = t; break }
+        }
+        XCTAssertNotNil(reproposedAt, "genuinely new missing tracks must lift the cooldown and propose")
+        XCTAssertLessThan(reproposedAt! - da, config.handEndDismissCooldown,
+                          "new evidence must propose well before the dismiss cooldown would have expired on its own")
     }
 
     // MARK: - WindRotation table (plan §9.22 / §3.6)

@@ -5,7 +5,13 @@ import MahjongCore
 public enum MJTab: String, CaseIterable, Identifiable, Sendable {
     case scan, learn, settings
     public var id: String { rawValue }
-    public var title: String { rawValue.capitalized }
+    public var title: String {
+        switch self {
+        case .scan:     return "Lens"      // the dock label for the scanning tab
+        case .learn:    return "Learn"
+        case .settings: return "Settings"
+        }
+    }
     public var systemImage: String {
         switch self {
         case .scan: return "viewfinder"

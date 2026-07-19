@@ -57,6 +57,10 @@ struct CoachLiveView: View {
     @State private var tab: LiveTab
     @State private var sheet: CoachLiveSheet?
     @State private var showExitConfirm = false
+    /// Non-nil while the bracket-reassign confirmation (A3) is up — which
+    /// zone chip was tapped, so the dialog's copy and the confirm action
+    /// both key off it.
+    @State private var reassignZone: ZoneKind?
 
     init(session: CoachLiveSession, initialTab: LiveTab = .map, initialSheet: CoachLiveSheet? = nil,
         onExit: @escaping () -> Void, onScoreHandoff: @escaping () -> Void) {
@@ -111,8 +115,8 @@ struct CoachLiveView: View {
                              safeTop: topSafeInset,
                              blursFeed: app.blursLiveFeed,
                              onExit: { showExitConfirm = true },
-                             onScoreHandoff: onScoreHandoff,
-                             onTapUnresolved: { sheet = .assign })
+                             onTapUnresolved: { sheet = .assign },
+                             onTapZoneChip: { reassignZone = $0 })
                     .frame(height: feedH, alignment: .top)
                     .clipped()
                 BreathingSeam(controller: breathing, paneHeight: fullH)
@@ -139,17 +143,54 @@ struct CoachLiveView: View {
             Button("End session", role: .destructive, action: onExit)
             Button("Keep watching", role: .cancel) {}
         }
+        .confirmationDialog(reassignDialogTitle, isPresented: reassignDialogPresented, titleVisibility: .visible) {
+            Button(reassignDialogConfirmLabel) {
+                if let reassignZone { session.reassignZoneBracket(reassignZone) }
+                reassignZone = nil
+            }
+            Button("Cancel", role: .cancel) { reassignZone = nil }
+        }
     }
+
+    // MARK: - Bracket-reassign confirmation (A3)
+
+    private var reassignDialogPresented: Binding<Bool> {
+        Binding(get: { reassignZone != nil }, set: { if !$0 { reassignZone = nil } })
+    }
+
+    /// POND chip tapped (`zone == .table`) → "these are my hand"; MINE chip
+    /// tapped (`zone == .mine`) → "these are the pond". Same string serves as
+    /// both the dialog's title and its confirm button — there's nothing more
+    /// to say beyond stating the correction, matching the exit dialog's own
+    /// question-as-title convention.
+    private var reassignDialogTitle: String {
+        switch reassignZone {
+        case .table: return "These tiles are actually my hand"
+        case .mine:  return "These tiles are actually the pond"
+        case nil:    return ""
+        }
+    }
+    private var reassignDialogConfirmLabel: String { reassignDialogTitle }
 
     // MARK: - State pane
 
     private func statePane(compression: LiveCompression) -> some View {
         VStack(spacing: 10) {
             LiveSegmentedBar(selection: $tab)
+            CorrectionHintBanner()
             tabContent
                 .frame(maxWidth: .infinity, minHeight: 84, maxHeight: .infinity)
             HandStrip { id in sheet = .pickHandTile(id) }
             AdviceLine { sheet = .adviceDetail }
+            // Lane B chunk H item 3: always-available rescan affordance,
+            // AR mode only (`arCapture.enterSweeping()` — a no-op on the
+            // mock/fallback paths, so this stays hidden there).
+            if session.isARCaptureActive {
+                Button("Rescan table") { session.rescanTable() }
+                    .font(MJFont.ui(11, weight: .semibold))
+                    .foregroundStyle(MJColor.cream(0.55))
+                    .buttonStyle(.plain)
+            }
             // WaitChips fold at `.minimal` — excluded entirely (not just
             // emptied) so their VStack slot + spacing is reclaimed for the
             // tab-content region (e.g. keeps the Counts grid larger at 70%).
@@ -164,12 +205,15 @@ struct CoachLiveView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(MJColor.deepJade)
         .overlay {
-            if session.handBoundary != nil {
-                HandEndedCard()
+            // One end-of-hand prompt for either signal — a self-draw win or a
+            // table-clear. `HandEndedCard` branches on which is set.
+            if session.handBoundary != nil || session.winDetected != nil {
+                HandEndedCard(onScoreHandoff: onScoreHandoff)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: session.handBoundary != nil)
+        .animation(.spring(response: 0.4, dampingFraction: 0.85),
+                   value: session.handBoundary != nil || session.winDetected != nil)
     }
 
     @ViewBuilder private var tabContent: some View {

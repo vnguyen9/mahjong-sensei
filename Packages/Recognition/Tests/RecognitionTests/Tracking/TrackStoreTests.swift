@@ -335,4 +335,82 @@ final class TrackStoreTests: XCTestCase {
         XCTAssertEqual(store.track(id0)?.zone, .pond)
         XCTAssertEqual(store.track(id0)?.seat, .across)
     }
+
+    // MARK: - visibleRegion gating (Lane B chunk E — ROI-cropped AR ingest)
+
+    /// A track OUTSIDE `visibleRegion` must never accrue a miss — it stays
+    /// `.live` forever, well past both `missingGraceSettled` and
+    /// `retiredRetention`, as long as every ingest keeps excluding it.
+    func testOutOfRegionTrackNeverRetiresAcrossManyTicks() {
+        let store = liveSingle(.m(1))   // track at box(0.5, 0.5)
+        let farRegion = TileBoundingBox(x: 0.0, y: 0.0, width: 0.15, height: 0.15)   // nowhere near (0.5, 0.5)
+        XCTAssertEqual(store.track(id0)?.state, .live)
+
+        for i in 0..<20 {
+            _ = store.associate([], at: 1.0 + Double(i), visibleRegion: farRegion)
+        }
+        XCTAssertEqual(store.track(id0)?.state, .live, "a track never covered by visibleRegion must never miss/retire")
+        XCTAssertEqual(store.counts.retired, 0)
+    }
+
+    /// A track INSIDE `visibleRegion` retires on exactly the same schedule as
+    /// a full-view ingest — the gate only protects tracks OUTSIDE the region,
+    /// never masks genuine misses within it.
+    func testInRegionMissingTrackStillRetiresNormally() {
+        let store = liveSingle()   // track at box(0.5, 0.5)
+        let coveringRegion = TileBoundingBox(x: 0.3, y: 0.3, width: 0.4, height: 0.4)   // contains (0.5, 0.5)
+        XCTAssertEqual(store.track(id0)?.state, .live)
+
+        _ = store.associate([], at: 1.0, visibleRegion: coveringRegion)
+        XCTAssertEqual(store.track(id0)?.state, .missing, "missed inside a region that covers it")
+
+        _ = store.associate([], at: 2.5, visibleRegion: coveringRegion)   // 1.5s < missingGraceSettled(2.0)
+        XCTAssertEqual(store.track(id0)?.state, .missing)
+
+        _ = store.associate([], at: 3.1, visibleRegion: coveringRegion)   // 2.1s > 2.0 → retired
+        XCTAssertNil(store.track(id0), "an in-region missing track retires exactly like a full-view one")
+        XCTAssertEqual(store.counts.retired, 1)
+    }
+
+    /// Default `visibleRegion == nil` re-runs `testMissingGraceRetiresAfterSettledWindowWhenCalm`'s
+    /// exact schedule with the parameter simply omitted — the negative
+    /// control proving existing call sites (harness, image-space loop) are
+    /// byte-identical to before this parameter existed.
+    func testDefaultVisibleRegionNilPreservesExistingMissingRetirementBehavior() {
+        let store = liveSingle()
+        XCTAssertEqual(store.track(id0)?.state, .live)
+
+        _ = store.associate([], at: 1.0)
+        XCTAssertEqual(store.track(id0)?.state, .missing)
+
+        _ = store.associate([], at: 2.5)
+        XCTAssertEqual(store.track(id0)?.state, .missing)
+
+        _ = store.associate([], at: 3.1)
+        XCTAssertNil(store.track(id0), "unchanged: a calm missing track retires after the settled grace")
+        XCTAssertEqual(store.counts.retired, 1)
+    }
+
+    /// The facade forwards `visibleRegion` all the way through
+    /// `TableTracker.ingest` to `TrackStore.associate` — a thin integration
+    /// check on top of the `TrackStore`-level tests above.
+    func testTableTrackerIngestForwardsVisibleRegionToTrackStore() {
+        var config = TrackerConfig()
+        config.winPredicate = { _, _ in false }
+        let tracker = TableTracker(config: config)
+        tracker.beginSession(mySeatWind: .east, roundWind: .east, at: 0.0)
+
+        let farBox = box(0.2, 0.2)
+        for i in 0..<3 {
+            tracker.ingest([det(.m(1), 0.9, farBox)], at: Double(i) * 0.2, motion: nil)
+        }
+        XCTAssertEqual(tracker.diagnostics.live, 1, "3 confident hits confirm the track live")
+
+        let farRegion = TileBoundingBox(x: 0.7, y: 0.7, width: 0.2, height: 0.2)   // excludes farBox
+        for i in 0..<20 {
+            tracker.ingest([], at: 1.0 + Double(i), visibleRegion: farRegion)
+        }
+        XCTAssertEqual(tracker.diagnostics.live, 1, "the facade's visibleRegion reaches TrackStore — an out-of-region track never retires")
+        XCTAssertEqual(tracker.diagnostics.retired, 0)
+    }
 }

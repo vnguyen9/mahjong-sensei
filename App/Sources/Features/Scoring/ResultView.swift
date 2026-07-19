@@ -10,6 +10,7 @@ import ScoringEngine
 struct ResultView: View {
     private let onClose: () -> Void
     @State private var showWhy = false
+    @Environment(\.dismiss) private var dismiss
 
     private let isSelfDraw: Bool
     private let score: ScoreResult
@@ -50,6 +51,12 @@ struct ResultView: View {
 
     private var header: some View {
         HStack {
+            Button { dismiss() } label: {
+                Label("Back", systemImage: "chevron.left")
+                    .font(MJFont.ui(14, weight: .medium)).foregroundStyle(MJColor.gold)
+            }
+            .buttonStyle(.plain)
+            Spacer()
             Text("Result").font(MJFont.serif(18, weight: .bold)).foregroundStyle(MJColor.creamHeading)
             Spacer()
             Button { onClose() } label: {

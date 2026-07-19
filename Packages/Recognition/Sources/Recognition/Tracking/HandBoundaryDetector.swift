@@ -33,6 +33,16 @@ import Foundation
 /// `handClearMinTiles` (8), so the floor check alone makes a meld claim
 /// structurally unable to trigger a proposal; no special-case code needed.
 ///
+/// **Dismiss cooldown.** A manual `dismiss(at:)` remembers *when* and *which*
+/// tracks were missing at the moment of dismissal. Until
+/// `TrackerConfig.handEndDismissCooldown` elapses, `evaluateSettled`
+/// suppresses re-proposal for as long as the currently-missing set stays a
+/// *subset* of what was dismissed — the lean-over-the-table misfire (the
+/// same handful of tiles still gone, table otherwise unchanged) doesn't
+/// immediately re-nag. Any genuinely *new* missing track breaks the subset
+/// relation and lifts the cooldown at once — real evidence of an actual
+/// clear always wins over the suppression.
+///
 /// Not `Sendable` — mutable single-owner state, same convention as
 /// `TrackStore`/`ZoneModel`/`TurnEngine`. No `Date()`/`UUID()` in any logic
 /// path; every timestamp is the caller's injected `TimeInterval`.
@@ -42,6 +52,11 @@ public final class HandBoundaryDetector {
     private var everLiveThisHand: Set<TrackID> = []
     private var clearingSince: TimeInterval?
     private var pending: Pending?
+
+    // Dismiss-cooldown bookkeeping (see the type doc's "Dismiss cooldown"
+    // note). `dismissedAt` nil ⇒ no cooldown in effect.
+    private var dismissedAt: TimeInterval?
+    private var dismissedMissingIDs: Set<TrackID> = []
 
     private struct Pending {
         var proposal: HandEndProposal
@@ -86,6 +101,18 @@ public final class HandBoundaryDetector {
         let missingIDs = everLiveThisHand.filter { store.track($0)?.state != .live }
         let missingFraction = Double(missingIDs.count) / Double(confirmed)
 
+        // Dismiss cooldown: while the currently-missing set is still a
+        // *subset* of what a recent manual dismissal already waved off, and
+        // that dismissal hasn't aged out of `handEndDismissCooldown`, never
+        // even start the sustain timer — the lean-over-the-table misfire
+        // doesn't immediately re-nag. A missing track outside that dismissed
+        // set falls through to the normal logic below (real evidence wins).
+        if let da = dismissedAt, t - da < config.handEndDismissCooldown,
+           missingIDs.isSubset(of: dismissedMissingIDs) {
+            clearingSince = nil
+            return BoundaryOutcome()
+        }
+
         guard missingFraction >= config.handClearFraction, missingIDs.count >= config.handClearMinTiles else {
             clearingSince = nil
             return BoundaryOutcome()
@@ -102,12 +129,26 @@ public final class HandBoundaryDetector {
         let proposal = HandEndProposal(at: t, missingFraction: missingFraction, predictedWinds: nil)
         pending = Pending(proposal: proposal, goneAtProposal: missingIDs)
         clearingSince = nil
+        // A fresh proposal supersedes whatever an earlier dismissal was
+        // suppressing — clear its bookkeeping so a *later* dismissal of
+        // *this* proposal starts its own, independent cooldown.
+        dismissedAt = nil
+        dismissedMissingIDs.removeAll()
         return BoundaryOutcome(proposed: proposal)
     }
 
     /// Manual dismissal (`TableTracker.dismissHandEnd`) — clears the pending
-    /// proposal without waiting for the auto-cancel reappearance signal.
-    public func dismiss() {
+    /// proposal without waiting for the auto-cancel reappearance signal, and
+    /// (see the type doc's "Dismiss cooldown" note) remembers `t` and the
+    /// dismissed proposal's missing-track set so `evaluateSettled` can
+    /// suppress an immediate re-proposal over the same evidence. `t` is the
+    /// caller's injected monotonic clock (`TableTracker.now`) — never
+    /// `Date()`.
+    public func dismiss(at t: TimeInterval) {
+        if let current = pending {
+            dismissedAt = t
+            dismissedMissingIDs = current.goneAtProposal
+        }
         pending = nil
         clearingSince = nil
     }
@@ -118,6 +159,8 @@ public final class HandBoundaryDetector {
         everLiveThisHand.removeAll()
         clearingSince = nil
         pending = nil
+        dismissedAt = nil
+        dismissedMissingIDs.removeAll()
     }
 }
 

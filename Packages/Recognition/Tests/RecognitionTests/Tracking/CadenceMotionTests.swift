@@ -243,6 +243,94 @@ final class CadenceMotionTests: XCTestCase {
         XCTAssertEqual(sample!.dominantRegion, .right)
     }
 
+    // MARK: - MotionDetector: meanLuma (A5 — dark-table torch chip)
+
+    /// `meanLuma` needs no prior frame — it must be populated on the very
+    /// FIRST sample of a session, before `MotionDetector` even has a
+    /// `previousGrid` to diff against (see `MotionDetector.sample`'s doc).
+    /// BGRA is the default (unpinned) camera format, so it's covered here at
+    /// minimum per the plan.
+    func testMeanLumaIsPresentOnTheFirstSampleBGRA() {
+        let detector = MotionDetector()
+        let sample = detector.sample(makeBGRABuffer(value: 10), at: 0.0)
+        XCTAssertNotNil(sample, "first sample must still succeed on a supported format")
+        XCTAssertEqual(sample!.level, 0, "first sample has no prior grid to diff — level stays 0")
+        XCTAssertEqual(sample!.meanLuma, 10, accuracy: 1.0, "meanLuma doesn't need a previous grid")
+    }
+
+    /// A dark buffer and a bright buffer land on either side of
+    /// `DarkTableDetector`'s 40/60 hysteresis thresholds — confirms
+    /// `meanLuma` actually tracks scene brightness, not just "some number".
+    func testMeanLumaDistinguishesDarkFromBrightBGRA() {
+        let dark = MotionDetector().sample(makeBGRABuffer(value: 10), at: 0.0)
+        let bright = MotionDetector().sample(makeBGRABuffer(value: 220), at: 0.0)
+        XCTAssertNotNil(dark)
+        XCTAssertNotNil(bright)
+        XCTAssertLessThan(dark!.meanLuma, 40)
+        XCTAssertGreaterThan(bright!.meanLuma, 60)
+    }
+
+    // MARK: - MotionField (Lane B chunk E — ROI scheduler input)
+
+    /// A buffer changed ONLY in one corner → `MotionField.changed` is `true`
+    /// exactly for the cells overlapping that corner's patch, `false`
+    /// everywhere else (BGRA path — the AR loop's actual buffer format, but
+    /// `sampleField` shares its whole grid/diff path with `sample`, already
+    /// covered on the 420 path above).
+    func testChangedFieldLocalizesToTheChangedCornerBGRA() {
+        let detector = MotionDetector()
+        let base = makeBGRABuffer(value: 40)
+        // Bottom-right 40×30 corner of the 320×180 buffer — well clear of a
+        // single 10×10 grid cell (320/32 × 180/18) so the patch cleanly
+        // covers a handful of cells and nothing else.
+        let changed = makeBGRABuffer(value: 40, patch: (x: 280, y: 150, w: 40, h: 30, value: 220))
+        _ = detector.sampleField(base, at: 0.0)
+        guard let field = detector.sampleField(changed, at: 0.1) else {
+            return XCTFail("expected a field on the BGRA path")
+        }
+        XCTAssertEqual(field.changed.count, MotionField.gridWidth * MotionField.gridHeight)
+
+        // Corner cells: columns 28..<32 (280/10..320/10), rows 15..<18 (150/10..180/10)
+        // must all be changed. `vImageScale`'s box filter interpolates across
+        // cell boundaries, so cells immediately adjacent to the patch (one
+        // cell of bleed) may also read as changed — only cells with a
+        // margin of slack are asserted `false`, to avoid a flaky test tied
+        // to the resampler's exact kernel width.
+        for row in 15..<MotionField.gridHeight {
+            for col in 28..<MotionField.gridWidth {
+                let idx = row * MotionField.gridWidth + col
+                XCTAssertTrue(field.changed[idx], "cell (\(col),\(row)) is inside the changed corner")
+            }
+        }
+        // Far quadrant (top-left, well clear of the corner + any bleed).
+        for row in 0..<12 {
+            for col in 0..<24 {
+                let idx = row * MotionField.gridWidth + col
+                XCTAssertFalse(field.changed[idx], "cell (\(col),\(row)) is far from the changed corner")
+            }
+        }
+        // Localized, not the whole grid.
+        let changedCount = field.changed.filter { $0 }.count
+        XCTAssertLessThan(changedCount, MotionField.gridWidth * MotionField.gridHeight / 4,
+                          "the change stays localized to the corner, not the whole grid")
+        XCTAssertGreaterThan(field.sample.level, 0, "the collapsed level still reflects the same diff")
+    }
+
+    /// `sample` and `sampleField` must read as the exact same numeric path —
+    /// calling `sample` after `sampleField` (or vice versa) is exactly the
+    /// factoring the plan requires, not two independently-computed diffs.
+    func testSampleIsAThinWrapperOverSampleField() {
+        let a = MotionDetector()
+        let b = MotionDetector()
+        let base = makeBGRABuffer(value: 40)
+        let changed = makeBGRABuffer(value: 40, patch: (x: 0, y: 0, w: 320, h: 60, value: 220))
+        _ = a.sample(base, at: 0.0)
+        _ = b.sampleField(base, at: 0.0)
+        let viaSample = a.sample(changed, at: 0.1)
+        let viaField = b.sampleField(changed, at: 0.1)?.sample
+        XCTAssertEqual(viaSample, viaField)
+    }
+
     func testLevelIsEMASmoothedAcrossFrames() {
         let detector = MotionDetector()
         let a = makeBuffer(value: 0)

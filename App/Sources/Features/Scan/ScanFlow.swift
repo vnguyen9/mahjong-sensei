@@ -15,27 +15,33 @@ enum ScanMode: Hashable { case score, lookup }
 /// ``VisionRecognizer``. Surfaced only by the Debug-only model switcher in
 /// Settings; production selects via the fast/accurate pair on ``TileDetector``.
 enum DetectorModel: String, CaseIterable, Identifiable {
-    case nanoV1  = "MahjongTileDetector"         // mjss-yolo26n  — small & fast
-    case nanoV3  = "MahjongTileDetectorNanoV3"   // mjss-n-v3     — new nano
-    case largeV2 = "MahjongTileDetectorPro"      // mjss-yolo26l  — the shipping accurate model
-    case largeV3 = "MahjongTileDetectorProV3"    // mjss-l-v3     — new large, under evaluation
+    case nanoV1   = "MahjongTileDetector"          // mjss-yolo26n  — small & fast
+    case nanoV3   = "MahjongTileDetectorNanoV3"    // mjss-n-v3     — new nano
+    case smallV3  = "MahjongTileDetectorSmallV3"   // mjss-s-v3     — new small
+    case mediumV3 = "MahjongTileDetectorMediumV3"  // mjss-m-v3     — new medium
+    case largeV2  = "MahjongTileDetectorPro"       // mjss-yolo26l  — the shipping accurate model
+    case largeV3  = "MahjongTileDetectorProV3"     // mjss-l-v3     — new large, under evaluation
 
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .nanoV1:  return "Nano v1"
-        case .nanoV3:  return "Nano v3"
-        case .largeV2: return "Large v2"
-        case .largeV3: return "Large v3"
+        case .nanoV1:   return "Nano v1"
+        case .nanoV3:   return "Nano v3"
+        case .smallV3:  return "Small v3"
+        case .mediumV3: return "Medium v3"
+        case .largeV2:  return "Large v2"
+        case .largeV3:  return "Large v3"
         }
     }
     /// One-line descriptor shown under the label in the model-selection screen.
     var subtitle: String {
         switch self {
-        case .nanoV1:  return "Small & fast"
-        case .nanoV3:  return "Small & fast · new"
-        case .largeV2: return "Accurate · shipping default"
-        case .largeV3: return "Accurate · under evaluation"
+        case .nanoV1:   return "Small & fast"
+        case .nanoV3:   return "Small & fast · new"
+        case .smallV3:  return "Balanced · new"
+        case .mediumV3: return "More accurate · new"
+        case .largeV2:  return "Accurate · shipping default"
+        case .largeV3:  return "Accurate · under evaluation"
         }
     }
 }
@@ -44,7 +50,7 @@ enum DetectorModel: String, CaseIterable, Identifiable {
 /// "Higher accuracy" toggle flips between a small fast model and the larger, more
 /// accurate (slower) one without ever naming them, defaulting to accurate. In
 /// **Debug** builds the dev-only model switcher (Settings) overrides that and picks
-/// one of the three ``DetectorModel`` cases directly.
+/// any ``DetectorModel`` case directly.
 enum TileDetector {
     static let defaultsKey = "prefersHighAccuracy"
     /// Compiled-resource base names (`<name>.mlmodelc` in the app bundle).
@@ -109,6 +115,11 @@ final class ScanSession {
     var roundWind: Wind = .east
     var isSelfDraw: Bool = true
     var isDealer: Bool = true
+    // Special win circumstances — can't be read from the tiles, so the player taps
+    // them on the "Almost there" screen. Fed straight into `gameContext`.
+    var isLastTile: Bool = false        // 海底撈月 / 河底撈魚
+    var isReplacement: Bool = false     // 槓上開花 / 花上開花
+    var isRobbingKong: Bool = false     // 搶槓
 
     func start(with result: RecognitionResult) {
         recognized = result
@@ -119,6 +130,9 @@ final class ScanSession {
         roundWind = .east
         isSelfDraw = true
         isDealer = true
+        isLastTile = false
+        isReplacement = false
+        isRobbingKong = false
     }
 
     /// The faces in reading order (read-only compat for scoring / coaching).
@@ -171,8 +185,11 @@ final class ScanSession {
     // MARK: Scoring inputs
 
     /// Standard HK house rules now that real scans carry real flowers/seasons.
+    /// Self-draw and flowers ride on the `Hand`; the special-win flags come from
+    /// the "Almost there" toggles.
     var gameContext: GameContext {
-        GameContext(seatWind: seatWind, prevailingWind: roundWind, houseRules: .standard)
+        GameContext(seatWind: seatWind, prevailingWind: roundWind, houseRules: .standard,
+                    isLastTile: isLastTile, isReplacement: isReplacement, isRobbingKong: isRobbingKong)
     }
 
     /// Flowers/seasons go into `bonusTiles` (never a scoring set); the winning tile
@@ -261,11 +278,26 @@ final class ScanCoordinator {
         #if DEBUG && targetEnvironment(simulator)
         coachLive = MockCoachLive.make(scene: "coach-live")
         #else
-        // Real session: reuses the hoisted `camera` (never its own) and the
-        // shared recognizer loader, so the tracking loop and the scan shutter
-        // stay a single camera + single model.
+        // Real session (Lane B chunk G): ARKit needs the wide camera for
+        // itself — free the device from `AVCaptureSession` FIRST, then hand
+        // a started `ARTableCapture` to the session. `camera` itself is kept
+        // around (still the fallback path if the table never locks, and
+        // `endCoachLive`/`beginScoreHandoff` restart it for Scan's return)
+        // and the shared recognizer loader still means one loaded model
+        // either way.
+        camera.stop()
+        // `ARTableCapture` is `@MainActor`-isolated; `ScanCoordinator` isn't
+        // (its intent methods are called directly from SwiftUI action
+        // closures, always on the main actor at runtime but not statically
+        // typed `@MainActor` all the way through) — `assumeIsolated` bridges
+        // that gap, matching `CoachLiveSession.end()`'s identical situation.
+        let arCapture = MainActor.assumeIsolated { () -> ARTableCapture in
+            let capture = ARTableCapture()
+            capture.start()
+            return capture
+        }
         let loader = recognizerLoader
-        coachLive = CoachLiveSession(camera: camera, recognizerProvider: { await loader.active() })
+        coachLive = CoachLiveSession(camera: camera, arCapture: arCapture, recognizerProvider: { await loader.active() })
         // Warm the (multi-second) Core ML detector now, while the user is on the
         // setup card tapping winds — `RecognizerLoader` caches, so the tracking
         // loop's first `await recognizerProvider()` then returns instantly.
@@ -274,8 +306,11 @@ final class ScanCoordinator {
     }
 
     func endCoachLive() {
-        coachLive?.end()
+        coachLive?.end()             // pauses the AR session (if any) — see `CoachLiveSession.end()`
         coachLive = nil
+        #if !targetEnvironment(simulator)
+        camera.requestAndStart()     // Scan's own preview resumes (harmless no-op if already running)
+        #endif
     }
 
     /// Hands a completed live-tracked hand to the existing Score flow: seeds the
@@ -295,7 +330,10 @@ final class ScanCoordinator {
         session.isDealer = (live.seatWind == .east)
         session.mode = .score
         session.capturedPhoto = live.lastFrameSnapshot
-        live.end()                  // stop the tracking loop before we drop the cover
+        live.end()                  // stop the tracking loop (+ pause AR) before we drop the cover
+        #if !targetEnvironment(simulator)
+        camera.requestAndStart()    // Scan's own preview resumes (Lane B chunk G)
+        #endif
         path = [.context]           // set path BEFORE clearing coachLive so the
         coachLive = nil             // cover dismissal reveals ContextView, not the camera.
     }

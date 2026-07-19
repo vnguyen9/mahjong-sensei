@@ -55,6 +55,8 @@ final class TrackerConfigTests: XCTestCase {
         XCTAssertEqual(c.zoneSwitchMargin, 3)
         XCTAssertEqual(c.calibrationFrames, 5)
         XCTAssertEqual(c.pondCoreSigma, 2.0)
+        XCTAssertEqual(c.handRescueMinTiles, 8)
+        XCTAssertEqual(c.handRescueMinY, 0.55)
     }
 
     func testAttributionDefaults() {
@@ -73,6 +75,7 @@ final class TrackerConfigTests: XCTestCase {
         XCTAssertEqual(c.handClearSustain, 5.0)
         XCTAssertEqual(c.reappearFraction, 0.5)
         XCTAssertEqual(c.reappearWindow, 8.0)
+        XCTAssertEqual(c.handEndDismissCooldown, 20.0)
     }
 
     func testBookkeepingDefaults() {

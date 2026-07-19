@@ -169,6 +169,130 @@ final class ZoneModelTests: XCTestCase {
         XCTAssertEqual(zonesFor(seed: 555), zonesFor(seed: 555), "same seed → identical zone assignment")
     }
 
+    // MARK: - Zoner single-row hand rescue (A4)
+
+    /// `TableSceneParser.handClusterIndex` gates a "hand" candidate on
+    /// `sceneConfig.minHandCount` (default 4) *and* `minHandTileHeight`
+    /// (default 0.055). `handRescueMinTiles` (8, default) is already
+    /// *stricter* than the default `minHandCount`, so under default config any
+    /// cluster big enough to earn the rescue would already have satisfied the
+    /// parser's own (weaker) count gate — the parser would never have missed
+    /// it in the first place. To reproduce a genuine "parser misses the rank
+    /// this frame" scenario (the observed rank→POND bug the interim fix
+    /// targets) while still leaving a cluster big enough for the rescue,
+    /// these tests raise `sceneConfig.minHandCount` — the parser's own,
+    /// independent knob — past what any real rank can reach, leaving
+    /// `handRescueMinTiles` at its own, separate default untouched.
+    private func rescueTestConfig() -> TrackerConfig {
+        var config = TrackerConfig()
+        config.sceneConfig.minHandCount = 20   // no cluster in these tests can ever satisfy handClusterIndex
+        return config
+    }
+
+    func testSingleRowRankRescuesToMyHandWhenParserMissesItThisFrame() {
+        let config = rescueTestConfig()
+        let store = TrackStore(config: config), zone = ZoneModel(config: config)
+
+        // 13 rank-scale tiles in one bottom-band row — a real concealed hand,
+        // arranged so `handClusterIndex` (count ≥ 20, per `rescueTestConfig`)
+        // misses it every frame, exactly like the old unconditional-pond
+        // default would have pond-locked it.
+        let rank = dealHand().enumerated().map { i, tile in
+            det(tile, box(0.10 + Double(i) * 0.065, 0.85, w: 0.05, h: 0.08))
+        }
+        XCTAssertEqual(rank.count, 13)
+
+        for i in 0..<8 { ingest(rank, store, zone, at: Double(i) * 0.2) }
+
+        let tracks = store.tracks
+        XCTAssertEqual(tracks.count, 13)
+        XCTAssertTrue(tracks.allSatisfy { $0.zone == .myHand },
+                      "a genuine single-row rank the parser missed this frame must rescue to myHand, " +
+                      "not pond-lock: \(zoneSummary(tracks))")
+    }
+
+    func testMultiRowTableBlobStaysPondEvenWhenParserMissesTheHand() {
+        let config = rescueTestConfig()
+        let store = TrackStore(config: config), zone = ZoneModel(config: config)
+
+        // Two stacked rows of rank-scale tiles (14 total — comparable size to
+        // the single-row case above), bridged into one physical cluster but
+        // spanning two lines. `handClusterIndex` still misses it (same
+        // `rescueTestConfig`), but the rescue's own single-line requirement
+        // must reject it — a stacked blob is table content, never a
+        // concealed rank.
+        let faces = dealHand() + [.north]
+        XCTAssertEqual(faces.count, 14)
+        let row1 = faces.prefix(7).enumerated().map { i, tile in
+            det(tile, box(0.10 + Double(i) * 0.065, 0.80, w: 0.05, h: 0.08))
+        }
+        let row2 = faces.suffix(7).enumerated().map { i, tile in
+            det(tile, box(0.10 + Double(i) * 0.065, 0.90, w: 0.05, h: 0.08))
+        }
+        let blob = row1 + row2
+
+        for i in 0..<8 { ingest(blob, store, zone, at: Double(i) * 0.2) }
+
+        let tracks = store.tracks
+        XCTAssertEqual(tracks.count, 14)
+        XCTAssertTrue(tracks.allSatisfy { $0.zone == .pond },
+                      "a two-row blob must stay pond even on a parser-missed frame: \(zoneSummary(tracks))")
+    }
+
+    func testSmallTableClusterBelowRescueFloorStaysPond() {
+        // A lone 3-tile, non-meld cluster in the bottom band — well under
+        // `handRescueMinTiles` (8) — must never be mistaken for a missed
+        // hand, even though the parser also finds no hand at all this frame
+        // (3 < the *default* minHandCount(4) too, so no config override is
+        // needed here).
+        let store = TrackStore(), zone = ZoneModel()
+        let small = [det(.m(1), box(0.20, 0.85, w: 0.05, h: 0.08)),
+                    det(.p(5), box(0.29, 0.85, w: 0.05, h: 0.08)),
+                    det(.s(9), box(0.38, 0.85, w: 0.05, h: 0.08))]
+
+        for i in 0..<7 { ingest(small, store, zone, at: Double(i) * 0.2) }
+
+        let tracks = store.tracks
+        XCTAssertEqual(tracks.count, 3)
+        XCTAssertTrue(tracks.allSatisfy { $0.zone == .pond },
+                      "a cluster below handRescueMinTiles must stay pond: \(zoneSummary(tracks))")
+    }
+
+    func testRescueDoesNotApplyToTableClustersWhenTheParserFoundAValidHand() {
+        // Default config: the primary 13-tile row is a real, parser-findable
+        // hand (highest score — closest to the bottom). A second, separate
+        // 8-tile row sits higher up (still inside the rescue's own y/height/
+        // single-line criteria, so it *would* rescue on a miss-frame) but the
+        // parser finds a valid `mine` this frame — the rescue must stay
+        // inactive for every other table cluster, so the second row falls
+        // through to the ordinary pond default.
+        let store = TrackStore(), zone = ZoneModel()
+
+        let primary = dealHand().enumerated().map { i, tile in
+            det(tile, box(0.10 + Double(i) * 0.065, 0.90, w: 0.05, h: 0.08))
+        }
+        // Disjoint from `dealHand()`'s faces (m1–5, p2–4, s6–8, E, W) so
+        // filtering tracks by face below can't conflate the two clusters.
+        let secondaryFaces: [Tile] = [.m(6), .m(7), .m(8), .p(6), .p(7), .p(8), .s(1), .s(2)]
+        let secondary = secondaryFaces.enumerated().map { i, tile in
+            det(tile, box(0.10 + Double(i) * 0.065, 0.60, w: 0.05, h: 0.08))
+        }
+
+        for i in 0..<8 { ingest(primary + secondary, store, zone, at: Double(i) * 0.2) }
+
+        let tracks = store.tracks
+        let primaryFaces = primary.map(\.tile)
+        let myHand = tracks.filter { primaryFaces.contains($0.face) }
+        let secondaryTracks = tracks.filter { secondaryFaces.contains($0.face) }
+        XCTAssertEqual(myHand.count, 13)
+        XCTAssertTrue(myHand.allSatisfy { $0.zone == .myHand },
+                      "the real, parser-found hand must still resolve myHand: \(zoneSummary(tracks))")
+        XCTAssertEqual(secondaryTracks.count, 8)
+        XCTAssertTrue(secondaryTracks.allSatisfy { $0.zone == .pond },
+                      "rescue must not fire on other table clusters once the parser found a valid hand: " +
+                      "\(zoneSummary(tracks))")
+    }
+
     // MARK: - Helper
 
     private func zoneSummary(_ tracks: [TrackedTile]) -> String {

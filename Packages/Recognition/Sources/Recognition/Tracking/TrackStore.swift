@@ -112,9 +112,19 @@ public final class TrackStore {
     /// `AssociationOutcome` mapping detections→tracks plus the births / rebirths
     /// / promotions / retirements this frame, which the facade needs to drive
     /// zone votes and event derivation.
+    ///
+    /// `visibleRegion` (Lane B chunk E — ROI-cropped AR inference): `nil`
+    /// (default) is the original full-view contract, byte-identical to
+    /// before this parameter existed. Non-nil ⇒ this frame's detections only
+    /// covered PART of the table (a cropped recognize pass) — a track whose
+    /// box doesn't intersect `visibleRegion` wasn't actually looked at this
+    /// frame, so it must not accrue a "missed" frame for it (see the miss
+    /// step below); a track that DOES intersect `visibleRegion` but still
+    /// wasn't matched genuinely went unseen within the region we checked, so
+    /// it misses/retires exactly as it would under a full-view ingest.
     @discardableResult
     public func associate(_ detections: [DetectedTile], at t: TimeInterval,
-                          motion: MotionSample? = nil) -> AssociationOutcome {
+                          motion: MotionSample? = nil, visibleRegion: TileBoundingBox? = nil) -> AssociationOutcome {
         now = t
         if let level = motion?.level, level >= config.motionActive { lastMotionActiveAt = t }
         expireRetired(at: t)
@@ -153,8 +163,15 @@ public final class TrackStore {
         // then the unmatched detection at the new spot resurrects that track
         // instead of birthing a second one. Ordering miss-before-birth is what
         // closes the one-frame double-count window.
+        //
+        // `visibleRegion` gate (chunk E): a track outside the region this
+        // frame's (cropped) detections actually covered simply never had a
+        // chance to match — skip it entirely rather than call `missTrack`,
+        // so it accrues no miss/no retirement progress from a frame that
+        // wasn't looking at it in the first place.
         for id in preExisting where !matched.contains(id) {
             guard let track = tracksByID[id] else { continue }
+            if let visibleRegion, !boxesIntersect(track.box, visibleRegion) { continue }
             missTrack(track, at: t, outcome: &outcome)
         }
 
@@ -231,6 +248,36 @@ public final class TrackStore {
         track.confirmedOnce = true
         tracksByID[track.id] = track
         return track.id
+    }
+
+    /// Recreates a track for persistence restore (plan A6,
+    /// `TableTracker.restore`) — mirrors `insertManualTrack`'s pinned/
+    /// zone-locked/manual/confirmed `.live` track, but PRESERVES the given
+    /// `id` (a restored `GameEvent`'s `track` reference must still resolve —
+    /// `insertManualTrack`'s always-fresh id would break that) instead of
+    /// minting one, and carries over the original `firstSeen`/`lastSeen`/
+    /// `observationCount` rather than stamping them at `t`. Fast-forwards
+    /// `nextRawID` past `id.raw` so a track born after restore can never
+    /// collide with a restored id, regardless of what order the caller
+    /// restores tiles in. Meant to be called only on a fresh store (see
+    /// `TableTracker.restore`'s precondition) — calling it with an id that
+    /// collides with an already-live track silently overwrites that track.
+    @discardableResult
+    public func restoreTrack(id: TrackID, face: Tile, box: TileBoundingBox, zone: TileZone,
+                             seat: RelativeSeat?, firstSeen: TimeInterval, lastSeen: TimeInterval,
+                             observationCount: Int, at t: TimeInterval) -> TrackID {
+        now = max(now, t)
+        let track = Track(id: id, face: face, box: box, zone: zone, seat: seat, state: .live, at: firstSeen)
+        track.lastSeen = lastSeen
+        track.observationCount = observationCount
+        track.isPinned = true
+        track.pinnedFace = face
+        track.zoneLocked = true
+        track.isManual = true
+        track.confirmedOnce = true
+        tracksByID[id] = track
+        if id.raw >= nextRawID { nextRawID = id.raw + 1 }
+        return id
     }
 
     /// Hard-delete a ghost/double detection and suppress its box for
@@ -593,6 +640,13 @@ private func iou(_ a: TileBoundingBox, _ b: TileBoundingBox) -> Double {
     let inter = ix * iy
     let union = a.width * a.height + b.width * b.height - inter
     return union > 0 ? inter / union : 0
+}
+
+/// Whether two normalized boxes overlap at all — unlike `iou`, the
+/// `visibleRegion` gate (`associate`'s miss step) only needs a yes/no test,
+/// not the overlap fraction.
+private func boxesIntersect(_ a: TileBoundingBox, _ b: TileBoundingBox) -> Bool {
+    a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
 }
 
 private func centerDistance(_ a: TileBoundingBox, _ b: TileBoundingBox) -> Double {

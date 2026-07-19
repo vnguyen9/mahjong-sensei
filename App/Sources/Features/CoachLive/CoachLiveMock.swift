@@ -18,6 +18,10 @@ import Recognition
 /// runs the placeholder advisor over this hand once seeded.
 enum MockCoachLive {
     static func make(scene: String) -> CoachLiveSession {
+        // Mock/MJ_SCREEN scenes have no "first real launch" for the A3
+        // correction hint banner to greet — mark it seen so it never shows
+        // over these scripted scenes (see `CorrectionHintBanner`'s own doc).
+        CoachLivePrefs.hasSeenCorrectionHint = true
         let session = CoachLiveSession(camera: CameraCapture())
         seedScenario(session)
         applyScene(scene, to: session)

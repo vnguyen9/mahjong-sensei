@@ -180,6 +180,90 @@ public struct TrackerConfig: Sendable {
     /// plan specifies pond centroid+covariance but not its bootstrap.)
     public var pondInitialSigma: Double = 0.12
 
+    /// Interim-fix rescue gate (harness-tunable): minimum tile count for a
+    /// table cluster to be considered for the `.myHand` rescue vote on a
+    /// frame where `TableSceneParser` found no hand at all
+    /// (`scene.mine.isEmpty`) — deliberately stricter than the parser's own
+    /// `minHandCount` (4) so the rescue only fires on a cluster that's
+    /// unambiguously a full rank, never a stray handful of table tiles.
+    public var handRescueMinTiles: Int = 8
+
+    /// Interim-fix rescue gate (harness-tunable): minimum mean/center-Y
+    /// (normalized image space, top-left origin) for a rescued cluster —
+    /// keeps the rescue confined to the bottom band a player's-seat rank
+    /// actually occupies, so a big near-camera pond cluster elsewhere on the
+    /// table can never be mistaken for the hand just because the parser
+    /// whiffed this frame.
+    public var handRescueMinY: Double = 0.55
+
+    // MARK: - Coordinate space (image-space harness ↔ ARKit table-space live path)
+
+    /// Which coordinate frame the tracker's boxes live in — the seam that lets
+    /// the *same* `TableTracker` serve both the offline image-space harness
+    /// (and the live fallback when plane detection fails) and the ARKit
+    /// table-space live path (Lane B). The default preserves ALL current
+    /// behavior — `TrackStore`/`TurnEngine`/the harness never look at it; only
+    /// `ZoneModel`'s vote source branches on it.
+    public enum CoordinateSpace: Sendable {
+        /// Boxes are normalized oriented-image coordinates (top-left origin,
+        /// larger y toward me) — what the detector and the whole harness emit.
+        /// Zones come from `TableSceneParser` + learned hand-band/pond
+        /// calibration.
+        case imageSpace
+        /// Boxes are normalized table-plane coordinates produced by
+        /// `DetectionProjector`: the locked plane anchor sits at (0.5, 0.5),
+        /// the [0,1] range spans `TableGeometry.extent` metres, and — by the
+        /// app's oriented-lock contract — larger y still points toward me
+        /// (matching image space's `seatFromDisplacement` convention). Zones
+        /// come from fixed `tableGeometry`, the parser is bypassed.
+        case tableSpace
+    }
+
+    /// Active coordinate space. Default `.imageSpace` — every existing call
+    /// site, test, and golden runs unchanged.
+    public var coordinateSpace: CoordinateSpace = .imageSpace
+
+    /// Fixed table geometry for `.tableSpace` zoning — the app fills this at
+    /// table-lock time from the locked plane's real dimensions. In
+    /// `.tableSpace` mode it *replaces* image space's learned hand-band/pond
+    /// calibration (which a world-anchored plane makes unnecessary): geometry
+    /// is a session constant read straight off the plane, not something to
+    /// accumulate. `nil` in `.imageSpace` (never read there).
+    public struct TableGeometry: Sendable {
+        /// Physical metres spanned by table-space's normalized [0,1] range —
+        /// the same value the app passes as `DetectionProjector.tableExtent`.
+        /// Not read by `ZoneModel` (which works purely in the already-
+        /// normalized units below), but carried alongside them so the one
+        /// geometry the app fills at table-lock lives in one struct. Default
+        /// 0.9 ≈ a standard ~0.9m playing area.
+        public var extent: Double
+        /// Depth of the hand-rank band measured inward from an edge, as a
+        /// fraction of `extent`. My concealed rank sits within this of my
+        /// edge (the high-y side, y = 1); the *same* depth is how close an
+        /// opponent's meld must hug one of the other three edges to be read as
+        /// theirs. Default 0.18 ≈ a rank resting within ~15cm of the edge on a
+        /// ~0.9m table.
+        public var handBandDepth: Double
+        /// Radius of the central pond disk around the plane anchor (0.5, 0.5),
+        /// as a fraction of `extent`. A tile inside it — that isn't part of a
+        /// hand row or an edge meld — is a pond discard. Default 0.30 ≈ the
+        /// pond occupying the central ~50cm of a ~0.9m table.
+        public var pondRadius: Double
+
+        public init(extent: Double = 0.9, handBandDepth: Double = 0.18, pondRadius: Double = 0.30) {
+            self.extent = extent
+            self.handBandDepth = handBandDepth
+            self.pondRadius = pondRadius
+        }
+    }
+
+    /// The active table geometry in `.tableSpace` mode; `nil` in `.imageSpace`.
+    /// In table-space mode `ZoneModel.isBandCalibrated` (the facade's
+    /// "geometry ready?" readout, which drives the `.calibrating`→`.playing`
+    /// phase) reports readiness off whether this is set — there is no
+    /// per-frame band to accumulate, so a set geometry *is* readiness.
+    public var tableGeometry: TableGeometry?
+
     // MARK: - Turn attribution
 
     /// Weight of "this seat is the expected next discarder" in the seat
@@ -227,6 +311,14 @@ public struct TrackerConfig: Sendable {
     /// Window after a hand-end proposal during which reappearing tracks
     /// still count toward `reappearFraction`.
     public var reappearWindow: TimeInterval = 8.0
+
+    /// After a manual `dismiss`, how long a *subset* of the dismissed missing
+    /// set is suppressed from re-proposing — ~4× `handClearSustain`. Long
+    /// enough to cover a lean-over-the-table misfire (the same handful of
+    /// tiles going missing again within seconds) without masking a real next
+    /// clear: genuinely new missing tracks (not a subset of what was
+    /// dismissed) lift the cooldown immediately.
+    public var handEndDismissCooldown: TimeInterval = 20.0
 
     // MARK: - Bookkeeping
 

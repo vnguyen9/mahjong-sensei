@@ -8,9 +8,10 @@ import MahjongCore
 /// video-gravity re-crop) and `AspectFillMapping` gets a constant
 /// `previewBounds`, letting the zone brackets survive split changes.
 ///
-/// Layer order (bottom → top): fixed preview · backdrop blur · zone brackets ·
-/// chrome (back / torch / LivePill / WinBanner). On the Simulator (no camera)
-/// the preview falls back to `ScreenBackground(.live)` so every state is still
+/// Layer order (bottom → top): fixed preview · backdrop blur · staged-loading
+/// overlay (`StartupStatusOverlay`, A1) · zone brackets · chrome (back /
+/// torch / LivePill). On the Simulator (no camera) the preview
+/// falls back to `ScreenBackground(.live)` so every state is still
 /// screenshot-able; on device the preview attaches to the session's running
 /// `CameraCapture`.
 struct LiveFeedPane: View {
@@ -25,8 +26,8 @@ struct LiveFeedPane: View {
     /// Whether the privacy blur is installed (live-reactive, UI plan §13).
     let blursFeed: Bool
     let onExit: () -> Void
-    let onScoreHandoff: () -> Void
     let onTapUnresolved: () -> Void
+    let onTapZoneChip: (ZoneKind) -> Void
 
     /// The captured global frame of the fixed preview — the constant
     /// `previewBounds` the brackets map against.
@@ -50,7 +51,12 @@ struct LiveFeedPane: View {
                     .transition(.opacity)
             }
 
-            ZoneBracketsOverlay(previewBounds: previewFrame, onTapUnresolved: onTapUnresolved)
+            StartupStatusOverlay()
+                .frame(width: fullSize.width, height: fullSize.height)
+                .animation(.easeInOut(duration: 0.25), value: session.startupStage)
+
+            ZoneBracketsOverlay(previewBounds: previewFrame, onTapUnresolved: onTapUnresolved,
+                                onTapZoneChip: onTapZoneChip)
                 .frame(width: fullSize.width, height: fullSize.height)
 
             chrome
@@ -61,11 +67,15 @@ struct LiveFeedPane: View {
         .onAppear {
             withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) { pulse = true }
             #if !targetEnvironment(simulator)
-            // Device: ensure the (coordinator-hoisted, §5) camera is live so
-            // this fixed preview attaches to the already-running session — a
-            // zero-blink transition since Scan never stopped it. Idempotent
-            // (guarded by `configured`/`isRunning`).
-            session.camera.requestAndStart()
+            // Device, image-space (fallback) path only: ensure the
+            // (coordinator-hoisted, §5) camera is live so this fixed preview
+            // attaches to the already-running session — a zero-blink
+            // transition since Scan never stopped it. Idempotent (guarded by
+            // `configured`/`isRunning`). AR mode must NOT do this — ARKit
+            // owns the capture device (`ScanCoordinator.startCoachLive`
+            // stopped `camera` before starting it), and calling
+            // `requestAndStart()` here would fight ARKit for it.
+            if session.arCapture == nil { session.camera.requestAndStart() }
             #endif
         }
     }
@@ -76,7 +86,11 @@ struct LiveFeedPane: View {
         #if targetEnvironment(simulator)
         ScreenBackground(.live)
         #else
-        CameraPreview(session: session.camera.session)
+        if let arCapture = session.arCapture {
+            ARCameraPreview(capture: arCapture)
+        } else {
+            CameraPreview(session: session.camera.session)
+        }
         #endif
     }
 
@@ -92,20 +106,128 @@ struct LiveFeedPane: View {
                 torchButton
             }
             livePill
+            // Lane B chunk D: "Hold steady…" (the camera is visibly moving)
+            // and the dark-table suggestion both live in this same slot —
+            // they can't both be relevant at once, and cameraMoving wins
+            // (there's no point suggesting the torch while the frame itself
+            // is unusable for tracking).
+            if session.cameraMoving {
+                holdSteadyChip
+                    .transition(.opacity)
+            } else if let prompt = session.rescanPrompt {
+                rescanPromptChip(prompt)
+                    .transition(.opacity)
+            } else if session.isDark && !torchOn && !session.torchSuggestionDismissed {
+                darkTableChip
+                    .transition(.opacity)
+            }
             if showHUD {
                 debugHUD.frame(maxWidth: .infinity, alignment: .leading)
             }
-            WinBanner(onScoreHandoff: onScoreHandoff)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
         .padding(.top, safeTop + 12)
+        .animation(.easeInOut(duration: 0.2), value: session.isDark)
+        .animation(.easeInOut(duration: 0.2), value: session.cameraMoving)
+        .animation(.easeInOut(duration: 0.2), value: session.rescanPrompt)
+    }
+
+    /// Lane B chunk D's "hold steady" chip — same capsule styling family as
+    /// `darkTableChip`, purely informational (no tap targets: there's
+    /// nothing to confirm or dismiss, it just clears itself once the phone
+    /// settles).
+    private var holdSteadyChip: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "hand.raised.fill")
+                .font(.system(size: 11, weight: .semibold))
+            Text("Hold steady…")
+                .font(MJFont.ui(12, weight: .semibold))
+        }
+        .foregroundStyle(MJColor.cream)
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background {
+            Capsule().fill(.ultraThinMaterial).environment(\.colorScheme, .dark)
+            Capsule().fill(Color(hex: 0x0A241D, alpha: 0.6))
+        }
+        .overlay { Capsule().strokeBorder(MJColor.gold(0.3), lineWidth: 1) }
+    }
+
+    /// Lane B chunk H item 2's directional rescan-prompt chip — same
+    /// capsule family as `holdSteadyChip`/`darkTableChip`, priority between
+    /// them (a moving camera always wins; a stale zone the tracker is
+    /// invested in outranks a mere lighting suggestion). The label itself
+    /// isn't a tap target — there's nowhere useful to route a tap, panning
+    /// is a physical action — only the trailing "×" dismisses.
+    private func rescanPromptChip(_ prompt: CoachLiveSession.RescanPrompt) -> some View {
+        HStack(spacing: 8) {
+            Text(prompt.text)
+                .font(MJFont.ui(12, weight: .semibold))
+                .foregroundStyle(MJColor.cream)
+
+            Button {
+                session.dismissRescanPrompt()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(MJColor.cream(0.5))
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss rescan suggestion")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background {
+            Capsule().fill(.ultraThinMaterial).environment(\.colorScheme, .dark)
+            Capsule().fill(Color(hex: 0x0A241D, alpha: 0.6))
+        }
+        .overlay { Capsule().strokeBorder(MJColor.gold(0.3), lineWidth: 1) }
+    }
+
+    /// A5's "Dark table — turn on flash?" chip — mirrors `livePill`'s capsule
+    /// styling (ultraThinMaterial + dark fill + hairline border), swapped to
+    /// the amber zone tint so it reads as a suggestion, not status. Two
+    /// independent tap targets: the label turns the torch on, the trailing
+    /// "×" dismisses for the rest of the session (`torchSuggestionDismissed`).
+    private var darkTableChip: some View {
+        HStack(spacing: 8) {
+            Button {
+                torchOn = true
+                session.setTorch(true)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "bolt.slash.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("Dark table — turn on flash?")
+                        .font(MJFont.ui(12, weight: .semibold))
+                }
+                .foregroundStyle(MJColor.cream)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                session.torchSuggestionDismissed = true
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(MJColor.cream(0.5))
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss dark table suggestion")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background {
+            Capsule().fill(.ultraThinMaterial).environment(\.colorScheme, .dark)
+            Capsule().fill(Color(hex: 0x0A241D, alpha: 0.6))
+        }
+        .overlay { Capsule().strokeBorder(MJColor.amberZone.opacity(0.45), lineWidth: 1) }
     }
 
     private var torchButton: some View {
         Button {
             torchOn.toggle()
-            session.camera.setTorch(torchOn)
+            session.setTorch(torchOn)
         } label: {
             circleContent(system: torchOn ? "bolt.fill" : "bolt.slash.fill",
                           tint: torchOn ? MJColor.gold : MJColor.cream(0.85),
@@ -189,7 +311,8 @@ struct LiveFeedPane: View {
             Text("ran \(session.diagnostics.inferencesRun) · raw \(session.diagnostics.lastRawDetectionCount)")
             Text("top: \(session.diagnostics.lastTopDetections.isEmpty ? "—" : session.diagnostics.lastTopDetections.joined(separator: ", "))")
             Text("tracker live \(session.trackerDiagnostics.live) · tent \(session.trackerDiagnostics.tentative) · missing \(session.trackerDiagnostics.missing)")
-            Text("rec: \(session.diagnostics.recognizerType)")
+            Text("rec: \(session.diagnostics.recognizerType) · mode \(session.arCapture != nil && !session.usingFallbackCapture ? "AR" : "2D")")
+            Text(session.diagnostics.roiPlan)
             Text("err(\(session.recognizerErrorCount)): \(session.lastPipelineError ?? "—")")
         }
         .font(.system(size: 10, design: .monospaced))

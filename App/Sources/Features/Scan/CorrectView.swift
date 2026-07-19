@@ -90,8 +90,7 @@ struct CorrectView: View {
             Text("Check your hand").font(MJFont.serif(15, weight: .bold)).foregroundStyle(MJColor.creamHeading)
             Spacer()
             if session.flaggedIDs.isEmpty {
-                Image(systemName: "checkmark").font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(MJColor.jadeAccent).frame(width: 44, alignment: .trailing)
+                Color.clear.frame(width: 44, height: 1)   // balance the back button, keep title centered
             } else {
                 WarningPill("\(session.flaggedIDs.count) to fix")
             }
@@ -168,6 +167,7 @@ struct CorrectView: View {
             .frame(minWidth: trayWidth, alignment: .leading)
         }
         .scrollDisabled(trayFits)
+        .scrollClipDisabled()   // let a tile being flicked away rise clear of the row instead of clipping
         .onGeometryChange(for: CGFloat.self, of: { $0.size.width }, action: { trayWidth = $0 })
         .gesture(
             MagnifyGesture()
@@ -262,19 +262,22 @@ private struct TrayTile: View {
             .overlay(alignment: .top) {
                 if dragging {
                     Image(systemName: "trash.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(past ? .white : MJColor.cream(0.85))
-                        .frame(width: 26, height: 26)
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(past ? .white : MJColor.cream(0.9))
+                        .frame(width: 40, height: 40)
                         .background(past ? MJColor.rustAvoid : Color(hex: 0x38473F), in: Circle())
-                        .overlay { Circle().strokeBorder(.white.opacity(0.25), lineWidth: 1) }
-                        .offset(y: -32)
+                        .overlay { Circle().strokeBorder(.white.opacity(0.35), lineWidth: 1.5) }
+                        .shadow(color: Color(white: 0, opacity: 0.35), radius: 5, y: 3)
+                        .offset(y: -(width * 0.6) - 26)
                         .transition(.scale.combined(with: .opacity))
                 }
             }
-            .scaleEffect(removing ? 0.2 : (drag == .zero ? 1 : 1.06))
+            // Lift + fade the tile the further it's dragged from home; it stays
+            // visible (never clipped — the tray disables scroll clipping) until release.
+            .scaleEffect(removing ? 0.2 : (drag == .zero ? 1 : 1.15))
             .rotationEffect(.degrees(Double(drag.width / 40)))
             .offset(drag)
-            .opacity(removing ? 0 : 1)
+            .opacity(removing ? 0 : (drag == .zero ? 1 : max(0.3, 1 - Double(hypot(drag.width, drag.height)) / 240)))
             .zIndex(drag == .zero ? 0 : 10)
             .onTapGesture { onTap() }
             .gesture(

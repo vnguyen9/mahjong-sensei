@@ -89,6 +89,16 @@ public final class TurnEngine {
     /// events share this one counter.
     public func mintEventID() -> Int { defer { nextID += 1 }; return nextID }
 
+    /// Bumps the event-id counter so the next `mintEventID()` returns a value
+    /// strictly greater than `pastEventID` — `TableTracker.restore`'s way of
+    /// seeding the counter past a restored event log's maximum id, so newly
+    /// minted events (corrections, the next settle) can never collide with a
+    /// restored one. A no-op if the counter is already past `pastEventID`
+    /// (never moves it backward).
+    public func fastForward(pastEventID: Int) {
+        nextID = max(nextID, pastEventID + 1)
+    }
+
     /// Reset per-hand turn/snapshot state on a confirmed hand end. The event-id
     /// counter is intentionally *not* reset.
     public func reset() {
