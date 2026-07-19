@@ -65,8 +65,9 @@ struct ScanView: View {
             VStack(spacing: 0) {
                 VStack(spacing: 12) {
                     SegmentedToggle(selection: $mode,
-                                    options: [(ScanMode.score, "Score"), (ScanMode.lookup, "What's this?")],
-                                    fontSize: 14, hPad: 16, vPad: 9)
+                                    options: [(ScanMode.score, "Score"), (ScanMode.lookup, "What's this?"),
+                                              (ScanMode.tracker, "Tracker")],
+                                    fontSize: 12, hPad: 11, vPad: 9)
                     HintPill(text: hint)
                     CoachLiveButton { coordinator.startCoachLive() }
                         .padding(.top, 2)
@@ -76,13 +77,16 @@ struct ScanView: View {
                 Spacer()
 
                 VStack(spacing: 12) {
-                    if mode == .lookup {
+                    switch mode {
+                    case .lookup:
                         LookupCard(tile: lookupTile)
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 if let tile = lookupTile { sheetTile = TileSelection(tile) }
                             }
-                    } else {
+                    case .tracker:
+                        TrackerCard(previewFrame: previewFrame, reticleFrame: reticleFrame)
+                    case .score:
                         ScanStatusCard(isBusy: coordinator.isRecognizing) { shutterTapped() }
                         PhotosPicker(selection: $photoItem, matching: .images, photoLibrary: .shared()) {
                             Label("Test with a photo", systemImage: "photo.on.rectangle.angled")
@@ -127,18 +131,20 @@ struct ScanView: View {
 
     private var hint: String {
         switch mode {
-        case .score:  return "Lay your hand flat, face-up"
-        case .lookup: return "Point the camera at one tile"
+        case .score:   return "Lay your hand flat, face-up"
+        case .lookup:  return "Point the camera at one tile"
+        case .tracker: return "Aim at the discards, then Record"
         }
     }
 
     /// The viewfinder window (and, in Score, the capture crop) size per mode. A
     /// hand laid flat is a long horizontal strip, so Score gets a wide, short band
     /// spanning nearly the screen; Lens frames a single tile, so it stays tight.
+    /// Tracker reuses Score's wide band — it's framing a spread-out discard pile.
     private func reticleSize(for mode: ScanMode, in screen: CGSize) -> CGSize {
         switch mode {
-        case .score:  return CGSize(width: max(240, screen.width - 32), height: 132)
-        case .lookup: return CGSize(width: 280, height: 150)
+        case .score, .tracker: return CGSize(width: max(240, screen.width - 32), height: 132)
+        case .lookup:          return CGSize(width: 280, height: 150)
         }
     }
 
@@ -378,7 +384,10 @@ private struct ScanStatusCard: View {
     }
 }
 
-private extension CGImagePropertyOrientation {
+/// De-privatized so `TrackerCard`'s "Test with a photo" path (Tracker plan §5)
+/// can reuse the same `UIImage.imageOrientation` → `CGImagePropertyOrientation`
+/// mapping as `ScanView.loadPhoto`.
+extension CGImagePropertyOrientation {
     init(_ orientation: UIImage.Orientation) {
         switch orientation {
         case .up: self = .up

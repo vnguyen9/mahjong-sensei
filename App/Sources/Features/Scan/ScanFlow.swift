@@ -1,14 +1,17 @@
 import SwiftUI
 import UIKit
+import CoreVideo
 import Observation
 import MahjongCore
 import Recognition
 
-/// Which destination the scan feeds (the Score / What's-this toggle on the scan
-/// screen). `.lookup` is a live single-tile identifier — it never scores. Coach
-/// Live (the camera-tracked table coach) is a separate full-screen flow, not a
-/// scan mode — see `CoachLiveFlowView`.
-enum ScanMode: Hashable { case score, lookup }
+/// Which destination the scan feeds (the Score / What's-this / Tracker toggle
+/// on the scan screen). `.lookup` is a live single-tile identifier — it never
+/// scores. `.tracker` is the manual discard-pile tile counter (Tracker plan
+/// §1) — record-triggered only, never scores either. Coach Live (the
+/// camera-tracked table coach) is a separate full-screen flow, not a scan
+/// mode — see `CoachLiveFlowView`.
+enum ScanMode: Hashable { case score, lookup, tracker }
 
 /// The three bundled detectors, newest last. `rawValue` is the compiled-resource
 /// base name (`<rawValue>.mlmodelc` in the app bundle) handed straight to
@@ -214,6 +217,8 @@ final class ScanSession {
             return n < 14 ? .tooFew(playable: n) : .tooMany(playable: n)
         case .lookup:
             return .valid   // identify-only; never scored
+        case .tracker:
+            return .valid   // manual counter; never scored
         }
     }
 }
@@ -224,6 +229,9 @@ final class ScanSession {
 final class ScanCoordinator {
     var path: [ScanRoute] = []
     let session = ScanSession()
+    /// Tracker mode's running 34-tile "seen" count — one persistent instance
+    /// per Scan tab, alongside `session` (Tracker plan chunk 1/§2).
+    let tracker = TrackerSession()
     /// The back-camera capture, hoisted here (out of `ScanView`'s `@State`) so
     /// the Coach Live cover can attach a *second* preview layer to the same
     /// running `AVCaptureSession` — a zero-blink transition, since two sessions
@@ -352,6 +360,28 @@ final class ScanCoordinator {
         return result.keepingTiles(insideROI: roi).tiles
             .filter { $0.confidence >= 0.5 }
             .max { ($0.box.width * $0.box.height) < ($1.box.width * $1.box.height) }
+    }
+
+    /// Recognizes every tile in `frame`, keeping only those inside `roi` —
+    /// the same core `capture` runs (`ScanFlow.swift:258-261`), exposed
+    /// standalone for Tracker mode's single-frame (non-tiled) recognize path.
+    @MainActor
+    func recognizeAllTiles(frame: RecognizerFrame, roi: TileBoundingBox? = nil) async -> [DetectedTile] {
+        let recognizer = await activeRecognizer()
+        return ((try? await recognizer.recognize(frame)) ?? .empty).keepingTiles(insideROI: roi).tiles
+    }
+
+    /// Tracker mode's Record action: recognizes `buffer` via
+    /// `TiledTileRecognizer`'s overlapping native-resolution grid (never
+    /// feeds the whole frame straight to the model — see that type's doc),
+    /// merges/dedupes across crops, and returns the result for the caller to
+    /// fold into `tracker.recordMaxMerge`.
+    @MainActor
+    func recordScan(buffer: CVPixelBuffer, roi: TileBoundingBox? = nil) async -> [DetectedTile] {
+        await TiledTileRecognizer.recognize(buffer: buffer, roi: roi) { frame in
+            let recognizer = await self.activeRecognizer()
+            return (try? await recognizer.recognize(frame)) ?? .empty
+        }
     }
 
     /// The preferred bundled recognizer (accurate → fast → mock fallback),

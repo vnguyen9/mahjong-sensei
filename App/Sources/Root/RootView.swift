@@ -17,6 +17,7 @@ struct RootView: View {
             case "correct-long": ScanFlowView(debugRoute: .correct, debugHand: MockHands.longRow)
             case "correct-emoji": ScanFlowView(debugRoute: .correct, debugHand: MockHands.bonusSampler)
             case "lookup":     ScanFlowView(debugScanMode: .lookup)
+            case "tracker":    ScanFlowView(debugScanMode: .tracker)
             case "context":    ScanFlowView(debugRoute: .context)
             #if DEBUG
             case let s where s.hasPrefix("coach-live"): Self.coachLiveDebugView(s)

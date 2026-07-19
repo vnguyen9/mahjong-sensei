@@ -235,10 +235,14 @@ struct CoachLiveView: View {
                 .presentationDetents([.height(320)])
                 .presentationBackground(.clear)
         case let .adjustCount(tile):
-            CountAdjustSheet(tile: tile)
-                .environment(session)
-                .presentationDetents([.height(300)])
-                .presentationBackground(.clear)
+            CountAdjustSheet(
+                tile: tile,
+                initialCount: session.seenHistogram.indices.contains(tile.classIndex) ? session.seenHistogram[tile.classIndex] : 0,
+                onApply: { session.setSeenCount(classIndex: tile.classIndex, count: $0) }
+            )
+            .environment(session)
+            .presentationDetents([.height(300)])
+            .presentationBackground(.clear)
         case let .fixEvent(id):
             if let event = session.events.first(where: { $0.id == id }) {
                 EventFixSheet(event: event)

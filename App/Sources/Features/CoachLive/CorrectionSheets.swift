@@ -58,10 +58,29 @@ struct UnresolvedAssignSheet: View {
 }
 
 /// 0–4 pip stepper for a Counts-tab tile (UI plan §12 #3).
-struct CountAdjustSheet: View {
-    @Environment(CoachLiveSession.self) private var session
+///
+/// Decoupled from `CoachLiveSession`: the initial count and the apply action
+/// are injected, so this is reusable by other counters (e.g. Tracker) that
+/// don't have a `CoachLiveSession` in their environment. `footer` is an
+/// extension point for a stats block below the stepper (unused by CoachLive).
+struct CountAdjustSheet<Footer: View>: View {
     let tile: Tile
+    let initialCount: Int
+    let onApply: (Int) -> Void
+    @ViewBuilder var footer: () -> Footer
     @State private var count: Int = 0
+
+    init(
+        tile: Tile,
+        initialCount: Int,
+        onApply: @escaping (Int) -> Void,
+        @ViewBuilder footer: @escaping () -> Footer = { EmptyView() }
+    ) {
+        self.tile = tile
+        self.initialCount = initialCount
+        self.onApply = onApply
+        self.footer = footer
+    }
 
     var body: some View {
         ZStack {
@@ -82,14 +101,16 @@ struct CountAdjustSheet: View {
                     .font(MJFont.ui(12)).foregroundStyle(MJColor.cream(0.65))
 
                 GoldButton("Apply") {
-                    session.setSeenCount(classIndex: tile.classIndex, count: count)
+                    onApply(count)
                 }
+
+                footer()
             }
             .padding(20)
         }
         .preferredColorScheme(.dark)
         .onAppear {
-            count = session.seenHistogram.indices.contains(tile.classIndex) ? session.seenHistogram[tile.classIndex] : 0
+            count = initialCount
         }
     }
 
