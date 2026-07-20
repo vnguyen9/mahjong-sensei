@@ -59,9 +59,9 @@ targets:
         INFOPLIST_KEY_UIStatusBarStyle: UIStatusBarStyleLightContent
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
-        # iPad is supported in PORTRAIT only — the camera/AR pipeline assumes a
-        # portrait buffer (.right rotation). `UIRequiresFullScreen` (disabling
-        # multitasking) is deprecated as of iOS 26 and ignored going forward —
-        # the orientation lock below is what actually pins portrait.
-        INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad: UIInterfaceOrientationPortrait
+        # iPadOS 26 requires dynamically resizable apps to declare every iPad
+        # orientation. `_iPad` is Xcode's generated-Info.plist build-setting
+        # suffix; it emits the device-qualified `~ipad` plist key. Keep the
+        # unqualified iPhone setting portrait-only.
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_NSCameraUsageDescription: "Mahjong Sensei reads your tiles on-device. Images are processed live and never leave your device."
