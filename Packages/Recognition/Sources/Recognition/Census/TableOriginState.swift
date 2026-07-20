@@ -70,6 +70,20 @@ public struct TableOriginState: Sendable {
         self.isFrozen = true
     }
 
+    /// A user-marked origin is authoritative for translation and yaw, while
+    /// its rectangular bounds may still expand during the initial 30-second
+    /// validation window.
+    public init(guidedTableToWorld: simd_float4x4,
+                extent: SIMD2<Float>,
+                at time: TimeInterval) {
+        self.tableToWorld = guidedTableToWorld
+        self.extent = SIMD2(Self.clamp(extent.x), Self.clamp(extent.y))
+        self.lockedAt = time
+        self.hasTileCloudFit = true
+        self.autoFitDisabled = true
+        self.isFrozen = false
+    }
+
     /// Fits translation and 5th–95th-percentile bounds after at least eight
     /// confirmed world tracks. The first fit may replace the plane extent;
     /// subsequent fits during the 30-second window only expand it.
@@ -78,7 +92,7 @@ public struct TableOriginState: Sendable {
         confirmedWorldPositions: [SIMD3<Float>],
         at time: TimeInterval
     ) -> Bool {
-        guard !autoFitDisabled, !isFrozen else { return false }
+        guard !isFrozen else { return false }
         if time - lockedAt >= 30 {
             isFrozen = true
             return false
@@ -90,7 +104,7 @@ public struct TableOriginState: Sendable {
             tableToWorld.columns.3.y,
             Self.quantile(confirmedWorldPositions.map(\.z), 0.5)
         )
-        if !hasTileCloudFit {
+        if !hasTileCloudFit, !autoFitDisabled {
             tableToWorld.columns.3 = SIMD4(medianWorld, 1)
         }
 
@@ -104,11 +118,12 @@ public struct TableOriginState: Sendable {
         let depth = Self.quantile(local.map(\.y), 0.95)
             - Self.quantile(local.map(\.y), 0.05) + 0.120
         let proposed = SIMD2(Self.clamp(width), Self.clamp(depth))
+        let previous = extent
         extent = hasTileCloudFit
             ? SIMD2(max(extent.x, proposed.x), max(extent.y, proposed.y))
             : proposed
         hasTileCloudFit = true
-        return true
+        return extent != previous || !autoFitDisabled
     }
 
     public mutating func recenterPond(at worldPosition: SIMD3<Float>) {

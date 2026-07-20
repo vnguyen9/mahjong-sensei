@@ -231,37 +231,36 @@ final class CoachLiveSession: Identifiable {
     /// path) reads as all-zero rather than requiring the HUD to unwrap.
     var trackerDiagnostics: Recognition.TrackerDiagnostics { tracker?.diagnostics ?? Recognition.TrackerDiagnostics() }
 
-    /// Drives the ARKit-native calibration cover (`ARCalibrationView`). The
-    /// calibration screen runs its OWN self-contained ARKit session, so we
-    /// pause `arCapture` while it's up to avoid two live `ARSession`s. On
-    /// confirm it sets `calibratedTableGeometry`, which the NEXT `.tableSpace`
-    /// tracker build consumes (calibrate before lock, or after a rescan).
-    /// Originally DEBUG-only (wired to the debug HUD's "Calibrate table (AR)"
-    /// button); hoisted into the production surface for Workstream G's
-    /// "Recalibrate" affordance (`LiveFeedPane`), which reuses this exact
-    /// mechanism rather than inventing a new one. NOTE (`// TODO: G`):
-    /// `calibratedTableGeometry` is consumed only ONCE, at the `.tableSpace`
-    /// tracker build in `startARLoop` — recalibrating mid-session (after the
-    /// tracker already exists) updates this property but does NOT rebuild the
-    /// running tracker's geometry, so today "Recalibrate" re-captures a fresh
-    /// quad without it taking visible effect until a future session/rescan
-    /// rebuilds the tracker. A real fix needs `startARLoop` to react to a
-    /// geometry change post-lock (re-derive zone rects / force a recount),
-    /// which is out of scope here.
+    /// Drives guided marking on the same continuous ARSession as Live.
     var showARCalibration = false
     var isRecenterPondActive = false
 
     @MainActor
     func beginARCalibration() {
-        arCapture?.pause()
         showARCalibration = true
     }
 
     @MainActor
-    func finishARCalibration(_ geometry: TrackerConfig.TableGeometry?) {
-        if let geometry { calibratedTableGeometry = geometry }
+    func finishARCalibration(_ calibration: WorldTableCalibration?) {
+        if let calibration {
+            arCapture?.invalidatePersistedCalibration()
+            worldTableCalibration = calibration
+            calibratedTableGeometry = Self.legacyGeometry(
+                from: calibration,
+                mySeatWind: seatWind
+            )
+            if let controller = worldCensusController {
+                controller.apply(calibration, at: CACurrentMediaTime())
+            }
+            arCapture?.updateTableOrigin(
+                transform: calibration.tableToWorld,
+                extent: calibration.extent
+            )
+            recountRequest = .fullTable
+            countSource = .spatialBootstrapping
+            spatialTrackingHealth = .calibrating
+        }
         showARCalibration = false
-        arCapture?.resume()
     }
 
     /// User-confirmed table geometry from the ARKit-native calibration flow
@@ -272,6 +271,25 @@ final class CoachLiveSession: Identifiable {
     /// geometry, so the flow stays green before any calibration. Consumed once,
     /// at the `.tableSpace` tracker build in `startARLoop`.
     var calibratedTableGeometry: TrackerConfig.TableGeometry?
+    private(set) var worldTableCalibration: WorldTableCalibration?
+
+    private static func legacyGeometry(
+        from calibration: WorldTableCalibration,
+        mySeatWind: Wind
+    ) -> TrackerConfig.TableGeometry {
+        let extent = Double(max(calibration.extent.x, calibration.extent.y))
+        let hand = calibration.handPolygon
+        let pond = calibration.pondPolygon
+        return TableCalibrationGeometry.geometry(
+            extentMetres: extent,
+            handPostA: hand.first.map { SIMD2(Double($0.x), Double($0.y)) },
+            handPostB: hand.dropFirst().first.map { SIMD2(Double($0.x), Double($0.y)) },
+            pondCornerA: pond.first.map { SIMD2(Double($0.x), Double($0.y)) },
+            pondCornerB: pond.dropFirst(2).first.map { SIMD2(Double($0.x), Double($0.y)) },
+            pondQuad: pond.map { SIMD2(Double($0.x), Double($0.y)) },
+            mySeatWind: mySeatWind
+        )
+    }
 
     /// Mirrors key pipeline transitions to Console.app (subsystem matches the
     /// bundle id) — plan §3: works even off a connected debugger.
@@ -764,7 +782,12 @@ final class CoachLiveSession: Identifiable {
                         frame.cameraTransform.columns.3.y,
                         frame.cameraTransform.columns.3.z
                     )
-                    if let restoredTransform = arCapture.restoredTableOriginTransform,
+                    if let calibration = self.worldTableCalibration {
+                        self.worldCensusController = WorldCensusController(
+                            calibration: calibration,
+                            at: sessionStart
+                        )
+                    } else if let restoredTransform = arCapture.restoredTableOriginTransform,
                        let restoredExtent = arCapture.restoredTableOriginExtent {
                         self.worldCensusController = WorldCensusController(
                             restoredTableToWorld: restoredTransform,
@@ -1734,6 +1757,7 @@ final class CoachLiveSession: Identifiable {
             atNormalizedImagePoint: CGPoint(x: normalized.x, y: normalized.y)
         ) else { return }
         controller.recenterPond(at: world)
+        worldTableCalibration = controller.calibration
         arCapture.updateTableOrigin(
             transform: controller.tableOrigin.tableToWorld,
             extent: controller.tableOrigin.extent

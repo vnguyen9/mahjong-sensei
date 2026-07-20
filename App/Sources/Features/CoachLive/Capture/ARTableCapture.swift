@@ -43,6 +43,7 @@ final class ARTableCapture: NSObject {
     /// exactly what `Recognition.TableProjection.planeTransform` expects.
     /// `nil` until `captureStage` first reaches `.tableLocked`.
     private(set) var lockedPlaneTransform: simd_float4x4?
+    private(set) var lockedPlaneIdentifier: UUID?
 
     /// The locked plane's larger horizontal side in metres — the physical size
     /// the normalized [0,1] table space spans. Used to build the auto-partition
@@ -78,6 +79,9 @@ final class ARTableCapture: NSObject {
     // MARK: - Internal (main-actor-only) bookkeeping
 
     private let session = ARSession()
+    /// Calibration renders and raycasts through this session. ARTableCapture
+    /// remains the only owner allowed to run, pause, reset, or delegate it.
+    var sharedSession: ARSession { session }
     private var planeLockPolicy: PlaneLockPolicy?
     /// Whether the running configuration currently requests horizontal
     /// plane detection — tracked locally because `ARWorldTrackingConfiguration`
@@ -125,6 +129,7 @@ final class ARTableCapture: NSObject {
         }
         captureStage = .starting
         lockedPlaneTransform = nil
+        lockedPlaneIdentifier = nil
         lockedPlaneExtent = nil
         restoredTableOriginTransform = nil
         restoredTableOriginExtent = nil
@@ -137,6 +142,7 @@ final class ARTableCapture: NSObject {
             restoredTableOriginTransform = restored.tableToWorld
             restoredTableOriginExtent = restored.extent
             lockedPlaneTransform = restored.tableToWorld
+            lockedPlaneIdentifier = nil
             lockedPlaneExtent = Double(max(restored.extent.x, restored.extent.y))
             tableOriginExtent = restored.extent
             tableOriginTransform = restored.tableToWorld
@@ -266,6 +272,13 @@ final class ARTableCapture: NSObject {
         scheduleWorldMapSave()
     }
 
+    /// Recalibration supersedes any previously archived coordinate frame.
+    func invalidatePersistedCalibration() {
+        ARWorldMapStore.discard()
+        worldMapSaveTask?.cancel()
+        worldMapSaveTask = nil
+    }
+
     private static func makeConfiguration(
         planeDetection: Bool,
         initialWorldMap: ARWorldMap? = nil
@@ -314,6 +327,7 @@ final class ARTableCapture: NSObject {
 
         guard let locked = planeLockPolicy?.lockedPlane else { return }
         lockedPlaneTransform = locked.transform
+        lockedPlaneIdentifier = locked.id
         lockedPlaneExtent = locked.extent
         captureStage = .tableLocked
         Self.logger.notice("table plane locked (id: \(locked.id.uuidString, privacy: .public))")
@@ -347,6 +361,7 @@ final class ARTableCapture: NSObject {
         captureStage = .starting
         stageBeforeRelocalizing = nil
         lockedPlaneTransform = nil
+        lockedPlaneIdentifier = nil
         lockedPlaneExtent = nil
         restoredTableOriginTransform = nil
         restoredTableOriginExtent = nil

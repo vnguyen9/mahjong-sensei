@@ -40,7 +40,9 @@ struct LiveGeometryDebugOverlay: View {
               let frame = capture.latestFrame else { return }
 
         let controller = session.worldCensusController
-        let planeTransform = controller?.tableOrigin.tableToWorld
+        let calibration = controller?.calibration ?? session.worldTableCalibration
+        let planeTransform = calibration?.tableToWorld
+            ?? controller?.tableOrigin.tableToWorld
             ?? lockedPlaneTransform
         let fittedExtent = controller.map {
             Double(max($0.tableOrigin.extent.x, $0.tableOrigin.extent.y))
@@ -74,6 +76,18 @@ struct LiveGeometryDebugOverlay: View {
                 previewBounds: previewBounds, orientedImageSize: orientedCG).origin
         }
 
+        func screenLocal(_ local: SIMD2<Float>) -> CGPoint? {
+            guard let uv = projection.normalizedOrientedPoint(
+                ofTablePoint: SIMD2(Double(local.x), Double(local.y)),
+                orientedImageSize: orientedSIMD
+            ) else { return nil }
+            return AspectFillMapping.previewRect(
+                ofNormalized: TileBoundingBox(x: uv.x, y: uv.y, width: 0, height: 0),
+                previewBounds: previewBounds,
+                orientedImageSize: orientedCG
+            ).origin
+        }
+
         /// Fill + stroke a closed polygon; skips entirely if any corner is
         /// off-screen this frame (a partial polygon would read as a lie).
         func polygon(_ corners: [SIMD2<Double>], fill: Color, stroke: Color) {
@@ -87,12 +101,40 @@ struct LiveGeometryDebugOverlay: View {
             context.stroke(path, with: .color(stroke), lineWidth: 2)
         }
 
-        // Hand band (gold), opponent meld bands (amber), pond (jade).
-        for (_, band) in geometry.meldBands {
-            polygon(band.corners, fill: MJColor.amberZone.opacity(0.10), stroke: MJColor.amberZone.opacity(0.8))
+        func localPolygon(_ corners: [SIMD2<Float>], fill: Color, stroke: Color) {
+            let pts = corners.compactMap(screenLocal)
+            guard pts.count == corners.count, pts.count >= 3 else { return }
+            var path = Path()
+            path.move(to: pts[0])
+            for p in pts.dropFirst() { path.addLine(to: p) }
+            path.closeSubpath()
+            context.fill(path, with: .color(fill))
+            context.stroke(path, with: .color(stroke), lineWidth: 2)
         }
-        polygon(pondCorners(geometry.pond), fill: MJColor.jadeAccent.opacity(0.16), stroke: MJColor.jadeAccent.opacity(0.9))
-        polygon(geometry.handBand.corners, fill: MJColor.gold.opacity(0.14), stroke: MJColor.gold.opacity(0.9))
+
+        // Hand band (gold), opponent meld bands (amber), pond (jade).
+        if let calibration {
+            for (zone, corners) in calibration.revealedZonePolygons {
+                let color = zone == .mineMeld ? MJColor.gold : MJColor.amberZone
+                localPolygon(corners, fill: color.opacity(0.10), stroke: color.opacity(0.8))
+            }
+            localPolygon(
+                calibration.pondPolygon,
+                fill: MJColor.jadeAccent.opacity(0.16),
+                stroke: MJColor.jadeAccent.opacity(0.9)
+            )
+            localPolygon(
+                calibration.handPolygon,
+                fill: MJColor.gold.opacity(0.14),
+                stroke: MJColor.gold.opacity(0.9)
+            )
+        } else {
+            for (_, band) in geometry.meldBands {
+                polygon(band.corners, fill: MJColor.amberZone.opacity(0.10), stroke: MJColor.amberZone.opacity(0.8))
+            }
+            polygon(pondCorners(geometry.pond), fill: MJColor.jadeAccent.opacity(0.16), stroke: MJColor.jadeAccent.opacity(0.9))
+            polygon(geometry.handBand.corners, fill: MJColor.gold.opacity(0.14), stroke: MJColor.gold.opacity(0.9))
+        }
 
         // LiDAR census anchors (cyan): world points are projected fresh from
         // the current camera pose, so on-device drift is immediately visible

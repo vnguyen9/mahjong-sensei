@@ -133,20 +133,18 @@ struct CoachLiveView: View {
         .background(ScreenBackground(.live).ignoresSafeArea())
         .environment(session)
         .sheet(item: $sheet) { sheetContent($0) }
-        // ARKit-native table calibration (grey grid + coaching overlay +
-        // point/tap zone marks) — its own self-contained session; produces the
-        // TableGeometry the next tracker build uses. Was DEBUG-only (a debug-HUD
-        // affordance); hoisted into production for Workstream G's live-feed
-        // "Recalibrate" link (`LiveFeedPane`), which sets `session
-        // .showARCalibration` via `beginARCalibration()` — same mechanism, no
-        // new capture plumbing.
+        // Guided marking renders the same continuous ARSession as Live.
         .fullScreenCover(isPresented: Binding(
             get: { session.showARCalibration },
             set: { if !$0 { session.finishARCalibration(nil) } }
         )) {
-            ARCalibrationView(
-                onComplete: { session.finishARCalibration($0) },
-                onCancel: { session.finishARCalibration(nil) })
+            if let capture = session.arCapture {
+                ARCalibrationView(
+                    capture: capture,
+                    mySeatWind: session.seatWind,
+                    onComplete: { session.finishARCalibration($0) },
+                    onCancel: { session.finishARCalibration(nil) })
+            }
         }
         .confirmationDialog("End the live session?", isPresented: $showExitConfirm, titleVisibility: .visible) {
             Button("End session", role: .destructive, action: onExit)

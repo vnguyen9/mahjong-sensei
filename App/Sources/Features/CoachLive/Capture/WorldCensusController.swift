@@ -22,6 +22,19 @@ final class WorldCensusController {
     private(set) var worldToTable: simd_float4x4
     private(set) var zones: [SemanticZoneID: [SIMD2<Float>]]
     private(set) var tableOrigin: TableOriginState
+    private(set) var calibration: WorldTableCalibration?
+
+    init(calibration: WorldTableCalibration, at time: TimeInterval) {
+        self.calibration = calibration
+        let origin = TableOriginState(
+            guidedTableToWorld: calibration.tableToWorld,
+            extent: calibration.extent,
+            at: time
+        )
+        self.tableOrigin = origin
+        self.worldToTable = origin.worldToTable
+        self.zones = calibration.semanticZones
+    }
 
     init(lockedPlaneTransform: simd_float4x4,
          lockedExtent: Float,
@@ -36,6 +49,7 @@ final class WorldCensusController {
         self.tableOrigin = origin
         self.worldToTable = origin.worldToTable
         self.zones = Self.semanticZones(extent: origin.extent)
+        self.calibration = nil
     }
 
     init(restoredTableToWorld: simd_float4x4,
@@ -49,6 +63,7 @@ final class WorldCensusController {
         self.tableOrigin = origin
         self.worldToTable = origin.worldToTable
         self.zones = Self.semanticZones(extent: origin.extent)
+        self.calibration = nil
     }
 
     var snapshot: CensusSnapshot {
@@ -58,7 +73,27 @@ final class WorldCensusController {
     func updateTableSpace(worldToTable: simd_float4x4,
                           extent: SIMD2<Float>) {
         self.worldToTable = worldToTable
-        zones = Self.semanticZones(extent: extent)
+        if var calibration {
+            calibration.tableToWorld = simd_inverse(worldToTable)
+            calibration.extent = extent
+            self.calibration = calibration
+            zones = calibration.semanticZones
+        } else {
+            zones = Self.semanticZones(extent: extent)
+        }
+        census.reassignZones(zones, worldToTable: worldToTable)
+        revision += 1
+    }
+
+    func apply(_ calibration: WorldTableCalibration, at time: TimeInterval) {
+        self.calibration = calibration
+        tableOrigin = TableOriginState(
+            guidedTableToWorld: calibration.tableToWorld,
+            extent: calibration.extent,
+            at: time
+        )
+        worldToTable = tableOrigin.worldToTable
+        zones = calibration.semanticZones
         census.reassignZones(zones, worldToTable: worldToTable)
         revision += 1
     }
@@ -231,6 +266,11 @@ final class WorldCensusController {
 
     func recenterPond(at worldPosition: SIMD3<Float>) {
         tableOrigin.recenterPond(at: worldPosition)
+        if var calibration {
+            calibration.tableToWorld = tableOrigin.tableToWorld
+            calibration.source = .manualRecenter
+            self.calibration = calibration
+        }
         updateTableSpace(
             worldToTable: tableOrigin.worldToTable,
             extent: tableOrigin.extent
