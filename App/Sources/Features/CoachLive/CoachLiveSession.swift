@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import CoreVideo
+import ImageIO
 import QuartzCore
 import UIKit
 import Observation
@@ -227,6 +228,7 @@ final class CoachLiveSession: Identifiable {
     /// Shadow 3D census. It receives the exact detections already used by
     /// `TableTracker`; it never schedules model work of its own.
     private(set) var worldCensusController: WorldCensusController?
+    private var lastARImageOrientation: CGImagePropertyOrientation?
     /// `tracker.diagnostics` passthrough for the HUD — `nil` tracker (mock
     /// path) reads as all-zero rather than requiring the HUD to unwrap.
     var trackerDiagnostics: Recognition.TrackerDiagnostics { tracker?.diagnostics ?? Recognition.TrackerDiagnostics() }
@@ -724,6 +726,15 @@ final class CoachLiveSession: Identifiable {
                 if self.orientedImageSize == .zero {
                     self.orientedImageSize = frame.orientedImageSize
                 }
+                if let previous = self.lastARImageOrientation,
+                   previous != frame.imageOrientation {
+                    self.lastARImageOrientation = frame.imageOrientation
+                    self.orientedImageSize = frame.orientedImageSize
+                    self.worldCensusController?.recordOrientationTransition()
+                    try? await Task.sleep(for: Self.pollInterval)
+                    continue
+                }
+                self.lastARImageOrientation = frame.imageOrientation
                 let now = CACurrentMediaTime()
                 self.updateDepthHealth(frame: frame, capture: arCapture, at: now)
 
@@ -925,8 +936,6 @@ final class CoachLiveSession: Identifiable {
                                                      imageResolution: SIMD2<Float>(Float(frame.imageResolution.width),
                                                                                    Float(frame.imageResolution.height)),
                                                      planeTransform: planeTransform)
-                    let orientedSize = SIMD2<Double>(Double(frame.orientedImageSize.width),
-                                                     Double(frame.orientedImageSize.height))
                     var geometry = self.trackerConfig.tableGeometry ?? TrackerConfig.TableGeometry()
                     if let tableOrigin {
                         geometry.extent = Double(max(tableOrigin.extent.x, tableOrigin.extent.y))
@@ -937,9 +946,12 @@ final class CoachLiveSession: Identifiable {
                     // staleness tracking regardless of `useROIScheduler` —
                     // hoisted out of that flag's block (was chunk E-only).
                     let zones = ROIScheduler.projectedZoneRects(geometry: geometry, projection: projection,
-                                                                orientedImageSize: frame.orientedImageSize)
+                                                                orientedImageSize: frame.orientedImageSize,
+                                                                imageTransform: frame.imageTransform)
                     self.updateZoneStaleness(tracker: tracker, zones: zones, geometry: geometry,
-                                             projection: projection, orientedSize: orientedSize, now: now)
+                                             projection: projection,
+                                             imageTransform: frame.imageTransform,
+                                             now: now)
 
                     // Lane B chunk E: ask the ROI scheduler what to infer.
                     // `useROIScheduler == false` always forces the original
@@ -957,7 +969,8 @@ final class CoachLiveSession: Identifiable {
                         } else if let requestedZone,
                                   let rect = zones.identified.first(where: { $0.id == requestedZone })?.rect {
                             let cropRect = ROICropMapper.cropRect(forZoneImageRect: rect, orientedImageSize: frame.orientedImageSize,
-                                                                  imageResolution: frame.imageResolution)
+                                                                  imageResolution: frame.imageResolution,
+                                                                  imageOrientation: frame.imageOrientation)
                             plan = cropRect.width >= 2 && cropRect.height >= 2 ? .crops([cropRect]) : .fullFrame
                         } else {
                             // Requested zone isn't on screen right now — fall
@@ -968,7 +981,9 @@ final class CoachLiveSession: Identifiable {
                         let myTurn = tracker.state.currentTurn == .me || tracker.state.myHand.count % 3 == 2
                         plan = roiScheduler.decide(motionField: field, zones: zones, myTurn: myTurn,
                                                    justSettled: justSettled, orientedImageSize: frame.orientedImageSize,
-                                                   imageResolution: frame.imageResolution, at: now)
+                                                   imageResolution: frame.imageResolution,
+                                                   imageOrientation: frame.imageOrientation,
+                                                   at: now)
                     } else {
                         plan = .fullFrame
                     }
@@ -1001,6 +1016,7 @@ final class CoachLiveSession: Identifiable {
                             self.diagnostics.inferencesRun += TiledTileRecognizer.gridCols * TiledTileRecognizer.gridRows
                             fullTiles = await TiledTileRecognizer.recognize(
                                 buffer: frame.pixelBuffer, roi: nil, minConfidence: 0.30,
+                                imageOrientation: frame.imageOrientation,
                                 using: { f in
                                     do {
                                         return try await rec.recognize(f)
@@ -1015,7 +1031,10 @@ final class CoachLiveSession: Identifiable {
                                 : nil
                         } else {
                             self.diagnostics.inferencesRun += 1
-                            let recognizerFrame = RecognizerFrame.buffer(frame.pixelBuffer, orientation: .right)
+                            let recognizerFrame = RecognizerFrame.buffer(
+                                frame.pixelBuffer,
+                                orientation: frame.imageOrientation
+                            )
                             do {
                                 fullTiles = try await rec.recognize(recognizerFrame).tiles
                                 fullRecognizerSucceeded = true
@@ -1041,7 +1060,7 @@ final class CoachLiveSession: Identifiable {
                         // (the seam that keeps `Recognition` ARKit-free — see
                         // `TableProjection`/`DetectionProjector`'s own docs).
                         let projected = DetectionProjector.projectToTableSpace(
-                            fullTiles, projection: projection, orientedImageSize: orientedSize,
+                            fullTiles, projection: projection, imageTransform: frame.imageTransform,
                             tableExtent: extent, tileSize: SIMD2<Double>(0.024, 0.032))
 
                         // The loop is serial, so at most one inference is
@@ -1083,7 +1102,10 @@ final class CoachLiveSession: Identifiable {
                             // own oriented size. `ROICropMapper.fullImageBox`
                             // is the exact inverse chain back to full-image
                             // oriented space (see that method's own doc).
-                            let cropFrame = RecognizerFrame.buffer(cropBuffer, orientation: .right)
+                            let cropFrame = RecognizerFrame.buffer(
+                                cropBuffer,
+                                orientation: frame.imageOrientation
+                            )
                             let cropResult: RecognitionResult
                             do {
                                 cropResult = try await rec.recognize(cropFrame)
@@ -1100,7 +1122,8 @@ final class CoachLiveSession: Identifiable {
                                 DetectedTile(id: tile.id, tile: tile.tile, confidence: tile.confidence,
                                             box: ROICropMapper.fullImageBox(fromCropNormalized: tile.box, cropRect: rect,
                                                                              imageResolution: frame.imageResolution,
-                                                                             orientedImageSize: frame.orientedImageSize),
+                                                                             orientedImageSize: frame.orientedImageSize,
+                                                                             imageOrientation: frame.imageOrientation),
                                             inReticle: tile.inReticle)
                             }
                             mergedImageSpace.append(contentsOf: mapped)
@@ -1111,10 +1134,14 @@ final class CoachLiveSession: Identifiable {
                             // space via `TableProjection.tablePoint`, unioned
                             // across every crop this tick.
                             let cropOriented = ROICropMapper.orientedNormalizedRect(
-                                fromRawRect: rect, rawSize: frame.imageResolution, orientedSize: frame.orientedImageSize)
+                                fromRawRect: rect,
+                                rawSize: frame.imageResolution,
+                                orientedSize: frame.orientedImageSize,
+                                imageOrientation: frame.imageOrientation)
                             censusCoverageRects.append(cropOriented)
                             if let tableRect = Self.tableSpaceRect(ofOrientedRect: cropOriented, projection: projection,
-                                                                   orientedImageSize: orientedSize, tableExtent: extent) {
+                                                                   imageTransform: frame.imageTransform,
+                                                                   tableExtent: extent) {
                                 visibleRegionRect = visibleRegionRect.map { Self.union($0, tableRect) } ?? tableRect
                             }
                         }
@@ -1141,7 +1168,7 @@ final class CoachLiveSession: Identifiable {
                         if self.isEnded { break pollLoop }
 
                         let projected = DetectionProjector.projectToTableSpace(
-                            deduped, projection: projection, orientedImageSize: orientedSize,
+                            deduped, projection: projection, imageTransform: frame.imageTransform,
                             tableExtent: extent, tileSize: SIMD2<Double>(0.024, 0.032))
                         let outcome = tracker.ingest(projected, at: CACurrentMediaTime(), motion: sample,
                                                      visibleRegion: visibleRegionRect)
@@ -1185,7 +1212,7 @@ final class CoachLiveSession: Identifiable {
     /// not meant to be a precise audit trail.
     private func updateZoneStaleness(tracker: TableTracker, zones: ROIScheduler.ZoneRects,
                                      geometry: TrackerConfig.TableGeometry, projection: TableProjection,
-                                     orientedSize: SIMD2<Double>, now: TimeInterval) {
+                                     imageTransform: FrameImageTransform, now: TimeInterval) {
         for (id, rect) in zones.identified where ROIScheduler.fractionInsideFrame(rect) >= 0.6 {
             zoneLastSeenOnScreen[id] = now
         }
@@ -1208,7 +1235,10 @@ final class CoachLiveSession: Identifiable {
             let cooldownUntil = (zoneLastPromptedAt[zone] ?? -.infinity) + 90
             guard now >= cooldownUntil else { continue }
             guard let center = centers[zone],
-                  let projected = projection.normalizedOrientedPoint(ofTablePoint: center, orientedImageSize: orientedSize),
+                  let projected = projection.normalizedOrientedPoint(
+                    ofTablePoint: center,
+                    imageTransform: imageTransform
+                  ),
                   let direction = Self.rescanDirection(for: projected)
             else { continue }
             zoneLastPromptedAt[zone] = now
@@ -1753,8 +1783,17 @@ final class CoachLiveSession: Identifiable {
             previewBounds: previewBounds,
             orientedImageSize: frame.orientedImageSize
         )
+        let rawNormalized = frame.imageTransform.rawNormalized(
+            fromOriented: SIMD2(
+                Double(normalized.x),
+                Double(normalized.y)
+            )
+        )
         guard let world = arCapture.raycastWorldPoint(
-            atNormalizedImagePoint: CGPoint(x: normalized.x, y: normalized.y)
+            atNormalizedImagePoint: CGPoint(
+                x: rawNormalized.x,
+                y: rawNormalized.y
+            )
         ) else { return }
         controller.recenterPond(at: world)
         worldTableCalibration = controller.calibration
@@ -2089,7 +2128,6 @@ final class CoachLiveSession: Identifiable {
                                              imageResolution: SIMD2<Float>(Float(frame.imageResolution.width),
                                                                            Float(frame.imageResolution.height)),
                                              planeTransform: planeTransform)
-            let orientedSize = SIMD2<Double>(Double(frame.orientedImageSize.width), Double(frame.orientedImageSize.height))
             let extent = tableOrigin.map {
                 Double(max($0.extent.x, $0.extent.y))
             } ?? trackerConfig.tableGeometry?.extent
@@ -2100,12 +2138,15 @@ final class CoachLiveSession: Identifiable {
 
             zoneBoxes = ZoneBoxes(
                 mine: Self.projectedTableRect(mineBoxes, projection: projection,
-                                              orientedImageSize: orientedSize, tableExtent: extent).map { [$0] } ?? [],
+                                              imageTransform: frame.imageTransform,
+                                              tableExtent: extent).map { [$0] } ?? [],
                 table: Self.projectedTableRect(tableBoxes, projection: projection,
-                                               orientedImageSize: orientedSize, tableExtent: extent).map { [$0] } ?? [],
+                                               imageTransform: frame.imageTransform,
+                                               tableExtent: extent).map { [$0] } ?? [],
                 unresolved: state.unresolved.compactMap {
                     Self.projectedTableRect([$0.box], projection: projection,
-                                            orientedImageSize: orientedSize, tableExtent: extent)
+                                            imageTransform: frame.imageTransform,
+                                            tableExtent: extent)
                 })
         }
     }
@@ -2124,7 +2165,8 @@ final class CoachLiveSession: Identifiable {
     /// "no bracket this frame," matching `ZoneBracketsOverlay`'s existing
     /// nil-rect contract.
     private static func projectedTableRect(_ tableBoxes: [TileBoundingBox], projection: TableProjection,
-                                           orientedImageSize: SIMD2<Double>, tableExtent: Double) -> TileBoundingBox? {
+                                           imageTransform: FrameImageTransform,
+                                           tableExtent: Double) -> TileBoundingBox? {
         guard !tableBoxes.isEmpty, tableExtent > 0 else { return nil }
         let minX = tableBoxes.map(\.x).min()!
         let minY = tableBoxes.map(\.y).min()!
@@ -2135,7 +2177,10 @@ final class CoachLiveSession: Identifiable {
         let corners = [SIMD2<Double>(local(minX), local(minY)), SIMD2<Double>(local(maxX), local(minY)),
                        SIMD2<Double>(local(maxX), local(maxY)), SIMD2<Double>(local(minX), local(maxY))]
         let projected = corners.compactMap {
-            projection.normalizedOrientedPoint(ofTablePoint: $0, orientedImageSize: orientedImageSize)
+            projection.normalizedOrientedPoint(
+                ofTablePoint: $0,
+                imageTransform: imageTransform
+            )
         }
         guard !projected.isEmpty else { return nil }
         let xs = projected.map(\.x), ys = projected.map(\.y)
@@ -2155,10 +2200,11 @@ final class CoachLiveSession: Identifiable {
     /// this frame) — the caller then just skips visibility-gating that
     /// crop's tracks for this tick, same as a full-view ingest.
     private static func tableSpaceRect(ofOrientedRect rect: TileBoundingBox, projection: TableProjection,
-                                       orientedImageSize: SIMD2<Double>, tableExtent: Double) -> TileBoundingBox? {
+                                       imageTransform: FrameImageTransform,
+                                       tableExtent: Double) -> TileBoundingBox? {
         let corners = [SIMD2<Double>(rect.x, rect.y), SIMD2<Double>(rect.x + rect.width, rect.y),
                        SIMD2<Double>(rect.x + rect.width, rect.y + rect.height), SIMD2<Double>(rect.x, rect.y + rect.height)]
-        return tableSpaceBoundingBox(ofPoints: corners, projection: projection, orientedImageSize: orientedImageSize,
+        return tableSpaceBoundingBox(ofPoints: corners, projection: projection, imageTransform: imageTransform,
                                      tableExtent: tableExtent, minimumProjected: 1)
     }
 
@@ -2166,10 +2212,15 @@ final class CoachLiveSession: Identifiable {
     /// `projection.tablePoint`, then normalizes into table-space units the
     /// same way `DetectionProjector.projectToTableSpace` does.
     private static func tableSpaceBoundingBox(ofPoints points: [SIMD2<Double>], projection: TableProjection,
-                                              orientedImageSize: SIMD2<Double>, tableExtent: Double,
+                                              imageTransform: FrameImageTransform, tableExtent: Double,
                                               minimumProjected: Int) -> TileBoundingBox? {
         guard tableExtent > 0 else { return nil }
-        let table = points.compactMap { projection.tablePoint(ofNormalizedOrientedPoint: $0, orientedImageSize: orientedImageSize) }
+        let table = points.compactMap {
+            projection.tablePoint(
+                ofNormalizedOrientedPoint: $0,
+                imageTransform: imageTransform
+            )
+        }
         guard table.count >= minimumProjected else { return nil }
         let xs = table.map { $0.x / tableExtent + 0.5 }
         let ys = table.map { $0.y / tableExtent + 0.5 }

@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import Recognition
 import simd
 
@@ -117,7 +118,8 @@ struct ROIScheduler {
     /// contract.
     static func projectedZoneRects(geometry: TrackerConfig.TableGeometry,
                                     projection: TableProjection,
-                                    orientedImageSize: CGSize) -> ZoneRects {
+                                    orientedImageSize: CGSize,
+                                    imageTransform: FrameImageTransform? = nil) -> ZoneRects {
         guard geometry.extent > 0 else { return ZoneRects() }
         let extent = geometry.extent
         let orientedSize = SIMD2<Double>(Double(orientedImageSize.width), Double(orientedImageSize.height))
@@ -126,7 +128,16 @@ struct ROIScheduler {
         func rect(_ corners: [SIMD2<Double>]) -> TileBoundingBox? {
             let localCorners = corners.map { SIMD2<Double>(local($0.x), local($0.y)) }
             let projected = localCorners.compactMap {
-                projection.normalizedOrientedPoint(ofTablePoint: $0, orientedImageSize: orientedSize)
+                if let imageTransform {
+                    return projection.normalizedOrientedPoint(
+                        ofTablePoint: $0,
+                        imageTransform: imageTransform
+                    )
+                }
+                return projection.normalizedOrientedPoint(
+                    ofTablePoint: $0,
+                    orientedImageSize: orientedSize
+                )
             }
             guard !projected.isEmpty else { return nil }
             let xs = projected.map(\.x), ys = projected.map(\.y)
@@ -196,6 +207,7 @@ struct ROIScheduler {
                           justSettled: Bool,
                           orientedImageSize: CGSize,
                           imageResolution: CGSize,
+                          imageOrientation: CGImagePropertyOrientation = .right,
                           at t: TimeInterval) -> InferencePlan {
         let dueForFullFrame = justSettled || lastFullFrameAt == nil || t - lastFullFrameAt! >= fullFrameInterval
         if dueForFullFrame {
@@ -210,7 +222,13 @@ struct ROIScheduler {
         }
 
         func dirty(_ rect: TileBoundingBox) -> Bool {
-            isDirty(rect, motionField: motionField, imageResolution: imageResolution, orientedImageSize: orientedImageSize)
+            isDirty(
+                rect,
+                motionField: motionField,
+                imageResolution: imageResolution,
+                orientedImageSize: orientedImageSize,
+                imageOrientation: imageOrientation
+            )
         }
 
         let handEntry: (String, TileBoundingBox)? = zones.hand.flatMap { dirty($0) ? ("hand", $0) : nil }
@@ -230,7 +248,8 @@ struct ROIScheduler {
 
         let crops = ordered.compactMap { _, rect -> CGRect? in
             let cropRect = ROICropMapper.cropRect(forZoneImageRect: rect, orientedImageSize: orientedImageSize,
-                                                  imageResolution: imageResolution)
+                                                  imageResolution: imageResolution,
+                                                  imageOrientation: imageOrientation)
             return cropRect.width >= 2 && cropRect.height >= 2 ? cropRect : nil
         }
         guard !crops.isEmpty else {
@@ -247,7 +266,8 @@ struct ROIScheduler {
     /// mapped forward via `ROICropMapper.orientedNormalizedRect` before the
     /// AABB test, so the comparison always happens in the same space.
     private func isDirty(_ zoneRect: TileBoundingBox, motionField: MotionField,
-                          imageResolution: CGSize, orientedImageSize: CGSize) -> Bool {
+                          imageResolution: CGSize, orientedImageSize: CGSize,
+                          imageOrientation: CGImagePropertyOrientation) -> Bool {
         guard imageResolution.width > 0, imageResolution.height > 0 else { return false }
         let cols = MotionField.gridWidth, rows = MotionField.gridHeight
         let cellW = imageResolution.width / CGFloat(cols)
@@ -258,7 +278,8 @@ struct ROIScheduler {
                 guard motionField.changed[idx] else { continue }
                 let rawRect = CGRect(x: CGFloat(col) * cellW, y: CGFloat(row) * cellH, width: cellW, height: cellH)
                 let orientedRect = ROICropMapper.orientedNormalizedRect(fromRawRect: rawRect, rawSize: imageResolution,
-                                                                        orientedSize: orientedImageSize)
+                                                                        orientedSize: orientedImageSize,
+                                                                        imageOrientation: imageOrientation)
                 if boxesIntersect(orientedRect, zoneRect) { return true }
             }
         }

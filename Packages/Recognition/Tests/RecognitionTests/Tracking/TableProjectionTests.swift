@@ -1,4 +1,5 @@
 import XCTest
+import ImageIO
 import simd
 @testable import Recognition
 
@@ -64,6 +65,32 @@ final class TableProjectionTests: XCTestCase {
     }
 
     private static let squareResolution = SIMD2<Double>(1000, 1000)
+
+    func testSameRawRayProducesSameTableAnchorInAllIPadOrientations() throws {
+        let projection = TableProjection(
+            cameraTransform: Self.overheadCamera(at: SIMD3(0, 1, 0)),
+            intrinsics: Self.intrinsics(),
+            imageResolution: Self.squareResolution,
+            planeTransform: Self.identityPlane
+        )
+        let raw = SIMD2<Double>(0.61, 0.54)
+        var anchors: [SIMD2<Double>] = []
+        for orientation: CGImagePropertyOrientation in [.right, .left, .up, .down] {
+            let transform = FrameImageTransform(
+                imageOrientation: orientation,
+                imageResolution: CGSize(width: 1000, height: 1000)
+            )
+            let oriented = transform.orientedNormalized(fromRaw: raw)
+            anchors.append(try XCTUnwrap(projection.tablePoint(
+                ofNormalizedOrientedPoint: oriented,
+                imageTransform: transform
+            )))
+        }
+        for anchor in anchors.dropFirst() {
+            XCTAssertEqual(anchor.x, anchors[0].x, accuracy: 1e-9)
+            XCTAssertEqual(anchor.y, anchors[0].y, accuracy: 1e-9)
+        }
+    }
 
     /// Rodrigues' rotation formula for a rotation of `angleRadians` about
     /// unit-normalized `axis`, written out by hand — used only to build

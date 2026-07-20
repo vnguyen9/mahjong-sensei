@@ -1,4 +1,5 @@
 import CoreVideo
+import ImageIO
 import Vision
 import simd
 
@@ -58,11 +59,12 @@ enum HandPoseFingertip {
     /// which is the only adjustment required to land in `tablePoint`'s
     /// input space.
     static func indexFingertipOrientedPoint(in pixelBuffer: CVPixelBuffer,
+                                             orientation: CGImagePropertyOrientation = .right,
                                              minimumConfidence: Float = 0.5) -> SIMD2<Double>? {
         let request = VNDetectHumanHandPoseRequest()
         request.maximumHandCount = 1
 
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
         do {
             try handler.perform([request])
         } catch {
@@ -106,12 +108,13 @@ enum HandPoseFingertip {
     /// nearly touching. Calibration-only, same bounded Vision cost as the
     /// index-tip path.
     static func pinch(in pixelBuffer: CVPixelBuffer,
+                      orientation: CGImagePropertyOrientation = .right,
                       pinchThreshold: Double = 0.045,
                       minimumConfidence: Float = 0.3) -> PinchSample? {
         let request = VNDetectHumanHandPoseRequest()
         request.maximumHandCount = 1
 
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
         do { try handler.perform([request]) } catch { return nil }
         guard let observation = request.results?.first else { return nil }
 

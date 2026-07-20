@@ -179,6 +179,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        publishInterfaceOrientation()
         seedCalibrationPlaneFromCurrentFrame()
         let link = CADisplayLink(target: self, selector: #selector(samplePinchFrame))
         link.add(to: .main, forMode: .common)
@@ -190,6 +191,17 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         if torchOn { CameraTorch.set(false); torchOn = false }
         pinchDisplayLink?.invalidate()
         pinchDisplayLink = nil
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        publishInterfaceOrientation()
+    }
+
+    private func publishInterfaceOrientation() {
+        let orientation =
+            view.window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
+        capture.updateImageOrientation(orientation.cameraImageOrientation)
     }
 
     // MARK: - Setup
@@ -512,9 +524,15 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         let intrinsics = frame.camera.intrinsics
         let resolution = frame.camera.imageResolution
         let planeTransform = planeAnchor.transform
+        let imageOrientation = (
+            view.window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
+        ).cameraImageOrientation
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let sample = HandPoseFingertip.pinch(in: pixelBuffer)
+            let sample = HandPoseFingertip.pinch(
+                in: pixelBuffer,
+                orientation: imageOrientation
+            )
             var tablePoint: SIMD2<Double>?
             if let point = sample?.point {
                 let projection = TableProjection(
@@ -522,8 +540,14 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
                     intrinsics: intrinsics,
                     imageResolution: SIMD2<Float>(Float(resolution.width), Float(resolution.height)),
                     planeTransform: planeTransform)
-                let orientedImageSize = SIMD2<Double>(Double(resolution.height), Double(resolution.width))
-                tablePoint = projection.tablePoint(ofNormalizedOrientedPoint: point, orientedImageSize: orientedImageSize)
+                let transform = FrameImageTransform(
+                    imageOrientation: imageOrientation,
+                    imageResolution: resolution
+                )
+                tablePoint = projection.tablePoint(
+                    ofNormalizedOrientedPoint: point,
+                    imageTransform: transform
+                )
             }
             DispatchQueue.main.async {
                 guard let self else { return }

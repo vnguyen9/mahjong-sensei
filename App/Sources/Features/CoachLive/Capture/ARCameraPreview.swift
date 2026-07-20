@@ -1,6 +1,8 @@
+import ARKit
 import SwiftUI
 import UIKit
 import CoreImage
+import ImageIO
 import Metal
 import QuartzCore
 
@@ -64,6 +66,7 @@ struct ARCameraPreview: UIViewRepresentable {
             if scale > 0 { metalLayer.contentsScale = scale }
             let effective = metalLayer.contentsScale
             metalLayer.drawableSize = CGSize(width: bounds.width * effective, height: bounds.height * effective)
+            publishInterfaceOrientation()
         }
 
         @objc private func tick() {
@@ -71,30 +74,73 @@ struct ARCameraPreview: UIViewRepresentable {
             // and don't hold the `CVPixelBuffer` reference any longer than
             // this call needs it — ARKit reuses/retires buffers quickly and
             // this preview must never be the thing pinning one in memory.
-            guard let pixelBuffer = capture.latestFrame?.pixelBuffer,
+            guard let frame = capture.sharedSession.currentFrame,
                   metalLayer.drawableSize.width > 0, metalLayer.drawableSize.height > 0,
                   let drawable = metalLayer.nextDrawable() else { return }
-            let oriented = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
             let drawableSize = CGSize(width: drawable.texture.width, height: drawable.texture.height)
-            let filled = Self.aspectFill(oriented, into: drawableSize)
-            ciContext.render(filled, to: drawable.texture, commandBuffer: nil,
+            let interfaceOrientation =
+                window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
+            capture.updateImageOrientation(interfaceOrientation.cameraImageOrientation)
+            let displayed = Self.displayedImage(
+                frame: frame,
+                interfaceOrientation: interfaceOrientation,
+                viewportSize: drawableSize
+            )
+            ciContext.render(displayed, to: drawable.texture, commandBuffer: nil,
                              bounds: CGRect(origin: .zero, size: drawableSize),
                              colorSpace: CGColorSpaceCreateDeviceRGB())
             drawable.present()
         }
 
-        /// Scale + center-crop `image` to fill `size` — the CoreImage
-        /// equivalent of `AVLayerVideoGravity.resizeAspectFill`, matching
-        /// `CameraPreview`'s (AVFoundation) preview gravity so the AR and
-        /// fallback feeds look the same.
-        private static func aspectFill(_ image: CIImage, into size: CGSize) -> CIImage {
-            let extent = image.extent
-            guard extent.width > 0, extent.height > 0, size.width > 0, size.height > 0 else { return image }
-            let scale = max(size.width / extent.width, size.height / extent.height)
-            let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            let dx = scaled.extent.minX - (size.width - scaled.extent.width) / 2
-            let dy = scaled.extent.minY - (size.height - scaled.extent.height) / 2
-            return scaled.transformed(by: CGAffineTransform(translationX: -dx, y: -dy))
+        private func publishInterfaceOrientation() {
+            let orientation =
+                window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
+            capture.updateImageOrientation(orientation.cameraImageOrientation)
+        }
+
+        /// ARKit's display transform is the preview authority, including the
+        /// orientation-specific aspect fill and crop.
+        private static func displayedImage(
+            frame: ARFrame,
+            interfaceOrientation: UIInterfaceOrientation,
+            viewportSize: CGSize
+        ) -> CIImage {
+            let raw = CIImage(cvPixelBuffer: frame.capturedImage)
+            guard raw.extent.width > 0, raw.extent.height > 0,
+                  viewportSize.width > 0, viewportSize.height > 0 else {
+                return raw
+            }
+            let toUnit = CGAffineTransform(
+                scaleX: 1 / raw.extent.width,
+                y: 1 / raw.extent.height
+            )
+            let flipY = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: 1)
+            let display = frame.displayTransform(
+                for: interfaceOrientation,
+                viewportSize: viewportSize
+            )
+            let toPixels = CGAffineTransform(
+                scaleX: viewportSize.width,
+                y: viewportSize.height
+            )
+            return raw
+                .transformed(by: toUnit)
+                .transformed(by: flipY)
+                .transformed(by: display)
+                .transformed(by: flipY)
+                .transformed(by: toPixels)
+        }
+    }
+}
+
+extension UIInterfaceOrientation {
+    var cameraImageOrientation: CGImagePropertyOrientation {
+        switch self {
+        case .portrait: return .right
+        case .portraitUpsideDown: return .left
+        case .landscapeLeft: return .up
+        case .landscapeRight: return .down
+        default: return .right
         }
     }
 }

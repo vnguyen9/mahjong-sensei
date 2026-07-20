@@ -20,6 +20,9 @@ public struct TileObservation: Sendable, Hashable {
     /// callers must not manufacture a guessed depth when the frame has no
     /// trustworthy medium/high-confidence sample.
     public var worldPosition: SIMD3<Float>?
+    /// Median camera-axis depth at the detected tile surface. Identity uses
+    /// `worldPosition`, which is projected onto the table plane.
+    public var measuredSurfaceDepth: Float?
 
     public init(frameID: FrameID,
                 box: TileBoundingBox,
@@ -28,7 +31,8 @@ public struct TileObservation: Sendable, Hashable {
                 faceHypothesis: TileFaceHypothesis? = nil,
                 footprintCenter: SIMD2<Float>? = nil,
                 footprintRadius: Float? = nil,
-                worldPosition: SIMD3<Float>? = nil) {
+                worldPosition: SIMD3<Float>? = nil,
+                measuredSurfaceDepth: Float? = nil) {
         self.frameID = frameID
         self.box = box
         self.confidence = confidence
@@ -37,5 +41,6 @@ public struct TileObservation: Sendable, Hashable {
         self.footprintCenter = footprintCenter
         self.footprintRadius = footprintRadius
         self.worldPosition = worldPosition
+        self.measuredSurfaceDepth = measuredSurfaceDepth
     }
 }

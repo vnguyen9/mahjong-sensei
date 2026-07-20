@@ -62,15 +62,15 @@ struct LiveGeometryDebugOverlay: View {
             imageResolution: SIMD2<Float>(Float(frame.imageResolution.width),
                                           Float(frame.imageResolution.height)),
             planeTransform: planeTransform)
-        let orientedSIMD = SIMD2<Double>(Double(frame.orientedImageSize.width),
-                                         Double(frame.orientedImageSize.height))
         let orientedCG = frame.orientedImageSize
 
         /// Normalized table point → screen point (nil if behind camera).
         func screen(_ n: SIMD2<Double>) -> CGPoint? {
             let local = SIMD2<Double>((n.x - 0.5) * extent, (n.y - 0.5) * extent)
-            guard let uv = projection.normalizedOrientedPoint(ofTablePoint: local,
-                                                              orientedImageSize: orientedSIMD) else { return nil }
+            guard let uv = projection.normalizedOrientedPoint(
+                ofTablePoint: local,
+                imageTransform: frame.imageTransform
+            ) else { return nil }
             return AspectFillMapping.previewRect(
                 ofNormalized: TileBoundingBox(x: uv.x, y: uv.y, width: 0, height: 0),
                 previewBounds: previewBounds, orientedImageSize: orientedCG).origin
@@ -79,7 +79,7 @@ struct LiveGeometryDebugOverlay: View {
         func screenLocal(_ local: SIMD2<Float>) -> CGPoint? {
             guard let uv = projection.normalizedOrientedPoint(
                 ofTablePoint: SIMD2(Double(local.x), Double(local.y)),
-                orientedImageSize: orientedSIMD
+                imageTransform: frame.imageTransform
             ) else { return nil }
             return AspectFillMapping.previewRect(
                 ofNormalized: TileBoundingBox(x: uv.x, y: uv.y, width: 0, height: 0),
@@ -146,7 +146,7 @@ struct LiveGeometryDebugOverlay: View {
                         ofWorldPoint: SIMD3<Double>(
                             Double(world.x), Double(world.y), Double(world.z)
                         ),
-                        orientedImageSize: orientedSIMD
+                        imageTransform: frame.imageTransform
                       ) else { continue }
                 let point = AspectFillMapping.previewRect(
                     ofNormalized: TileBoundingBox(

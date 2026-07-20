@@ -1,5 +1,7 @@
 import CoreGraphics
 import CoreVideo
+import ImageIO
+import Recognition
 import simd
 
 /// One ARKit-captured frame's data, trimmed to exactly what the projection
@@ -32,6 +34,7 @@ public struct ARTableFrame {
     /// `ARFrame.camera.imageResolution` — captured (landscape) pixel size,
     /// `(width, height)`.
     public let imageResolution: CGSize
+    public let imageTransform: FrameImageTransform
     /// `ARFrame.lightEstimate?.ambientIntensity` (lumens/lux-scaled 0–2000
     /// per ARKit's convention), when the session supplies one. `nil` when
     /// no light estimate is available yet (e.g. the very first frames),
@@ -54,6 +57,7 @@ public struct ARTableFrame {
                 cameraTransform: simd_float4x4,
                 intrinsics: simd_float3x3,
                 imageResolution: CGSize,
+                imageOrientation: CGImagePropertyOrientation = .right,
                 lightLux: Double?,
                 depthMap: CVPixelBuffer? = nil,
                 depthConfidence: CVPixelBuffer? = nil,
@@ -62,6 +66,10 @@ public struct ARTableFrame {
         self.cameraTransform = cameraTransform
         self.intrinsics = intrinsics
         self.imageResolution = imageResolution
+        self.imageTransform = FrameImageTransform(
+            imageOrientation: imageOrientation,
+            imageResolution: imageResolution
+        )
         self.lightLux = lightLux
         self.depthMap = depthMap
         self.depthConfidence = depthConfidence
@@ -75,6 +83,10 @@ public struct ARTableFrame {
     /// before detection, and `DetectedTile.box` lives in that rotated,
     /// normalized frame.
     public var orientedImageSize: CGSize {
-        CGSize(width: imageResolution.height, height: imageResolution.width)
+        imageTransform.orientedImageSize
+    }
+
+    public var imageOrientation: CGImagePropertyOrientation {
+        imageTransform.imageOrientation
     }
 }

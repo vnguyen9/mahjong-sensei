@@ -9,6 +9,8 @@ public enum DepthSampleRejection: String, Sendable, Equatable {
     case unsupportedDepthFormat
     case unsupportedConfidenceFormat
     case noTrustworthyValues
+    case heightOutOfRange
+    case orientationTransition
 }
 
 public struct DepthSampleResult: Sendable, Equatable {
@@ -51,14 +53,39 @@ public enum DepthSampler {
         depthMap: CVPixelBuffer?,
         confidenceMap: CVPixelBuffer?
     ) -> DepthSampleResult {
+        inspect(
+            atOrientedNormalized: point,
+            imageTransform: FrameImageTransform(
+                imageOrientation: .right,
+                imageResolution: CGSize(
+                    width: imageResolution.x,
+                    height: imageResolution.y
+                )
+            ),
+            depthMap: depthMap,
+            confidenceMap: confidenceMap
+        )
+    }
+
+    public static func inspect(
+        atOrientedNormalized point: SIMD2<Double>,
+        imageTransform: FrameImageTransform,
+        depthMap: CVPixelBuffer?,
+        confidenceMap: CVPixelBuffer?
+    ) -> DepthSampleResult {
         guard let depthMap else {
             return DepthSampleResult(depthMeters: nil, rejection: .missingDepth)
         }
         guard let confidenceMap else {
             return DepthSampleResult(depthMeters: nil, rejection: .missingConfidence)
         }
+        let imageResolution = SIMD2<Double>(
+            imageTransform.imageResolution.width,
+            imageTransform.imageResolution.height
+        )
         guard imageResolution.x > 0, imageResolution.y > 0,
-              orientedImageSize.x > 0, orientedImageSize.y > 0,
+              imageTransform.orientedImageSize.width > 0,
+              imageTransform.orientedImageSize.height > 0,
               point.x.isFinite, point.y.isFinite else {
             return DepthSampleResult(depthMeters: nil, rejection: .invalidGeometry)
         }
@@ -77,10 +104,9 @@ public enum DepthSampler {
             return DepthSampleResult(depthMeters: nil, rejection: .invalidGeometry)
         }
 
-        // Invert the app's `.right` orientation exactly as TableProjection:
-        // oriented normalized → captured landscape pixels.
-        let capturedX = point.y * orientedImageSize.y
-        let capturedY = imageResolution.y - point.x * orientedImageSize.x
+        let raw = imageTransform.rawNormalized(fromOriented: point)
+        let capturedX = raw.x * imageResolution.x
+        let capturedY = raw.y * imageResolution.y
         let depthX = capturedX / imageResolution.x * Double(depthWidth)
         let depthY = capturedY / imageResolution.y * Double(depthHeight)
         guard depthX.isFinite, depthY.isFinite,

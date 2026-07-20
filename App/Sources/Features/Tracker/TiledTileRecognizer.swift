@@ -1,6 +1,7 @@
 import CoreGraphics
 import CoreVideo
 import Foundation
+import ImageIO
 import MahjongCore
 import Recognition
 
@@ -56,8 +57,12 @@ enum TiledTileRecognizer {
     ///   tracker's own birth/confirm gates reject wood/shadow FPs downstream.
     static func recognize(buffer: CVPixelBuffer, roi: TileBoundingBox?,
                            minConfidence: Double = confidenceThreshold,
+                           imageOrientation: CGImagePropertyOrientation = .right,
                            using recognize: (RecognizerFrame) async -> RecognitionResult) async -> [DetectedTile] {
-        let orientedImageSize = RecognizerFrame.buffer(buffer, orientation: .right).orientedPixelSize
+        let orientedImageSize = RecognizerFrame.buffer(
+            buffer,
+            orientation: imageOrientation
+        ).orientedPixelSize
         let imageResolution = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
         guard orientedImageSize.width > 0, orientedImageSize.height > 0 else { return [] }
 
@@ -67,13 +72,17 @@ enum TiledTileRecognizer {
 
         for cell in gridCells(over: region) {
             let cropRect = ROICropMapper.cropRect(forZoneImageRect: cell, orientedImageSize: orientedImageSize,
-                                                   imageResolution: imageResolution, padding: overlap)
+                                                   imageResolution: imageResolution,
+                                                   imageOrientation: imageOrientation,
+                                                   padding: overlap)
             guard cropRect != .zero, let crop = cropper.crop(buffer, to: cropRect) else { continue }
             anyCropSucceeded = true
-            let result = await recognize(RecognizerFrame.buffer(crop, orientation: .right))
+            let result = await recognize(RecognizerFrame.buffer(crop, orientation: imageOrientation))
             for det in result.tiles {
                 let box = ROICropMapper.fullImageBox(fromCropNormalized: det.box, cropRect: cropRect,
-                                                      imageResolution: imageResolution, orientedImageSize: orientedImageSize)
+                                                      imageResolution: imageResolution,
+                                                      orientedImageSize: orientedImageSize,
+                                                      imageOrientation: imageOrientation)
                 merged.append(DetectedTile(tile: det.tile, confidence: det.confidence, box: box))
             }
         }
@@ -81,7 +90,7 @@ enum TiledTileRecognizer {
         guard anyCropSucceeded else {
             // Fallback: a single full-frame recognize, filtered to roi — never
             // worse than today's non-tiled path.
-            let result = await recognize(RecognizerFrame.buffer(buffer, orientation: .right))
+            let result = await recognize(RecognizerFrame.buffer(buffer, orientation: imageOrientation))
             return accepting(result.keepingTiles(insideROI: roi).tiles, minConfidence: minConfidence)
         }
 

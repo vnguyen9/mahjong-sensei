@@ -42,6 +42,7 @@ struct PhysicalTrack {
     // MARK: Geometry (anchor-local metres unless noted)
     var anchorCenter: SIMD2<Float>
     var worldPosition: SIMD3<Float>?
+    var measuredSurfaceDepth: Float?
     var footprintRadius: Float
     /// Last known image-space box (whatever coordinate space `TileObservation.box`
     /// uses), kept only for the association cost's image-continuity term.
@@ -75,11 +76,13 @@ struct PhysicalTrack {
     var createdAt: TimeInterval
 
     init(id: CensusTrackID, anchorCenter: SIMD2<Float>, worldPosition: SIMD3<Float>? = nil,
+         measuredSurfaceDepth: Float? = nil,
          footprintRadius: Float,
          imageBox: TileBoundingBox, at time: TimeInterval) {
         self.id = id
         self.anchorCenter = anchorCenter
         self.worldPosition = worldPosition
+        self.measuredSurfaceDepth = measuredSurfaceDepth
         self.footprintRadius = footprintRadius
         self.imageBox = imageBox
         self.lastHitAt = time

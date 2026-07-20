@@ -304,6 +304,9 @@ public final class PhysicalCensus {
                 tracks[trackIndex].worldPosition = observedWorld
             }
         }
+        if let measuredDepth = observation.measuredSurfaceDepth {
+            tracks[trackIndex].measuredSurfaceDepth = measuredDepth
+        }
         if let center = observation.footprintCenter {
             tracks[trackIndex].anchorCenter = center
             if let radius = observation.footprintRadius { tracks[trackIndex].footprintRadius = radius }
@@ -348,6 +351,7 @@ public final class PhysicalCensus {
         nextTrackValue += 1
         var track = PhysicalTrack(id: id, anchorCenter: center,
                                   worldPosition: observation.worldPosition,
+                                  measuredSurfaceDepth: observation.measuredSurfaceDepth,
                                   footprintRadius: radius,
                                   imageBox: observation.box, at: time)
         FaceFusion.absorb(hypothesis: observation.faceHypothesis, observationConfidence: observation.confidence,

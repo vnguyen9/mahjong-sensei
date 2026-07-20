@@ -70,6 +70,10 @@ final class WorldCensusController {
         census.snapshot(at: CACurrentMediaTime())
     }
 
+    func recordOrientationTransition() {
+        diagnostics.depthRejections[.orientationTransition, default: 0] += 1
+    }
+
     func updateTableSpace(worldToTable: simd_float4x4,
                           extent: SIMD2<Float>) {
         self.worldToTable = worldToTable
@@ -127,41 +131,48 @@ final class WorldCensusController {
         }
 
         let frameID = frameIDs.nextID()
-        let imageResolution = SIMD2<Double>(
-            Double(frame.imageResolution.width),
-            Double(frame.imageResolution.height)
-        )
-        let orientedSize = SIMD2<Double>(
-            Double(frame.orientedImageSize.width),
-            Double(frame.orientedImageSize.height)
-        )
-
         let observations = detections.compactMap { detection -> TileObservation? in
-            let point = SIMD2<Double>(detection.box.centerX, detection.box.centerY)
-            let sample = DepthSampler.inspect(
-                atOrientedNormalized: point,
-                imageResolution: imageResolution,
-                orientedImageSize: orientedSize,
-                depthMap: frame.depthMap,
-                confidenceMap: frame.depthConfidence
-            )
-            guard let depth = sample.depthMeters else {
-                if let rejection = sample.rejection {
-                    diagnostics.depthRejections[rejection, default: 0] += 1
+            let points = Self.spatialSamplePoints(for: detection.box)
+            var localPoints: [SIMD2<Float>] = []
+            var surfaceDepths: [Float] = []
+            for point in points {
+                let sample = DepthSampler.inspect(
+                    atOrientedNormalized: point,
+                    imageTransform: frame.imageTransform,
+                    depthMap: frame.depthMap,
+                    confidenceMap: frame.depthConfidence
+                )
+                guard let depth = sample.depthMeters else {
+                    if let rejection = sample.rejection {
+                        diagnostics.depthRejections[rejection, default: 0] += 1
+                    }
+                    continue
                 }
-                return nil
+                guard let measuredWorld = projection.worldPoint(
+                    ofNormalizedOrientedPoint: point,
+                    imageTransform: frame.imageTransform,
+                    depthMeters: Double(depth)
+                ) else {
+                    diagnostics.depthRejections[.invalidGeometry, default: 0] += 1
+                    continue
+                }
+                let local4 = simd_inverse(projection.planeTransform) * SIMD4(
+                    measuredWorld.x, measuredWorld.y, measuredWorld.z, 1
+                )
+                guard local4.y >= -0.010, local4.y <= 0.060 else {
+                    diagnostics.depthRejections[.heightOutOfRange, default: 0] += 1
+                    continue
+                }
+                localPoints.append(SIMD2(Float(local4.x), Float(local4.z)))
+                surfaceDepths.append(depth)
             }
-            guard let world = projection.worldPoint(
-                ofNormalizedOrientedPoint: point,
-                orientedImageSize: orientedSize,
-                depthMeters: Double(depth)
-            ) else {
-                diagnostics.depthRejections[.invalidGeometry, default: 0] += 1
-                return nil
-            }
-            let tablePoint = projection.tablePoint(
-                ofNormalizedOrientedPoint: point,
-                orientedImageSize: orientedSize
+            guard !localPoints.isEmpty else { return nil }
+            let tablePoint = SIMD2<Float>(
+                Self.median(localPoints.map(\.x)),
+                Self.median(localPoints.map(\.y))
+            )
+            let planeWorld4 = projection.planeTransform * SIMD4<Double>(
+                Double(tablePoint.x), 0, Double(tablePoint.y), 1
             )
             let face = TileFace.tile(detection.tile)
             let confidence = Float(detection.confidence)
@@ -177,13 +188,12 @@ final class WorldCensusController {
                     margin: confidence,
                     rejectionScore: max(0, 1 - confidence)
                 ),
-                footprintCenter: tablePoint.map {
-                    SIMD2<Float>(Float($0.x), Float($0.y))
-                },
+                footprintCenter: tablePoint,
                 footprintRadius: 0.012,
                 worldPosition: SIMD3<Float>(
-                    Float(world.x), Float(world.y), Float(world.z)
-                )
+                    Float(planeWorld4.x), Float(planeWorld4.y), Float(planeWorld4.z)
+                ),
+                measuredSurfaceDepth: Self.median(surfaceDepths)
             )
         }
 
@@ -194,7 +204,7 @@ final class WorldCensusController {
                     Double(anchor.worldPosition.y),
                     Double(anchor.worldPosition.z)
                 ),
-                orientedImageSize: orientedSize
+                imageTransform: frame.imageTransform
             ), coverageRects.contains(where: { Self.contains(point, rect: $0) }),
             let expectedDepth = projection.cameraAxisDepth(
                 ofWorldPoint: SIMD3<Double>(
@@ -206,8 +216,7 @@ final class WorldCensusController {
 
             let sample = DepthSampler.inspect(
                 atOrientedNormalized: point,
-                imageResolution: imageResolution,
-                orientedImageSize: orientedSize,
+                imageTransform: frame.imageTransform,
                 depthMap: frame.depthMap,
                 confidenceMap: frame.depthConfidence
             )
@@ -262,6 +271,31 @@ final class WorldCensusController {
             )
         }
         revision += 1
+    }
+
+    private static func spatialSamplePoints(
+        for box: TileBoundingBox
+    ) -> [SIMD2<Double>] {
+        let cx = box.centerX
+        let cy = box.centerY
+        return [
+            SIMD2(cx, cy),
+            SIMD2(cx, cy - box.height * 0.20),
+            SIMD2(cx, cy + box.height * 0.20),
+            SIMD2(cx - box.width * 0.15, cy),
+            SIMD2(cx + box.width * 0.15, cy),
+        ].map {
+            SIMD2(min(1, max(0, $0.x)), min(1, max(0, $0.y)))
+        }
+    }
+
+    private static func median(_ values: [Float]) -> Float {
+        let sorted = values.sorted()
+        guard !sorted.isEmpty else { return 0 }
+        let middle = sorted.count / 2
+        return sorted.count.isMultiple(of: 2)
+            ? (sorted[middle - 1] + sorted[middle]) * 0.5
+            : sorted[middle]
     }
 
     func recenterPond(at worldPosition: SIMD3<Float>) {

@@ -1,5 +1,6 @@
 import ARKit
 import AVFoundation
+import ImageIO
 import Observation
 import Recognition
 import os
@@ -65,6 +66,9 @@ final class ARTableCapture: NSObject {
     // callback, so it needs the explicit `nonisolated(unsafe)` opt-out.
     @ObservationIgnored private let frameLock = NSLock()
     @ObservationIgnored nonisolated(unsafe) private var _latestFrame: ARTableFrame?
+    @ObservationIgnored private let orientationLock = NSLock()
+    @ObservationIgnored nonisolated(unsafe) private var imageOrientationRaw: UInt32 =
+        CGImagePropertyOrientation.right.rawValue
     /// The most recent frame ARKit has delivered, cached behind a lock so
     /// it can be polled from any thread — mirrors
     /// `CameraCapture.latestBuffer`'s contract exactly. Written from
@@ -74,6 +78,20 @@ final class ARTableCapture: NSObject {
         frameLock.lock()
         defer { frameLock.unlock() }
         return _latestFrame
+    }
+
+    nonisolated func updateImageOrientation(
+        _ orientation: CGImagePropertyOrientation
+    ) {
+        orientationLock.lock()
+        imageOrientationRaw = orientation.rawValue
+        orientationLock.unlock()
+    }
+
+    nonisolated private var currentImageOrientation: CGImagePropertyOrientation {
+        orientationLock.lock()
+        defer { orientationLock.unlock() }
+        return CGImagePropertyOrientation(rawValue: imageOrientationRaw) ?? .right
     }
 
     // MARK: - Internal (main-actor-only) bookkeeping
@@ -458,6 +476,7 @@ extension ARTableCapture: ARSessionDelegate {
                                       cameraTransform: camera.transform,
                                       intrinsics: camera.intrinsics,
                                       imageResolution: camera.imageResolution,
+                                      imageOrientation: currentImageOrientation,
                                       lightLux: frame.lightEstimate.map { Double($0.ambientIntensity) },
                                       depthMap: sceneDepth?.depthMap,
                                       depthConfidence: sceneDepth?.confidenceMap,
