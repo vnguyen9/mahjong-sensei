@@ -11,9 +11,9 @@ struct CalibrationPrimerView: View {
     var onCancel: () -> Void
 
     private let steps: [(n: Int, title: String, detail: String)] = [
-        (1, "Find the table", "Move your phone until the surface locks."),
-        (2, "Bracket your tiles", "Pinch a post at each end of your row."),
-        (3, "Box the pond", "Pinch two opposite corners of the discard pile."),
+        (1, "Mark your hand row", "Tap or pinch one end of your tiles, then the other."),
+        (2, "Mark the pond", "Tap or pinch two opposite corners of the discard area."),
+        (3, "Review your table", "Move the iPad slightly, then drag any label that does not line up."),
     ]
 
     var body: some View {
