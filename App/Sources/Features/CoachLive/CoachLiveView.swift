@@ -144,7 +144,11 @@ struct CoachLiveView: View {
                     mySeatWind: session.seatWind,
                     onComplete: { session.finishARCalibration($0) },
                     onCalibrationChanged: { session.applyARCalibrationDraft($0) },
-                    onCancel: { session.finishARCalibration(nil) })
+                    onCancel: {
+                        let hasAcceptedCalibration = session.worldTableCalibration != nil
+                        session.finishARCalibration(nil)
+                        if !hasAcceptedCalibration { onExit() }
+                    })
             }
         }
         .confirmationDialog("Exit Coach Live?", isPresented: $showExitConfirm, titleVisibility: .visible) {

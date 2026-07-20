@@ -21,7 +21,10 @@ struct StartupStatusOverlay: View {
 
     var body: some View {
         Group {
-            if session.arCapture?.captureStage == .relocalizing {
+            if session.spatialTrackingHealth == .trackingLimited
+                || session.spatialTrackingHealth == .depthUnavailable {
+                recoveringTrackingCard
+            } else if session.arCapture?.captureStage == .relocalizing {
                 relocalizingCard
             } else if session.startupStage != .ready {
                 statusCard(stageText)
@@ -65,6 +68,25 @@ struct StartupStatusOverlay: View {
         }
         .padding(28)
         .frame(minWidth: 220, maxWidth: 280)
+        .mjCard(cornerRadius: 20)
+        .transition(.opacity)
+    }
+
+    private var recoveringTrackingCard: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "viewfinder.trianglebadge.exclamationmark")
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundStyle(MJColor.gold)
+            Text("Recovering table tracking…")
+                .font(MJFont.ui(15, weight: .semibold))
+                .foregroundStyle(MJColor.creamHeading)
+            Text("Keep the table in view. Coach Live will recalibrate if tracking does not recover within 5 seconds.")
+                .font(MJFont.ui(11.5))
+                .foregroundStyle(MJColor.cream(0.65))
+                .multilineTextAlignment(.center)
+        }
+        .padding(28)
+        .frame(minWidth: 240, maxWidth: 300)
         .mjCard(cornerRadius: 20)
         .transition(.opacity)
     }

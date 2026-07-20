@@ -863,8 +863,6 @@ final class CoachLiveSession: Identifiable {
     ) {
         spatialPipelineGeneration += 1
         let loopStart = CACurrentMediaTime()
-        let arLockDeadline = loopStart + 25
-
         loopTask = Task { @MainActor [weak self] in
             var cadence = CadencePolicy()
             var motionGate = CameraMotionGate()
@@ -875,10 +873,12 @@ final class CoachLiveSession: Identifiable {
             var lastInference = CACurrentMediaTime() - 10   // due immediately once tracking starts
             var wasMoving = false
             var forceNextInference = false
+            var trackingLimitedSince: TimeInterval?
 
             pollLoop: while !Task.isCancelled {
                 guard let self, !self.isEnded, let arCapture = self.arCapture else { break }
                 if self.isPaused {
+                    trackingLimitedSince = nil
                     try? await Task.sleep(for: .milliseconds(200))
                     continue
                 }
@@ -891,22 +891,13 @@ final class CoachLiveSession: Identifiable {
                     self.startupStage = .findingTable
                 }
 
-                // Never-locks / unsupported fallback — checked every tick
-                // before the table locks (once locked, `self.tracker` is
-                // non-nil and this branch never runs again).
-                if self.tracker == nil, arCapture.captureStage == .unavailable || CACurrentMediaTime() >= arLockDeadline {
-                    Self.logger.notice("AR table capture unavailable/never locked (stage: \(String(describing: arCapture.captureStage), privacy: .public)) — falling back to image-space capture")
-                    self.usingFallbackCapture = true
-                    self.countSource = .legacy2D(.arUnavailable)
+                // Production Coach Live is LiDAR-only. Never replace its
+                // spatial coordinate system with image-space counts.
+                if arCapture.captureStage == .unavailable {
                     self.spatialTrackingHealth = .trackingLimited
-                    arCapture.pause()
-                    #if !targetEnvironment(simulator)
-                    self.camera.requestAndStart()
-                    #endif
-                    // AR tile identities never persist. A fallback therefore
-                    // starts a clean image-space tracker at the selected winds.
-                    self.startLoop(recognizerProvider: recognizerProvider, restoredFrom: nil)
-                    break pollLoop
+                    self.isWarmingUp = false
+                    try? await Task.sleep(for: Self.pollInterval)
+                    continue
                 }
 
                 guard let frame = arCapture.latestFrame else {
@@ -927,7 +918,36 @@ final class CoachLiveSession: Identifiable {
                 }
                 self.lastARImageOrientation = frame.imageOrientation
                 let now = CACurrentMediaTime()
-                self.updateDepthHealth(frame: frame, capture: arCapture, at: now)
+
+                if self.calibrationHasBeenFinalized,
+                   arCapture.cameraTrackingIsLimited {
+                    let limitedSince = trackingLimitedSince ?? now
+                    trackingLimitedSince = limitedSince
+                    self.spatialTrackingHealth = .trackingLimited
+                    self.cameraMoving = false
+                    if now - limitedSince >= 5 {
+                        self.restartSpatialCalibration(
+                            reason: "tracking-\(arCapture.cameraTrackingReason)"
+                        )
+                        trackingLimitedSince = nil
+                    }
+                    await self.finishTick(loopStart: loopStart)
+                    continue
+                }
+                if trackingLimitedSince != nil {
+                    trackingLimitedSince = nil
+                    if self.calibrationHasBeenFinalized {
+                        self.spatialTrackingHealth = .healthy
+                    }
+                }
+                guard self.updateDepthHealth(
+                    frame: frame,
+                    capture: arCapture,
+                    at: now
+                ) else {
+                    await self.finishTick(loopStart: loopStart)
+                    continue
+                }
 
                 // Table lock → build the tracker HERE, in table space, then
                 // begin/restore the session. Nothing above this point ever
@@ -2006,7 +2026,12 @@ final class CoachLiveSession: Identifiable {
     /// could get stuck on forever after a fallback that happened to trip
     /// mid-relocalization.
     @MainActor
-    var isRelocalizing: Bool { arCapture?.captureStage == .relocalizing && !usingFallbackCapture }
+    var isRelocalizing: Bool {
+        guard !usingFallbackCapture else { return false }
+        return arCapture?.captureStage == .relocalizing
+            || spatialTrackingHealth == .trackingLimited
+            || spatialTrackingHealth == .depthUnavailable
+    }
 
     /// Workstream G: the 2D-fallback banner's "Retry AR setup" button
     /// (`LiveFeedPane`). `usingFallbackCapture` is documented as one-way —
@@ -2278,11 +2303,10 @@ final class CoachLiveSession: Identifiable {
         frame: ARTableFrame,
         capture: ARTableCapture,
         at time: TimeInterval
-    ) {
+    ) -> Bool {
         guard ARTableCapture.supportsSceneDepth else {
-            enterLegacyFallback(.depthUnsupported, at: time)
             spatialTrackingHealth = .depthUnavailable
-            return
+            return false
         }
         guard frame.depthMap != nil, frame.depthConfidence != nil else {
             let missingSince = depthMissingSince ?? time
@@ -2292,10 +2316,11 @@ final class CoachLiveSession: Identifiable {
             if elapsed >= 2, !depthRestartAttempted {
                 depthRestartAttempted = true
                 capture.retryDepthSemantics()
-            } else if elapsed >= 4, depthRestartAttempted {
-                enterLegacyFallback(.depthUnavailable, at: time)
+            } else if elapsed >= 5, depthRestartAttempted,
+                      calibrationHasBeenFinalized {
+                restartSpatialCalibration(reason: "depth-unavailable")
             }
-            return
+            return false
         }
 
         depthMissingSince = nil
@@ -2304,39 +2329,33 @@ final class CoachLiveSession: Identifiable {
                 ? .healthy
                 : .calibrating
         }
+        return true
     }
 
     @MainActor
-    private func enterLegacyFallback(
-        _ reason: LegacyFallbackReason,
-        at time: TimeInterval
-    ) {
-        let target = CoachLiveCountSource.legacy2D(reason)
-        guard countSource != target else { return }
-        countSource = target
-
-        // A tracker previously synchronized from census must never become the
-        // legacy count source. Start a clean 2D read model instead of mixing
-        // physical identities with image-space association.
-        guard tracker != nil else { return }
-        let replacement = TableTracker(config: trackerConfig)
-        replacement.waitImpactAnnotator = Self.waitImpactAnnotator
-        replacement.beginSession(
-            mySeatWind: seatWind,
-            roundWind: roundWind,
-            at: time
-        )
-        tracker = replacement
-        advisorCache = AdvisorCache()
-        applyState(
-            replacement.state,
-            pending: replacement.pendingHandEnd,
-            log: replacement.events
-        )
-        recountRequest = .fullTable
+    private func restartSpatialCalibration(reason: String) {
+        guard calibrationHasBeenFinalized, !showARCalibration else { return }
         Self.logger.notice(
-            "spatial source=LEGACY_2D reason=\(reason.rawValue, privacy: .public); census tracks discarded from event read model"
+            "spatial tracking remained unhealthy for 5s; restarting calibration reason=\(reason, privacy: .public)"
         )
+        arCapture?.restartFreshCalibration()
+        tracker = nil
+        worldCensusController = nil
+        worldTableCalibration = nil
+        calibratedTableGeometry = nil
+        calibrationHasBeenFinalized = false
+        calibrationDraft = nil
+        countSource = .spatialBootstrapping
+        spatialTrackingHealth = .calibrating
+        startupStage = .findingTable
+        usingFallbackCapture = false
+        depthMissingSince = nil
+        depthRestartAttempted = false
+        lastARImageOrientation = nil
+        zoneBoxes = ZoneBoxes()
+        advisorCache = AdvisorCache()
+        applyState(.empty, pending: nil, log: [])
+        beginARCalibration()
     }
 
     @MainActor

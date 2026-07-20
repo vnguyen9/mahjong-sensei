@@ -80,6 +80,12 @@ final class ARTableCapture: NSObject {
     /// and, absent a call to `start()`, stays there.
     private(set) var captureStage: CaptureStage = .starting
 
+    /// True for every non-normal ARCamera tracking state, not only ARKit's
+    /// `.limited(.relocalizing)` case. Coach Live freezes its last trusted
+    /// census while this is true and begins fresh calibration after 5 seconds.
+    private(set) var cameraTrackingIsLimited = true
+    private(set) var cameraTrackingReason = "initializing"
+
     /// The locked table plane's anchor-local → world transform, already
     /// yaw-aligned and centered per `PlaneLockPolicy`'s LOCKED CONTRACT —
     /// exactly what `Recognition.TableProjection.planeTransform` expects.
@@ -261,6 +267,14 @@ final class ARTableCapture: NSObject {
         if let pendingTorchState {
             setTorch(pendingTorchState)
         }
+    }
+
+    /// Explicit recovery after five continuous seconds of untrustworthy pose
+    /// or depth. This is the only ordinary Coach Live path that resets world
+    /// tracking after the initial start, and it always returns to calibration.
+    func restartFreshCalibration() {
+        ARWorldMapStore.discard()
+        beginFreshTableLock()
     }
 
     /// Advances to `.tracking` immediately after table lock. Recounts are
@@ -469,6 +483,9 @@ final class ARTableCapture: NSObject {
         if captureStage == .starting {
             captureStage = .findingTable
         }
+        // A limited pose must never become the coordinate system the user
+        // calibrates against. Wait for ARKit to report normal tracking.
+        guard trackingIsNormal else { return }
         guard lockedPlaneTransform == nil, captureStage != .relocalizing else { return }
 
         if planeLockPolicy == nil {
@@ -675,19 +692,29 @@ extension ARTableCapture: ARSessionDelegate {
             guard let self else { return }
             switch trackingState {
             case .normal:
+                self.cameraTrackingIsLimited = false
+                self.cameraTrackingReason = "normal"
                 if !self.restoringWorldMap {
                     self.setRelocalizing(false)
                 }
             case .limited(.relocalizing):
+                self.cameraTrackingIsLimited = true
+                self.cameraTrackingReason = "relocalizing"
                 self.setRelocalizing(true)
-            default:
-                break
+            case .limited(let reason):
+                self.cameraTrackingIsLimited = true
+                self.cameraTrackingReason = String(describing: reason)
+            case .notAvailable:
+                self.cameraTrackingIsLimited = true
+                self.cameraTrackingReason = "not-available"
             }
         }
     }
 
     nonisolated func sessionWasInterrupted(_ session: ARSession) {
         Task { @MainActor [weak self] in
+            self?.cameraTrackingIsLimited = true
+            self?.cameraTrackingReason = "interrupted"
             self?.setRelocalizing(true)
         }
     }
