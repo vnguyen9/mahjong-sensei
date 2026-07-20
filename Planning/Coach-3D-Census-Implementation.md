@@ -1,8 +1,9 @@
 # Coach Live — Authoritative ARKit World Census Handoff
 
-> **Source status (2026-07-20):** all five implementation phases are present
-> on `codex/world-census`. Recognition tests and iOS 26.5 Simulator builds
-> pass. The M4 iPad/LiDAR acceptance matrix in §9 remains a release gate
+> **Source status (2026-07-20):** Phases 0–3 are committed and Phase 4 is the
+> current integration commit. Recognition has 293 tests before any new tests;
+> separate iPhone and iPad iOS 26.5 Simulator gates pass. The M4 iPad/LiDAR
+> acceptance matrix in §9 remains a release gate
 > because Simulator testing cannot validate depth, physical anchor stability,
 > occlusion, or ARWorldMap relocalization.
 >
@@ -14,7 +15,8 @@
 
 Coach Live is no longer a camera-space counter with AR-shaped decoration:
 
-- Guided calibration and Live share one continuous `ARSession`.
+- One AR/census pipeline starts before the primer or guided calibration and
+  continues into Live without a confirmation-time restart.
 - The marked pond, hand row, and revealed zones define one canonical table
   coordinate system.
 - LiDAR detections become stable plane-projected world anchors.
@@ -48,12 +50,14 @@ relocalization, depth loss, and limited tracking independently of count source.
 
 On LiDAR hardware:
 
-1. Coach Live starts in `spatialBootstrapping`.
-2. It publishes no legacy counts while spatial calibration/confirmation is
-   incomplete. The UI says “Locking spatial tracking…” and reports tentative
-   candidates.
-3. The first confirmed census track after valid calibration activates
-   `worldCensus`.
+1. Coach Live starts in `spatialBootstrapping` and publishes an empty bootstrap
+   state while calibration is in progress.
+2. It publishes no legacy counts or production spatial overlays while
+   calibration/confirmation is incomplete; guided calibration owns the review
+   preview. Confirmation never reintroduces a blocking “Locking spatial
+   tracking…” or “Looking for tiles…” screen.
+3. Confirming valid calibration activates `worldCensus` immediately, even when
+   zero tracks have confirmed yet.
 4. If depth disappears, the last census presentation is held.
 5. After two continuous seconds, AR depth semantics are restarted once.
 6. If depth is still absent, Coach Live creates a clean legacy tracker and
@@ -72,6 +76,21 @@ and tracking are healthy.
 
 `ARTableCapture` starts before guided calibration. `ARCalibrationView` receives
 that existing session and does not run, pause, reset, or replace it.
+
+The guided flow has exactly three user-facing steps:
+
+1. **Mark your hand row** — “Tap or pinch one end of your tiles, then the other.”
+2. **Mark the pond** — “Tap or pinch two opposite corners of the discard area.”
+3. **Review your table** — live AR preview with direct region dragging and
+   “Confirm & Start”. Amber `person.fill` markers and the legend “Player
+   marker — drag to the center of their exposed tiles.” identify the three
+   opponent exposed-tile regions near the pond.
+
+Step-3 edits emit a provisional `WorldTableCalibration` into the existing
+`WorldCensusController`, legacy-compatibility geometry, AR origin, zones, ROI,
+and overlays. They do not persist on every drag. Confirm finalizes that exact
+calibration, queues one recount, and is a presentation-only handoff: it never
+restarts the AR session, tracker, census controller, or pipeline generation.
 
 `WorldTableCalibration` is the one geometry source:
 
@@ -187,7 +206,7 @@ End Hand clears census tiles while retaining calibration.
 
 ## 6. Persistence
 
-Persistence schema version 2 stores:
+Persistence schema version 3 stores:
 
 - one named `mahjong-sensei.table-origin` `ARAnchor`;
 - rectangular X/Z extent;
@@ -197,14 +216,18 @@ Persistence schema version 2 stores:
 - calibration source;
 - secure `ARWorldMap`.
 
-Version 1 transform/extent-only records are rejected because they may contain
-the old plane-centroid calibration. Archives are written atomically under
+Versions 1 and 2 are rejected because they may contain the old plane-centroid
+or outer-plane geometry. Archives are written atomically under
 Application Support only while mapping is `.extending` or `.mapped`, and only
 when the named origin anchor is present in the captured map.
 
-Restore succeeds only after ARKit tracking is normal and the named origin
-anchor appears in the relocalized frame. After eight seconds, the stale archive
-is deleted, tracking resets, and fresh calibration begins.
+Restore has an explicit decision state before guided marks: the same-session
+camera preview says “Restoring your table…” while ARKit relocalizes the named
+origin. Restore is adopted only after normal tracking observes that anchor;
+it restores calibration (not counts or tile identities), queues one recount,
+and enters Live without manual calibration. After eight seconds, the stale
+archive is deleted, tracking resets, and the still-running pipeline enters the
+normal primer/three-step calibration flow.
 
 No tile identity, count, or per-tile anchor is written to the AR archive.
 Coach Live’s older tracker-session archive is disabled for AR sessions, so it
@@ -233,11 +256,11 @@ validation. Diagnostics never cause another inference.
 
 | Phase | Commit | Outcome |
 |---|---|---|
-| 0 | `5a8f409` | Truthful count source/health, bootstrap, explicit fallback |
-| 1 | `e66d642` | One AR session and guided canonical calibration |
-| 2 | `243b99b` | Shared iPadOS 26 transform and stable depth anchors |
-| 3 | `cfe6b70` | Census-authoritative counts, exact polygons, diagnostics |
-| 4 | current Phase 4 commit | v2 persistence, clean fallback, census event bridge, cleanup |
+| 0 | `d7bbae2` | Truthful source/health characterization and continuity baseline |
+| 1 | `b83b5a6` | Guided canonical calibration geometry near the pond |
+| 2 | `c0fbd6c` | Three-step calibration review, direct drag, amber player markers |
+| 3 | `7f377d8` | One pre-calibration AR/census pipeline and draft/final handoff |
+| 4 | current Phase 4 commit | Restore-flow integration, persistence adoption, final cleanup |
 
 Important files:
 
@@ -265,20 +288,20 @@ Verified locally:
 
 ```text
 swift test --package-path Packages/Recognition
-287 tests, 0 failures
+293 tests, 0 failures
 
 Xcode 26.5 SDK / deployment target iOS 26.0:
-- generic iOS Simulator build: passed
-- iPhone 17 Pro, iOS 26.5 Simulator: passed
-- iPad Pro 11-inch (M5), iOS 26.5 Simulator: passed
+- generic iOS build: passed
+- separate iPhone iOS 26.5 Simulator gate: passed
+- separate iPad iOS 26.5 Simulator gate: passed
 ```
 
 Coverage includes canonical transform construction, exact polygons, independent
 extent/clamping, invalid calibration, all four iPad orientation round trips,
 depth rejection, stable plane anchors, 24 mm adjacent-tile separation,
 pan-away and occlusion survival, exact fifth-miss retirement, deterministic
-corrections, source-safe event parity, old persistence rejection, and v2
-metadata round trip.
+corrections, source-safe event parity, old persistence rejection, and v3
+metadata round trip. The unrelated untracked `Modeling` directory is preserved.
 
 Still required on an M4 iPad with LiDAR:
 

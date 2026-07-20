@@ -50,7 +50,7 @@ struct CoachLiveFlowView: View {
     var onExit: () -> Void = {}
     var onScoreHandoff: () -> Void = {}
 
-    enum FlowState { case setup, primer, calibration, live }
+    enum FlowState { case setup, primer, restore, calibration, live }
     @State private var flowState: FlowState
     @Environment(\.scenePhase) private var scenePhase
 
@@ -81,10 +81,7 @@ struct CoachLiveFlowView: View {
                         // primer/calibration. Guided marks are a draft applied
                         // to this already-running pipeline, never a second run.
                         session.begin(roundWind: session.roundWind, seatWind: session.seatWind)
-                        session.beginARCalibration()
-                        let hasSeenPrimer = CoachLivePrefs.hasSeenARPrimer
-                        let next: FlowState = hasSeenPrimer ? .calibration : .primer
-                        withAnimation(.easeInOut(duration: 0.3)) { flowState = next }
+                        resolveRestoreOrBeginGuidedCalibration()
                     },
                     onResume: {
                         // resume() already spun the loop up — skip calibration.
@@ -103,6 +100,20 @@ struct CoachLiveFlowView: View {
                         onExit()
                     })
                 .transition(.opacity)
+            case .restore:
+                if let capture = session.arCapture {
+                    TableRestoreView(
+                        capture: capture,
+                        onCancel: {
+                            session.cancelARRestore()
+                            onExit()
+                        })
+                    .onAppear { resolveRestoreOrBeginGuidedCalibration() }
+                    .onChange(of: capture.calibrationRestoreStatus) { _, _ in
+                        resolveRestoreOrBeginGuidedCalibration()
+                    }
+                    .transition(.opacity)
+                }
             case .calibration:
                 if let capture = session.arCapture {
                     ARCalibrationView(
@@ -157,5 +168,58 @@ struct CoachLiveFlowView: View {
         }
         .preferredColorScheme(.dark)
         .statusBarHidden()
+    }
+
+    /// Restore is a flow decision, not a second session lifecycle. A timeout
+    /// transitions the same begun pipeline into the standard guided flow.
+    private func resolveRestoreOrBeginGuidedCalibration() {
+        switch session.calibrationRestoreStatus {
+        case .restoring:
+            withAnimation(.easeInOut(duration: 0.3)) { flowState = .restore }
+        case .restored:
+            guard session.adoptRestoredARCalibrationIfAvailable() else { return }
+            withAnimation(.easeInOut(duration: 0.3)) { flowState = .live }
+        case .none:
+            session.beginARCalibration()
+            let next: FlowState = CoachLivePrefs.hasSeenARPrimer ? .calibration : .primer
+            withAnimation(.easeInOut(duration: 0.3)) { flowState = next }
+        }
+    }
+}
+
+/// Dedicated ARWorldMap relocalization presentation. It renders the same
+/// already-running AR session as Live, and intentionally cannot start, pause,
+/// or reconfigure it.
+private struct TableRestoreView: View {
+    let capture: ARTableCapture
+    let onCancel: () -> Void
+
+    var body: some View {
+        ZStack {
+            ARCameraPreview(capture: capture)
+                .ignoresSafeArea()
+            Color.black.opacity(0.30).ignoresSafeArea()
+            VStack(spacing: 14) {
+                ProgressView().controlSize(.large).tint(MJColor.gold)
+                Text("Restoring your table…")
+                    .font(MJFont.serif(22, weight: .bold))
+                    .foregroundStyle(MJColor.creamHeading)
+                Text("Point at the table. This can take up to 8 seconds.")
+                    .font(MJFont.ui(13))
+                    .foregroundStyle(MJColor.cream(0.7))
+                    .multilineTextAlignment(.center)
+                Button("Cancel restore", action: onCancel)
+                    .font(MJFont.ui(15, weight: .semibold))
+                    .foregroundStyle(MJColor.creamHeading)
+                    .frame(minWidth: 160, minHeight: 44)
+                    .background(MJColor.sheetGlass, in: Capsule())
+                    .accessibilityLabel("Cancel table restore")
+                    .accessibilityHint("Stops Coach Live and returns to the previous screen.")
+            }
+            .padding(28)
+            .frame(maxWidth: 320)
+            .mjCard(cornerRadius: 20)
+            .padding(20)
+        }
     }
 }

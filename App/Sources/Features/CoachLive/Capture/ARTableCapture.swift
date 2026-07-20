@@ -5,6 +5,15 @@ import Observation
 import Recognition
 import os
 
+/// App-facing restore decision for the Coach Live flow. It deliberately
+/// exposes outcome, not ARSession controls: `ARTableCapture` remains the sole
+/// owner of session run/pause/reset behavior.
+enum ARTableCalibrationRestoreStatus: Equatable {
+    case none
+    case restoring
+    case restored
+}
+
 /// A small, DEBUG-visible audit trail for the only code paths allowed to
 /// re-run ARKit configuration. The live calibration handoff must retain the
 /// same `sessionID`; a later behavior change can use these facts to prove it
@@ -87,6 +96,17 @@ final class ARTableCapture: NSObject {
     /// Non-nil only while a saved world map has successfully supplied the
     /// named table-origin calibration for this launch.
     private(set) var restoredTableCalibration: WorldTableCalibration?
+
+    /// `.restored` is emitted only after ARKit tracking is normal and the
+    /// named table-origin anchor has been observed in the relocalized frame.
+    var calibrationRestoreStatus: ARTableCalibrationRestoreStatus {
+        if captureStage == .relocalizing { return .restoring }
+        if restoredTableCalibration != nil,
+           captureStage == .tableLocked || captureStage == .tracking {
+            return .restored
+        }
+        return .none
+    }
 
     /// Configuration-run diagnostics for the calibration → Live continuity
     /// audit. `sessionID` is allocated with this capture owner, rather than a
