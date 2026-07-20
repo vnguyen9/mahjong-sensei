@@ -102,6 +102,10 @@ final class ARTableCapture: NSObject {
     /// the Simulator (and any device lacking the needed sensors), which is
     /// exactly the case `start()` maps to `captureStage = .unavailable`.
     static var isSupported: Bool { ARWorldTrackingConfiguration.isSupported }
+    nonisolated static var supportsSceneDepth: Bool {
+        ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth)
+            || ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
+    }
 
     override init() {
         super.init()
@@ -171,6 +175,17 @@ final class ARTableCapture: NSObject {
     /// configuration (see `setTorch`'s doc).
     func resume() {
         guard Self.isSupported else { return }
+        session.run(Self.makeConfiguration(planeDetection: planeDetectionRequested))
+        if let pendingTorchState {
+            setTorch(pendingTorchState)
+        }
+    }
+
+    /// Re-applies the current world-tracking configuration without resetting
+    /// its map. Coach Live calls this once when a LiDAR-capable device stops
+    /// supplying depth, before explicitly degrading to 2D counts.
+    func retryDepthSemantics() {
+        guard Self.isSupported, Self.supportsSceneDepth else { return }
         session.run(Self.makeConfiguration(planeDetection: planeDetectionRequested))
         if let pendingTorchState {
             setTorch(pendingTorchState)

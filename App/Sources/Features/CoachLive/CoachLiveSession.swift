@@ -161,12 +161,12 @@ final class CoachLiveSession: Identifiable {
     /// regression to the ROI path specifically. Never read by
     /// `startLoop`/the mock path.
     var useROIScheduler = true
-    /// Guarded source switch. Keep false through shadow validation; once the
-    /// device gate is approved, setting `coachLive.useWorldCensus` enables
-    /// census-driven AR counts after eight confirmed world tracks exist.
-    var useWorldCensus = UserDefaults.standard.bool(
-        forKey: "coachLive.useWorldCensus"
-    )
+    /// One honest source for every published count. A LiDAR session never
+    /// silently substitutes legacy tracks while presenting spatial geometry.
+    var countSource: CoachLiveCountSource = .legacy2D(.arUnavailable)
+    var spatialTrackingHealth: SpatialTrackingHealth = .calibrating
+    private var depthMissingSince: TimeInterval?
+    private var depthRestartAttempted = false
 
     /// True once the loop's per-tick `MotionSample.meanLuma` has read
     /// "dark" for `DarkTableDetector`'s sustain window — drives
@@ -395,6 +395,7 @@ final class CoachLiveSession: Identifiable {
         torchSuggestionDismissed = false
         isDark = false
         darkTableDetector = DarkTableDetector()
+        resetSpatialTrackingState()
 
         guard let recognizerProvider, tracker == nil else { return }
         // Fresh start supersedes any stale resume — a new `begin()` means the
@@ -423,6 +424,7 @@ final class CoachLiveSession: Identifiable {
         torchSuggestionDismissed = false
         isDark = false
         darkTableDetector = DarkTableDetector()
+        resetSpatialTrackingState()
 
         guard let recognizerProvider, tracker == nil else { return }
         isWarmingUp = true
@@ -676,6 +678,8 @@ final class CoachLiveSession: Identifiable {
                 if self.tracker == nil, arCapture.captureStage == .unavailable || CACurrentMediaTime() >= arLockDeadline {
                     Self.logger.notice("AR table capture unavailable/never locked (stage: \(String(describing: arCapture.captureStage), privacy: .public)) — falling back to image-space capture")
                     self.usingFallbackCapture = true
+                    self.countSource = .legacy2D(.arUnavailable)
+                    self.spatialTrackingHealth = .trackingLimited
                     arCapture.pause()
                     #if !targetEnvironment(simulator)
                     self.camera.requestAndStart()
@@ -703,6 +707,7 @@ final class CoachLiveSession: Identifiable {
                     self.orientedImageSize = frame.orientedImageSize
                 }
                 let now = CACurrentMediaTime()
+                self.updateDepthHealth(frame: frame, capture: arCapture, at: now)
 
                 // Table lock → build the tracker HERE, in table space, then
                 // begin/restore the session. Nothing above this point ever
@@ -806,6 +811,7 @@ final class CoachLiveSession: Identifiable {
                 // once-through pre-`.ready` startup waterfall).
                 if arCapture.captureStage == .relocalizing {
                     self.cameraMoving = false
+                    self.spatialTrackingHealth = .relocalizing
                     await self.finishTick(loopStart: loopStart)
                     continue
                 }
@@ -1790,19 +1796,17 @@ final class CoachLiveSession: Identifiable {
 
     @MainActor
     private var worldCensusIsActive: Bool {
-        guard useWorldCensus, let controller = worldCensusController else {
-            return false
-        }
-        return controller.snapshot.tracks.filter {
-            $0.lifecycle == .confirmed
-        }.count >= 8
+        countSource == .worldCensus
     }
 
     @MainActor
     private func presentationState(
         preserving legacy: TrackedTableState
     ) -> TrackedTableState {
-        guard worldCensusIsActive, let controller = worldCensusController else {
+        guard countSource != .legacy2D(.arUnavailable),
+              countSource != .legacy2D(.depthUnsupported),
+              countSource != .legacy2D(.depthUnavailable),
+              let controller = worldCensusController else {
             return legacy
         }
         return CensusStateAdapter.makeState(
@@ -1821,6 +1825,13 @@ final class CoachLiveSession: Identifiable {
         diagnostics.worldCensusConfirmed = snapshot.tracks.filter {
             $0.lifecycle == .confirmed
         }.count
+        if countSource == .spatialBootstrapping,
+           diagnostics.worldCensusConfirmed > 0,
+           spatialTrackingHealth != .depthUnavailable,
+           spatialTrackingHealth != .relocalizing {
+            countSource = .worldCensus
+            spatialTrackingHealth = .healthy
+        }
         diagnostics.worldCensus = controller.census.diagnostics
         diagnostics.worldCensusDepthRejections = controller.diagnostics.depthRejections
         diagnostics.worldCensusMilliseconds = controller.diagnostics.lastIngestMilliseconds
@@ -1852,6 +1863,65 @@ final class CoachLiveSession: Identifiable {
         if diagnostics.worldCensusDepthSummary.isEmpty {
             diagnostics.worldCensusDepthSummary = "—"
         }
+    }
+
+    private func resetSpatialTrackingState() {
+        depthMissingSince = nil
+        depthRestartAttempted = false
+        if arCapture == nil {
+            countSource = .legacy2D(.arUnavailable)
+            spatialTrackingHealth = .trackingLimited
+        } else if ARTableCapture.supportsSceneDepth {
+            countSource = .spatialBootstrapping
+            spatialTrackingHealth = .calibrating
+        } else {
+            countSource = .legacy2D(.depthUnsupported)
+            spatialTrackingHealth = .depthUnavailable
+        }
+    }
+
+    @MainActor
+    private func updateDepthHealth(
+        frame: ARTableFrame,
+        capture: ARTableCapture,
+        at time: TimeInterval
+    ) {
+        guard ARTableCapture.supportsSceneDepth else {
+            countSource = .legacy2D(.depthUnsupported)
+            spatialTrackingHealth = .depthUnavailable
+            return
+        }
+        guard frame.depthMap != nil, frame.depthConfidence != nil else {
+            let missingSince = depthMissingSince ?? time
+            depthMissingSince = missingSince
+            spatialTrackingHealth = .depthUnavailable
+            let elapsed = time - missingSince
+            if elapsed >= 2, !depthRestartAttempted {
+                depthRestartAttempted = true
+                capture.retryDepthSemantics()
+            } else if elapsed >= 4, depthRestartAttempted {
+                countSource = .legacy2D(.depthUnavailable)
+            }
+            return
+        }
+
+        depthMissingSince = nil
+        if countSource != .legacy2D(.depthUnavailable) {
+            spatialTrackingHealth = countSource == .worldCensus
+                ? .healthy
+                : .calibrating
+        }
+    }
+
+    @MainActor
+    func retrySpatialTracking() {
+        guard let arCapture, ARTableCapture.supportsSceneDepth else { return }
+        depthMissingSince = nil
+        depthRestartAttempted = false
+        countSource = .spatialBootstrapping
+        spatialTrackingHealth = .calibrating
+        arCapture.retryDepthSemantics()
+        recountRequest = .fullTable
     }
 
     /// Projects a fresh `TrackedTableState` (+ pending boundary + event log)

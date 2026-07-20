@@ -1,5 +1,51 @@
 import Foundation
 
+enum LegacyFallbackReason: String, Equatable, Sendable {
+    case arUnavailable
+    case depthUnsupported
+    case depthUnavailable
+
+    var message: String {
+        switch self {
+        case .arUnavailable: return "AR tracking unavailable"
+        case .depthUnsupported: return "This device has no LiDAR depth"
+        case .depthUnavailable: return "LiDAR depth stopped responding"
+        }
+    }
+}
+
+enum CoachLiveCountSource: Equatable, Sendable {
+    case spatialBootstrapping
+    case worldCensus
+    case legacy2D(LegacyFallbackReason)
+
+    var diagnosticName: String {
+        switch self {
+        case .spatialBootstrapping: return "BOOTSTRAP"
+        case .worldCensus: return "CENSUS"
+        case .legacy2D: return "2D"
+        }
+    }
+}
+
+enum SpatialTrackingHealth: Equatable, Sendable {
+    case calibrating
+    case healthy
+    case relocalizing
+    case depthUnavailable
+    case trackingLimited
+
+    var diagnosticName: String {
+        switch self {
+        case .calibrating: return "calibrating"
+        case .healthy: return "healthy"
+        case .relocalizing: return "relocalizing"
+        case .depthUnavailable: return "depth-unavailable"
+        case .trackingLimited: return "tracking-limited"
+        }
+    }
+}
+
 /// The ARKit table-capture pipeline's coarse lifecycle state — what
 /// `ARTableCapture` is doing right now, independent of any single frame's
 /// tracking quality. The Lane A staged-loading UI (`StartupStatusOverlay`)
