@@ -645,15 +645,52 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
                 SIMD2(c.x + r, c.y + r), SIMD2(c.x - r, c.y + r)]
     }
 
-    /// Seeds the 3 opponent seat midpoints (anchor-local metres) at the
-    /// canonical edge midpoints of the current plane extent, only if not
-    /// already placed (so re-entering edit mode doesn't reset a drag).
+    /// Seeds the three draggable revealed-area centers from the same guided
+    /// calibration geometry that Live will use. They intentionally sit just
+    /// outside the marked pond, never at the outer extent of ARKit's (often
+    /// much larger) detected plane. Re-entering edit mode preserves a drag.
     private func seedSeatMidpointsIfNeeded() {
-        guard seatMidpoints.isEmpty else { return }
-        let extent = calibrationPlaneAnchor.map { Double(max($0.planeExtent.width, $0.planeExtent.height)) } ?? 0.9
-        seatMidpoints[.left] = SIMD2(-extent / 2, 0)
-        seatMidpoints[.right] = SIMD2(extent / 2, 0)
-        seatMidpoints[.across] = SIMD2(0, -extent / 2)
+        guard seatMidpoints.isEmpty,
+              let planeAnchor = calibrationPlaneAnchor,
+              let handPostA,
+              let handPostB,
+              let pondCornerA,
+              let pondCornerB else { return }
+
+        let markedPond = pondQuad.count == 4 ? pondQuad : [
+            SIMD2(pondCornerA.x, pondCornerA.y),
+            SIMD2(pondCornerB.x, pondCornerA.y),
+            SIMD2(pondCornerB.x, pondCornerB.y),
+            SIMD2(pondCornerA.x, pondCornerB.y),
+        ]
+        let marks = GuidedTableMarks(
+            planeTransform: planeAnchor.transform,
+            handEndpoints: (
+                SIMD2(Float(handPostA.x), Float(handPostA.y)),
+                SIMD2(Float(handPostB.x), Float(handPostB.y))
+            ),
+            pondPolygon: markedPond.map { SIMD2(Float($0.x), Float($0.y)) }
+        )
+        guard let calibration = WorldTableCalibration.guided(marks: marks) else {
+            return
+        }
+
+        let inversePlane = simd_inverse(planeAnchor.transform)
+        func planeLocalCenter(for zone: SemanticZoneID) -> SIMD2<Double>? {
+            guard let polygon = calibration.revealedZonePolygons[zone],
+                  !polygon.isEmpty else { return nil }
+            let tableCenter = polygon.reduce(SIMD2<Float>.zero, +)
+                / Float(polygon.count)
+            let world = calibration.tableToWorld * SIMD4(
+                tableCenter.x, 0, tableCenter.y, 1
+            )
+            let planeLocal = inversePlane * world
+            return SIMD2(Double(planeLocal.x), Double(planeLocal.z))
+        }
+
+        seatMidpoints[.left] = planeLocalCenter(for: .tableRevealedLeft)
+        seatMidpoints[.right] = planeLocalCenter(for: .tableRevealedRight)
+        seatMidpoints[.across] = planeLocalCenter(for: .tableRevealedFar)
     }
 
     /// Every draggable handle's current table point, for `nearestEditHandle`.
@@ -1095,7 +1132,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             }
             return (zone, SIMD2(Float(point.x), Float(point.y)))
         })
-        guard let calibration = WorldTableCalibration.guided(
+        let marks = GuidedTableMarks(
             planeTransform: planeAnchor.transform,
             handEndpoints: (
                 SIMD2(Float(handPostA.x), Float(handPostA.y)),
@@ -1103,7 +1140,8 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             ),
             pondPolygon: markedPond.map { SIMD2(Float($0.x), Float($0.y)) },
             revealedZoneCenters: seatZones
-        ) else {
+        )
+        guard let calibration = WorldTableCalibration.guided(marks: marks) else {
             subtitleLabel.text = "Move the hand row at least 15 cm from the pond, then try again."
             return
         }

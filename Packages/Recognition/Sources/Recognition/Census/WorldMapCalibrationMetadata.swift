@@ -2,11 +2,12 @@ import Foundation
 import simd
 
 /// Platform-neutral metadata stored beside ARKit's opaque world-map archive.
-/// Tile identities and counts are deliberately absent. Version 2 stores the
-/// exact guided polygons; version 1's transform/extent-only records are
-/// intentionally rejected because they may describe the old plane centroid.
+/// Tile identities and counts are deliberately absent. Version 3 stores the
+/// exact guided polygons generated from the pond-adjacent, seat-oriented
+/// layout. Versions 1 and 2 are intentionally rejected: they can contain the
+/// old plane-centroid/outer-plane opponent geometry.
 public struct WorldMapCalibrationMetadata: Codable, Equatable, Sendable {
-    public static let currentVersion = 2
+    public static let currentVersion = 3
 
     public var version: Int
     public var extentX: Float

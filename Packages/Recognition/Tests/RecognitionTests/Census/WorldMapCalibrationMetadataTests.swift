@@ -40,6 +40,18 @@ final class WorldMapCalibrationMetadataTests: XCTestCase {
         )
     }
 
+    func testVersionTwoOuterPlaneGeometryFallsBackToFreshCalibration() {
+        let metadata = WorldMapCalibrationMetadata(
+            version: 2,
+            calibration: Self.calibration()
+        )
+
+        XCTAssertNil(metadata.validatedExtent)
+        XCTAssertNil(
+            metadata.validatedCalibration(tableToWorld: matrix_identity_float4x4)
+        )
+    }
+
     func testInvalidExtentFallsBackToFreshCalibration() {
         var tooSmall = Self.calibration()
         tooSmall.extent = SIMD2(0.2, 0.9)
