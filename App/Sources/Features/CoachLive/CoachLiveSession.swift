@@ -712,6 +712,10 @@ final class CoachLiveSession: Identifiable {
                         try? await Task.sleep(for: Self.pollInterval)
                         continue
                     }
+                    guard arCapture.captureStage != .relocalizing else {
+                        try? await Task.sleep(for: Self.pollInterval)
+                        continue
+                    }
                     var config = TrackerConfig()
                     config.winPredicate = { concealed, melds in
                         ScoringEngine.isWinningShape(Hand(concealedTiles: concealed, melds: melds))
@@ -755,12 +759,27 @@ final class CoachLiveSession: Identifiable {
                         frame.cameraTransform.columns.3.y,
                         frame.cameraTransform.columns.3.z
                     )
-                    self.worldCensusController = WorldCensusController(
-                        lockedPlaneTransform: lockedPlaneTransform,
-                        lockedExtent: Float(planeExtent),
-                        cameraPosition: cameraPosition,
-                        at: sessionStart
-                    )
+                    if let restoredTransform = arCapture.restoredTableOriginTransform,
+                       let restoredExtent = arCapture.restoredTableOriginExtent {
+                        self.worldCensusController = WorldCensusController(
+                            restoredTableToWorld: restoredTransform,
+                            extent: restoredExtent,
+                            at: sessionStart
+                        )
+                    } else {
+                        self.worldCensusController = WorldCensusController(
+                            lockedPlaneTransform: lockedPlaneTransform,
+                            lockedExtent: Float(planeExtent),
+                            cameraPosition: cameraPosition,
+                            at: sessionStart
+                        )
+                    }
+                    if let origin = self.worldCensusController?.tableOrigin {
+                        arCapture.updateTableOrigin(
+                            transform: origin.tableToWorld,
+                            extent: origin.extent
+                        )
+                    }
                     if let persisted {
                         newTracker.restore(persisted.remapped(toNowMono: sessionStart), at: sessionStart)
                         let state = newTracker.state
@@ -1709,6 +1728,10 @@ final class CoachLiveSession: Identifiable {
             atNormalizedImagePoint: CGPoint(x: normalized.x, y: normalized.y)
         ) else { return }
         controller.recenterPond(at: world)
+        arCapture.updateTableOrigin(
+            transform: controller.tableOrigin.tableToWorld,
+            extent: controller.tableOrigin.extent
+        )
         isRecenterPondActive = false
         let state = presentationState(preserving: tracker?.state ?? .empty)
         applyState(state, pending: tracker?.pendingHandEnd, log: tracker?.events ?? [])
@@ -1801,6 +1824,10 @@ final class CoachLiveSession: Identifiable {
         diagnostics.worldCensus = controller.census.diagnostics
         diagnostics.worldCensusDepthRejections = controller.diagnostics.depthRejections
         diagnostics.worldCensusMilliseconds = controller.diagnostics.lastIngestMilliseconds
+        arCapture?.updateTableOrigin(
+            transform: controller.tableOrigin.tableToWorld,
+            extent: controller.tableOrigin.extent
+        )
         let liveTracks = snapshot.tracks.filter {
             $0.lifecycle == .confirmed
                 || $0.lifecycle == .stale

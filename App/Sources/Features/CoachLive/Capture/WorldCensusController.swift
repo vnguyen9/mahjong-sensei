@@ -38,6 +38,19 @@ final class WorldCensusController {
         self.zones = Self.semanticZones(extent: origin.extent)
     }
 
+    init(restoredTableToWorld: simd_float4x4,
+         extent: SIMD2<Float>,
+         at time: TimeInterval) {
+        let origin = TableOriginState(
+            restoredTableToWorld: restoredTableToWorld,
+            extent: extent,
+            at: time
+        )
+        self.tableOrigin = origin
+        self.worldToTable = origin.worldToTable
+        self.zones = Self.semanticZones(extent: origin.extent)
+    }
+
     var snapshot: CensusSnapshot {
         census.snapshot(at: CACurrentMediaTime())
     }

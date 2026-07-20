@@ -54,6 +54,22 @@ public struct TableOriginState: Sendable {
         self.isFrozen = false
     }
 
+    /// Rehydrates calibration only. A restored origin is frozen so a fresh
+    /// table's early tile cloud cannot silently move a user-calibrated pond.
+    public init(restoredTableToWorld: simd_float4x4,
+                extent: SIMD2<Float>,
+                at time: TimeInterval) {
+        self.tableToWorld = restoredTableToWorld
+        self.extent = SIMD2(
+            Self.clamp(extent.x),
+            Self.clamp(extent.y)
+        )
+        self.lockedAt = time
+        self.hasTileCloudFit = true
+        self.autoFitDisabled = true
+        self.isFrozen = true
+    }
+
     /// Fits translation and 5th–95th-percentile bounds after at least eight
     /// confirmed world tracks. The first fit may replace the plane extent;
     /// subsequent fits during the 30-second window only expand it.

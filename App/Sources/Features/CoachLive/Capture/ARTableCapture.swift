@@ -1,6 +1,7 @@
 import ARKit
 import AVFoundation
 import Observation
+import Recognition
 import os
 
 /// Owns the ARKit world-tracking session for Coach Live's table capture:
@@ -49,6 +50,11 @@ final class ARTableCapture: NSObject {
     /// the real table. `nil` until `.tableLocked`.
     private(set) var lockedPlaneExtent: Double?
 
+    /// Non-nil only while a saved world map has successfully supplied the
+    /// named table-origin calibration for this launch.
+    private(set) var restoredTableOriginTransform: simd_float4x4?
+    private(set) var restoredTableOriginExtent: SIMD2<Float>?
+
     // MARK: - Per-frame state (polled, not observed)
 
     // `@ObservationIgnored` on both: these are manually synchronized via
@@ -84,6 +90,13 @@ final class ARTableCapture: NSObject {
     /// any `session.run(_:)` re-configuration (see that method's doc — a
     /// config re-run can silently reset the torch to off).
     private var pendingTorchState: Bool?
+    private var tableOriginAnchorID: UUID?
+    private var tableOriginTransform: simd_float4x4?
+    private var tableOriginExtent: SIMD2<Float>?
+    private var mappingIsSaveable = false
+    private var restoringWorldMap = false
+    private var relocalizationTimeoutTask: Task<Void, Never>?
+    private var worldMapSaveTask: Task<Void, Never>?
 
     /// True once `ARWorldTrackingConfiguration` reports support — false on
     /// the Simulator (and any device lacking the needed sensors), which is
@@ -109,15 +122,46 @@ final class ARTableCapture: NSObject {
         captureStage = .starting
         lockedPlaneTransform = nil
         lockedPlaneExtent = nil
+        restoredTableOriginTransform = nil
+        restoredTableOriginExtent = nil
         planeLockPolicy = nil
         planeDetectionRequested = true
-        session.run(Self.makeConfiguration(planeDetection: true))
+        mappingIsSaveable = false
+
+        if let restored = ARWorldMapStore.load() {
+            restoringWorldMap = true
+            restoredTableOriginTransform = restored.tableToWorld
+            restoredTableOriginExtent = restored.extent
+            lockedPlaneTransform = restored.tableToWorld
+            lockedPlaneExtent = Double(max(restored.extent.x, restored.extent.y))
+            tableOriginExtent = restored.extent
+            tableOriginTransform = restored.tableToWorld
+            tableOriginAnchorID = restored.worldMap.anchors.first {
+                $0.name == ARWorldMapStore.tableOriginAnchorName
+            }?.identifier
+            planeDetectionRequested = false
+            stageBeforeRelocalizing = .tableLocked
+            captureStage = .relocalizing
+            let configuration = Self.makeConfiguration(
+                planeDetection: false,
+                initialWorldMap: restored.worldMap
+            )
+            session.run(
+                configuration,
+                options: [.resetTracking, .removeExistingAnchors]
+            )
+            scheduleRelocalizationTimeout()
+        } else {
+            restoringWorldMap = false
+            session.run(Self.makeConfiguration(planeDetection: true))
+        }
     }
 
     /// Pauses the underlying `ARSession` (e.g. app backgrounding). Cheap
     /// and reversible — `resume()` continues the same world-tracking
     /// session rather than re-finding the table from scratch.
     func pause() {
+        saveWorldMapIfEligible()
         session.pause()
     }
 
@@ -176,11 +220,46 @@ final class ARTableCapture: NSObject {
         )
     }
 
-    private static func makeConfiguration(planeDetection: Bool) -> ARWorldTrackingConfiguration {
+    /// Keeps exactly one named AR anchor for the fitted table origin. Tile
+    /// tracks remain ordinary census data and are never promoted to ARAnchor.
+    func updateTableOrigin(
+        transform: simd_float4x4,
+        extent: SIMD2<Float>
+    ) {
+        if let current = tableOriginTransform,
+           Self.transformsAreNear(current, transform),
+           simd_length(
+               tableOriginExtent.map { $0 - extent }
+                   ?? SIMD2<Float>(repeating: 1)
+           ) < 0.001 {
+            return
+        }
+        if let tableOriginAnchorID,
+           let existing = session.currentFrame?.anchors.first(where: {
+               $0.identifier == tableOriginAnchorID
+           }) {
+            session.remove(anchor: existing)
+        }
+        let anchor = ARAnchor(
+            name: ARWorldMapStore.tableOriginAnchorName,
+            transform: transform
+        )
+        session.add(anchor: anchor)
+        tableOriginAnchorID = anchor.identifier
+        tableOriginTransform = transform
+        tableOriginExtent = extent
+        scheduleWorldMapSave()
+    }
+
+    private static func makeConfiguration(
+        planeDetection: Bool,
+        initialWorldMap: ARWorldMap? = nil
+    ) -> ARWorldTrackingConfiguration {
         let configuration = ARWorldTrackingConfiguration()
         configuration.planeDetection = planeDetection ? [.horizontal] : []
         configuration.worldAlignment = .gravity
         configuration.environmentTexturing = .none
+        configuration.initialWorldMap = initialWorldMap
         // Depth is opt-in and LiDAR-only. Prefer ARKit's temporally smoothed
         // estimate, then fall back to per-frame scene depth. This helper is
         // reused for start, post-lock reconfiguration, and resume so the
@@ -202,7 +281,9 @@ final class ARTableCapture: NSObject {
     /// locks.
     private func processFrame(cameraTransform: simd_float4x4,
                               candidates: [PlaneLockPolicy.Candidate],
+                              mappingIsSaveable: Bool,
                               timestamp: TimeInterval) {
+        self.mappingIsSaveable = mappingIsSaveable
         if captureStage == .starting {
             captureStage = .findingTable
         }
@@ -227,6 +308,77 @@ final class ARTableCapture: NSObject {
         session.run(Self.makeConfiguration(planeDetection: false))
         if let pendingTorchState {
             setTorch(pendingTorchState)
+        }
+    }
+
+    private func scheduleRelocalizationTimeout() {
+        relocalizationTimeoutTask?.cancel()
+        relocalizationTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard !Task.isCancelled,
+                  let self,
+                  self.restoringWorldMap,
+                  self.captureStage == .relocalizing else { return }
+            Self.logger.notice("saved world map did not relocalize in 8s; starting fresh")
+            ARWorldMapStore.discard()
+            self.beginFreshTableLock()
+        }
+    }
+
+    private func beginFreshTableLock() {
+        restoringWorldMap = false
+        relocalizationTimeoutTask?.cancel()
+        relocalizationTimeoutTask = nil
+        captureStage = .starting
+        stageBeforeRelocalizing = nil
+        lockedPlaneTransform = nil
+        lockedPlaneExtent = nil
+        restoredTableOriginTransform = nil
+        restoredTableOriginExtent = nil
+        tableOriginAnchorID = nil
+        tableOriginTransform = nil
+        tableOriginExtent = nil
+        planeLockPolicy = nil
+        planeDetectionRequested = true
+        mappingIsSaveable = false
+        session.run(
+            Self.makeConfiguration(planeDetection: true),
+            options: [.resetTracking, .removeExistingAnchors]
+        )
+    }
+
+    private func scheduleWorldMapSave() {
+        worldMapSaveTask?.cancel()
+        worldMapSaveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            self?.saveWorldMapIfEligible()
+        }
+    }
+
+    private func saveWorldMapIfEligible() {
+        guard mappingIsSaveable, let extent = tableOriginExtent else { return }
+        session.getCurrentWorldMap { worldMap, error in
+            guard let worldMap, error == nil else {
+                Self.logger.error("unable to capture ARWorldMap")
+                return
+            }
+            do {
+                try ARWorldMapStore.save(worldMap: worldMap, extent: extent)
+            } catch {
+                Self.logger.error(
+                    "unable to archive ARWorldMap: \(String(describing: error), privacy: .public)"
+                )
+            }
+        }
+    }
+
+    private static func transformsAreNear(
+        _ lhs: simd_float4x4,
+        _ rhs: simd_float4x4
+    ) -> Bool {
+        (0 ..< 4).allSatisfy {
+            simd_length(lhs[$0] - rhs[$0]) < 0.001
         }
     }
 
@@ -286,24 +438,39 @@ extension ARTableCapture: ARSessionDelegate {
 
         let cameraTransform = camera.transform
         let timestamp = frame.timestamp
+        let mappingIsSaveable = frame.worldMappingStatus == .extending
+            || frame.worldMappingStatus == .mapped
         let candidates = frame.anchors.compactMap { anchor -> PlaneLockPolicy.Candidate? in
             guard let plane = anchor as? ARPlaneAnchor, plane.alignment == .horizontal else { return nil }
             return Self.candidate(for: plane)
         }
         Task { @MainActor [weak self] in
-            self?.processFrame(cameraTransform: cameraTransform, candidates: candidates, timestamp: timestamp)
+            self?.processFrame(
+                cameraTransform: cameraTransform,
+                candidates: candidates,
+                mappingIsSaveable: mappingIsSaveable,
+                timestamp: timestamp
+            )
         }
     }
 
     nonisolated func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
-        let isRelocalizing: Bool
-        if case .limited(.relocalizing) = camera.trackingState {
-            isRelocalizing = true
-        } else {
-            isRelocalizing = false
-        }
+        let trackingState = camera.trackingState
         Task { @MainActor [weak self] in
-            self?.setRelocalizing(isRelocalizing)
+            guard let self else { return }
+            switch trackingState {
+            case .normal:
+                if self.restoringWorldMap {
+                    self.restoringWorldMap = false
+                    self.relocalizationTimeoutTask?.cancel()
+                    self.relocalizationTimeoutTask = nil
+                }
+                self.setRelocalizing(false)
+            case .limited(.relocalizing):
+                self.setRelocalizing(true)
+            default:
+                break
+            }
         }
     }
 
@@ -314,9 +481,8 @@ extension ARTableCapture: ARSessionDelegate {
     }
 
     nonisolated func sessionInterruptionEnded(_ session: ARSession) {
-        Task { @MainActor [weak self] in
-            self?.setRelocalizing(false)
-        }
+        // Wait for cameraDidChangeTrackingState(.normal); leaving the detour
+        // before ARKit trusts the pose would make visibility misses unsafe.
     }
 
     nonisolated func session(_ session: ARSession, didFailWithError error: Error) {
