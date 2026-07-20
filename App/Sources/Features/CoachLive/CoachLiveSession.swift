@@ -169,6 +169,13 @@ final class CoachLiveSession: Identifiable {
     private var depthMissingSince: TimeInterval?
     private var depthRestartAttempted = false
 
+    /// Continuity counters make the calibration → Live handoff observable in
+    /// DEBUG without changing any live behavior. A future continuous-flow
+    /// change must keep the session ID and pipeline generation stable while
+    /// only this revision changes for an accepted calibration edit.
+    private(set) var spatialPipelineGeneration = 0
+    private(set) var calibrationRevision = 0
+
     /// True once the loop's per-tick `MotionSample.meanLuma` has read
     /// "dark" for `DarkTableDetector`'s sustain window — drives
     /// `LiveFeedPane`'s "Dark table — turn on flash?" chip. Never set on the
@@ -237,29 +244,207 @@ final class CoachLiveSession: Identifiable {
     var showARCalibration = false
     var isRecenterPondActive = false
 
+    private struct CalibrationDraft {
+        let acceptedCalibration: WorldTableCalibration?
+        let acceptedLegacyGeometry: TrackerConfig.TableGeometry?
+        let acceptedCountSource: CoachLiveCountSource
+        let acceptedHealth: SpatialTrackingHealth
+        let isInitialSetup: Bool
+        let sessionID: UUID?
+        let pipelineGeneration: Int
+        let resetTrackingRunCount: Int
+        let removeExistingAnchorsRunCount: Int
+    }
+    private var calibrationDraft: CalibrationDraft?
+    private var calibrationHasBeenFinalized = false
+    private var needsFreshARStartAfterCalibrationCancel = false
+    private var calibrationDecision = "FRESH"
+
     @MainActor
     func beginARCalibration() {
+        guard !showARCalibration else { return }
+        let ar = arCapture?.sessionDiagnostics
+        calibrationDraft = CalibrationDraft(
+            acceptedCalibration: worldTableCalibration,
+            acceptedLegacyGeometry: calibratedTableGeometry,
+            acceptedCountSource: countSource,
+            acceptedHealth: spatialTrackingHealth,
+            isInitialSetup: worldTableCalibration == nil && !calibrationHasBeenFinalized,
+            sessionID: ar?.sessionID,
+            pipelineGeneration: spatialPipelineGeneration,
+            resetTrackingRunCount: ar?.resetTrackingRunCount ?? 0,
+            removeExistingAnchorsRunCount: ar?.removeExistingAnchorsRunCount ?? 0
+        )
+        // Draft calibration is never allowed to publish legacy geometry/counts
+        // alongside spatial review. The calibration view owns its preview;
+        // Live remains bootstrap-empty until final acceptance.
+        countSource = .spatialBootstrapping
+        spatialTrackingHealth = .calibrating
+        calibrationDecision = "FRESH"
+        publishBootstrapState()
+        refreshSpatialContinuityDiagnostics()
         showARCalibration = true
     }
 
     @MainActor
-    func finishARCalibration(_ calibration: WorldTableCalibration?) {
-        if let calibration {
-            arCapture?.invalidatePersistedCalibration()
-            worldTableCalibration = calibration
-            calibratedTableGeometry = Self.legacyGeometry(
-                from: calibration,
-                mySeatWind: seatWind
-            )
-            if let controller = worldCensusController {
-                controller.apply(calibration, at: CACurrentMediaTime())
-            }
-            arCapture?.updateTableCalibration(calibration)
-            recountRequest = .fullTable
-            countSource = .spatialBootstrapping
-            spatialTrackingHealth = .calibrating
+    var calibrationRestoreStatus: ARTableCalibrationRestoreStatus {
+        arCapture?.calibrationRestoreStatus ?? .none
+    }
+
+    /// Adopts a world-map calibration only after `ARTableCapture` has seen the
+    /// named origin in a normal-tracking relocalized frame. This is an
+    /// acceptance of existing persisted calibration, never a new manual save.
+    @discardableResult
+    @MainActor
+    func adoptRestoredARCalibrationIfAvailable() -> Bool {
+        guard calibrationRestoreStatus == .restored,
+              let calibration = arCapture?.restoredTableCalibration else { return false }
+        calibrationRevision += 1
+        worldTableCalibration = calibration
+        calibratedTableGeometry = Self.legacyGeometry(from: calibration, mySeatWind: seatWind)
+        worldCensusController?.apply(calibration, at: CACurrentMediaTime())
+        calibrationHasBeenFinalized = true
+        calibrationDecision = "RESTORED"
+        recountRequest = .fullTable
+        if ARTableCapture.supportsSceneDepth {
+            countSource = .worldCensus
+            spatialTrackingHealth = .healthy
+        } else {
+            countSource = .legacy2D(.depthUnsupported)
+            spatialTrackingHealth = .depthUnavailable
         }
+        startupStage = .ready
         showARCalibration = false
+        let state = presentationState(preserving: tracker?.state ?? .empty)
+        applyState(state, pending: tracker?.pendingHandEnd, log: tracker?.events ?? [])
+        refreshSpatialContinuityDiagnostics()
+        Self.logger.notice("AR calibration decision=RESTORED source=worldMap")
+        return true
+    }
+
+    /// Restore cancellation has no draft to roll back. Tear down exactly like
+    /// an explicit flow exit, leaving the accepted archive untouched.
+    func cancelARRestore() { end() }
+
+    @MainActor
+    func applyARCalibrationDraft(_ calibration: WorldTableCalibration) {
+        guard calibrationDraft != nil else { return }
+        applyCalibration(calibration, persist: false)
+        countSource = .spatialBootstrapping
+        spatialTrackingHealth = .calibrating
+        publishBootstrapState()
+    }
+
+    @MainActor
+    func finishARCalibration(_ calibration: WorldTableCalibration?) {
+        guard let draft = calibrationDraft else {
+            showARCalibration = false
+            return
+        }
+        guard let calibration else {
+            cancelARCalibration(draft)
+            return
+        }
+
+        // Apply once more so confirmation always finalizes the last displayed
+        // review geometry, then invalidate/replace persistence exactly once.
+        applyCalibration(calibration, persist: false)
+        arCapture?.invalidatePersistedCalibration()
+        arCapture?.updateTableCalibration(calibration)
+        recountRequest = .fullTable
+        calibrationHasBeenFinalized = true
+        if ARTableCapture.supportsSceneDepth {
+            countSource = .worldCensus
+            spatialTrackingHealth = .healthy
+        } else {
+            countSource = .legacy2D(.depthUnsupported)
+            spatialTrackingHealth = .depthUnavailable
+        }
+        startupStage = .ready
+        verifyCalibrationContinuity(from: draft, phase: "finalize")
+        calibrationDraft = nil
+        showARCalibration = false
+        let state = presentationState(preserving: tracker?.state ?? .empty)
+        applyState(state, pending: tracker?.pendingHandEnd, log: tracker?.events ?? [])
+        refreshSpatialContinuityDiagnostics()
+        Self.logger.notice("AR calibration decision=FRESH source=guidedMarks")
+    }
+
+    /// Cancels an initial guided run and makes the setup card's next Start a
+    /// genuinely fresh loop. Live recalibration instead restores its accepted
+    /// geometry/controller/source in place.
+    @MainActor
+    func cancelInitialARCalibration() {
+        guard let draft = calibrationDraft, draft.isInitialSetup else { return }
+        cancelARCalibration(draft)
+    }
+
+    @MainActor
+    private func cancelARCalibration(_ draft: CalibrationDraft) {
+        if draft.isInitialSetup {
+            showARCalibration = false
+            calibrationDraft = nil
+            calibrationHasBeenFinalized = false
+            loopTask?.cancel()
+            loopTask = nil
+            tracker = nil
+            worldCensusController = nil
+            worldTableCalibration = draft.acceptedCalibration
+            calibratedTableGeometry = draft.acceptedLegacyGeometry
+            isEnded = false
+            isPaused = false
+            usingFallbackCapture = false
+            arCapture?.discardInMemoryUnacceptedOrigin()
+            arCapture?.pause()
+            needsFreshARStartAfterCalibrationCancel = true
+            return
+        }
+        if let calibration = draft.acceptedCalibration {
+            applyCalibration(calibration, persist: false)
+        } else {
+            worldTableCalibration = nil
+            calibratedTableGeometry = draft.acceptedLegacyGeometry
+        }
+        countSource = draft.acceptedCountSource
+        spatialTrackingHealth = draft.acceptedHealth
+        calibrationDraft = nil
+        showARCalibration = false
+        let state = presentationState(preserving: tracker?.state ?? .empty)
+        applyState(state, pending: tracker?.pendingHandEnd, log: tracker?.events ?? [])
+        refreshSpatialContinuityDiagnostics()
+    }
+
+    @MainActor
+    private func applyCalibration(_ calibration: WorldTableCalibration, persist: Bool) {
+        calibrationRevision += 1
+        worldTableCalibration = calibration
+        calibratedTableGeometry = Self.legacyGeometry(from: calibration, mySeatWind: seatWind)
+        worldCensusController?.apply(calibration, at: CACurrentMediaTime())
+        arCapture?.updateTableCalibration(calibration, persist: persist)
+        refreshSpatialContinuityDiagnostics()
+    }
+
+    @MainActor
+    private func publishBootstrapState() {
+        guard let tracker else { return }
+        let state = CensusStateAdapter.makeBootstrapState(preserving: tracker.state)
+        applyState(state, pending: tracker.pendingHandEnd, log: tracker.events)
+    }
+
+    @MainActor
+    private func verifyCalibrationContinuity(from draft: CalibrationDraft, phase: String) {
+        guard let capture = arCapture else { return }
+        let current = capture.sessionDiagnostics
+        let continuous = current.sessionID == draft.sessionID
+            && spatialPipelineGeneration == draft.pipelineGeneration
+            && current.resetTrackingRunCount == draft.resetTrackingRunCount
+            && current.removeExistingAnchorsRunCount == draft.removeExistingAnchorsRunCount
+        guard !continuous else { return }
+        let message = "AR continuity violation at \(phase): session/pipeline/reset changed during calibration"
+        Self.logger.error("\(message, privacy: .public)")
+        #if DEBUG
+        assertionFailure(message)
+        #endif
     }
 
     /// User-confirmed table geometry from the ARKit-native calibration flow
@@ -407,6 +592,12 @@ final class CoachLiveSession: Identifiable {
     /// stays the original stub — assign the winds and let `CoachLiveMock`
     /// drive the published state directly.
     func begin(roundWind: Wind, seatWind: Wind) {
+        if needsFreshARStartAfterCalibrationCancel {
+            MainActor.assumeIsolated { arCapture?.start() }
+            needsFreshARStartAfterCalibrationCancel = false
+        }
+        isEnded = false
+        isPaused = false
         self.roundWind = roundWind
         self.seatWind = seatWind
         phase = .rest
@@ -671,6 +862,7 @@ final class CoachLiveSession: Identifiable {
     private func startARLoop(
         recognizerProvider: @escaping @Sendable () async -> any Recognizer
     ) {
+        spatialPipelineGeneration += 1
         let loopStart = CACurrentMediaTime()
         let arLockDeadline = loopStart + 25
 
@@ -692,6 +884,7 @@ final class CoachLiveSession: Identifiable {
                     continue
                 }
                 self.diagnostics.loopTicks += 1
+                self.refreshSpatialContinuityDiagnostics(capture: arCapture)
 
                 // Startup overlay: `.starting` → `.findingTable` the instant
                 // ARKit is delivering frames and hunting for the table.
@@ -773,7 +966,9 @@ final class CoachLiveSession: Identifiable {
                     newTracker.waitImpactAnnotator = Self.waitImpactAnnotator
                     self.tracker = newTracker
                     self.advisorCache = AdvisorCache()
-                    self.startupStage = .loadingDetector
+                    if !self.calibrationHasBeenFinalized {
+                        self.startupStage = .loadingDetector
+                    }
                     self.zoneLastSeenOnScreen = [:]
                     self.zoneEverHadTracks = []
                     self.zoneLastPromptedAt = [:]
@@ -1076,6 +1271,7 @@ final class CoachLiveSession: Identifiable {
                             ],
                             recognizerSucceeded: fullRecognizerSucceeded,
                             trackingIsNormal: arCapture.captureStage == .tracking,
+                            allowsQualifiedMisses: self.calibrationDraft == nil,
                             at: now
                         )
                         self.updateWorldCensusDiagnostics()
@@ -1188,6 +1384,7 @@ final class CoachLiveSession: Identifiable {
                             coverageRects: censusCoverageRects,
                             recognizerSucceeded: attemptedCrop && cropRecognizerSucceeded,
                             trackingIsNormal: arCapture.captureStage == .tracking,
+                            allowsQualifiedMisses: self.calibrationDraft == nil,
                             at: now
                         )
                         self.updateWorldCensusDiagnostics()
@@ -1875,6 +2072,9 @@ final class CoachLiveSession: Identifiable {
         if let calibration = controller.calibration {
             arCapture.updateTableCalibration(calibration)
         }
+        // Geometry, ownership, ROI, and overlay all now point at the new
+        // origin; request exactly one still-frame recount to refresh evidence.
+        recountRequest = .fullTable
         isRecenterPondActive = false
         let state = presentationState(preserving: tracker?.state ?? .empty)
         applyState(state, pending: tracker?.pendingHandEnd, log: tracker?.events ?? [])
@@ -1974,9 +2174,10 @@ final class CoachLiveSession: Identifiable {
         diagnostics.worldCensusMissing = snapshot.tracks.filter {
             $0.lifecycle == .temporarilyMissing
         }.count
-        if countSource == .spatialBootstrapping,
+        if calibrationHasBeenFinalized,
+           calibrationDraft == nil,
+           countSource == .spatialBootstrapping,
            controller.calibration != nil,
-           diagnostics.worldCensusConfirmed > 0,
            spatialTrackingHealth != .depthUnavailable,
            spatialTrackingHealth != .relocalizing {
             countSource = .worldCensus
@@ -1994,8 +2195,12 @@ final class CoachLiveSession: Identifiable {
         diagnostics.worldCensusCalibrationSource =
             controller.calibration?.source.rawValue ?? "unmarked"
         diagnostics.worldCensusMilliseconds = controller.diagnostics.lastIngestMilliseconds
+        refreshSpatialContinuityDiagnostics()
         if let calibration = controller.calibration {
-            arCapture?.updateTableCalibration(calibration)
+            arCapture?.updateTableCalibration(
+                calibration,
+                persist: calibrationDraft == nil
+            )
         } else {
             arCapture?.updateTableOrigin(
                 transform: controller.tableOrigin.tableToWorld,
@@ -2027,8 +2232,29 @@ final class CoachLiveSession: Identifiable {
             diagnostics.worldCensusDepthSummary = "—"
         }
         Self.logger.debug(
-            "census source=\(self.countSource.diagnosticName, privacy: .public) health=\(self.spatialTrackingHealth.diagnosticName, privacy: .public) tracks=\(snapshot.tracks.count, privacy: .public) tentative=\(self.diagnostics.worldCensusTentative, privacy: .public) confirmed=\(self.diagnostics.worldCensusConfirmed, privacy: .public) stale=\(self.diagnostics.worldCensusStale, privacy: .public) missing=\(self.diagnostics.worldCensusMissing, privacy: .public) depthAcceptance=\(self.diagnostics.worldCensusDepthAcceptance, privacy: .public) reprojectionPx=\(self.diagnostics.worldCensusAnchorErrorPixels, privacy: .public) ms=\(self.diagnostics.worldCensusMilliseconds, privacy: .public)"
+            "census source=\(self.countSource.diagnosticName, privacy: .public) health=\(self.spatialTrackingHealth.diagnosticName, privacy: .public) tracks=\(snapshot.tracks.count, privacy: .public) tentative=\(self.diagnostics.worldCensusTentative, privacy: .public) confirmed=\(self.diagnostics.worldCensusConfirmed, privacy: .public) stale=\(self.diagnostics.worldCensusStale, privacy: .public) missing=\(self.diagnostics.worldCensusMissing, privacy: .public) depthAcceptance=\(self.diagnostics.worldCensusDepthAcceptance, privacy: .public) reprojectionPx=\(self.diagnostics.worldCensusAnchorErrorPixels, privacy: .public) ms=\(self.diagnostics.worldCensusMilliseconds, privacy: .public) arSession=\(self.diagnostics.spatialSessionID, privacy: .public) pipeline=\(self.diagnostics.spatialPipelineGeneration, privacy: .public) calibration=\(self.diagnostics.calibrationRevision, privacy: .public) resets=\(self.diagnostics.resetTrackingRunCount, privacy: .public)"
         )
+    }
+
+    /// Mirrors ARKit configuration facts into the existing HUD/Console
+    /// diagnostics. It deliberately observes rather than drives the capture
+    /// owner, so adding this audit seam cannot reset or reconfigure ARKit.
+    @MainActor
+    private func refreshSpatialContinuityDiagnostics(
+        capture: ARTableCapture? = nil
+    ) {
+        guard let capture = capture ?? arCapture else { return }
+        let ar = capture.sessionDiagnostics
+        diagnostics.spatialSessionID = String(ar.sessionID.uuidString.prefix(8))
+        diagnostics.spatialPipelineGeneration = spatialPipelineGeneration
+        diagnostics.calibrationRevision = calibrationRevision
+        diagnostics.calibrationDecision = calibrationDecision
+        diagnostics.configurationRunCount = ar.configurationRunCount
+        diagnostics.resetTrackingRunCount = ar.resetTrackingRunCount
+        diagnostics.removeExistingAnchorsRunCount = ar.removeExistingAnchorsRunCount
+        diagnostics.lastConfigurationUsedReset = ar.lastRunUsedResetTracking
+            || ar.lastRunUsedRemoveExistingAnchors
+        diagnostics.lastConfigurationReason = ar.lastReason?.rawValue ?? "—"
     }
 
     private func resetSpatialTrackingState() {
@@ -2706,4 +2932,15 @@ struct LiveDiagnostics {
     var worldCensusMilliseconds: Double = 0
     var worldCensusZoneSummary = "—"
     var worldCensusDepthSummary = "—"
+    /// Calibration-to-Live continuity audit. These values come from
+    /// `ARTableCapture`'s run wrapper; they never control ARKit behavior.
+    var spatialSessionID = "—"
+    var spatialPipelineGeneration = 0
+    var calibrationRevision = 0
+    var calibrationDecision = "—"
+    var configurationRunCount = 0
+    var resetTrackingRunCount = 0
+    var removeExistingAnchorsRunCount = 0
+    var lastConfigurationUsedReset = false
+    var lastConfigurationReason = "—"
 }

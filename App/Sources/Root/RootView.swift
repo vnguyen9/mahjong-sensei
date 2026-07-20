@@ -28,6 +28,10 @@ struct RootView: View {
             case "cheatsheet": NavigationStack { ScoringCheatSheetView() }
             case "winds":      NavigationStack { WindExplainerView() }
             case "rules":      NavigationStack { HouseRulesView() }
+            #if DEBUG
+            case "game", "game-reaction", "game-result", "game-inspector":
+                MahjongGameDebugScene.view(for: forced) ?? AnyView(MainTabView())
+            #endif
             default:           MainTabView()
             }
         } else if app.hasOnboarded {

@@ -24,9 +24,8 @@ struct CoachLiveSetupView: View {
     /// session →" option below Start. Loaded once in `.task`; nil on a
     /// clean setup card (no prior kill, or the archive aged out).
     @State private var resumable: PersistedCoachLiveSession?
-    /// Fresh start: winds are stashed on the session; the caller advances to
-    /// calibration and calls `session.begin(...)` only once calibration
-    /// completes (so the calibrated geometry is set before the tracker builds).
+    /// Fresh start: winds are stashed on the session; the caller starts one
+    /// continuous AR/census pipeline before moving into guided calibration.
     let onStart: () -> Void
     /// Resume: `session.resume(...)` has already spun the loop up here, so the
     /// caller goes straight to the live screen, skipping calibration.
@@ -53,8 +52,8 @@ struct CoachLiveSetupView: View {
                 // reads as instantly registered on slow phones.
                 GoldButton(isStarting ? "Starting…" : "Start tracking →") {
                     isStarting = true
-                    // Stash winds; defer begin() until calibration completes so
-                    // the calibrated geometry is set before the tracker builds.
+                    // Stash winds; the flow starts one continuous AR/census
+                    // pipeline before presenting guided calibration.
                     session.seatWind = seatWind
                     session.roundWind = roundWind
                     onStart()
