@@ -37,6 +37,14 @@ public struct ARTableFrame {
     /// no light estimate is available yet (e.g. the very first frames),
     /// matching the `ARFrame` API's own optionality.
     public let lightLux: Double?
+    /// LiDAR scene depth captured for this exact camera frame. The buffer is
+    /// lower-resolution than `pixelBuffer` and stores metres as Float32.
+    /// `nil` on unsupported devices and frames where ARKit has no estimate.
+    public let depthMap: CVPixelBuffer?
+    /// Per-depth-pixel `ARConfidenceLevel` values for `depthMap`. Kept
+    /// optional independently because a depth estimate without confidence
+    /// is not trustworthy enough to create a spatial census observation.
+    public let depthConfidence: CVPixelBuffer?
     /// `ARFrame.timestamp` — monotonic seconds, NOT wall-clock (the same
     /// `CACurrentMediaTime()`-comparable epoch the rest of the tracking
     /// pipeline uses for `TableTracker.ingest(at:)`).
@@ -47,12 +55,16 @@ public struct ARTableFrame {
                 intrinsics: simd_float3x3,
                 imageResolution: CGSize,
                 lightLux: Double?,
+                depthMap: CVPixelBuffer? = nil,
+                depthConfidence: CVPixelBuffer? = nil,
                 timestamp: TimeInterval) {
         self.pixelBuffer = pixelBuffer
         self.cameraTransform = cameraTransform
         self.intrinsics = intrinsics
         self.imageResolution = imageResolution
         self.lightLux = lightLux
+        self.depthMap = depthMap
+        self.depthConfidence = depthConfidence
         self.timestamp = timestamp
     }
 

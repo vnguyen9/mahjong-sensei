@@ -162,9 +162,15 @@ final class ARTableCapture: NSObject {
         configuration.planeDetection = planeDetection ? [.horizontal] : []
         configuration.worldAlignment = .gravity
         configuration.environmentTexturing = .none
-        // No `frameSemantics` opt-in (default `[]`) — this capture path
-        // needs neither scene depth nor person segmentation, and both cost
-        // real GPU/thermal budget.
+        // Depth is opt-in and LiDAR-only. Prefer ARKit's temporally smoothed
+        // estimate, then fall back to per-frame scene depth. This helper is
+        // reused for start, post-lock reconfiguration, and resume so the
+        // selected semantic cannot be accidentally dropped.
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            configuration.frameSemantics.insert(.smoothedSceneDepth)
+        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics.insert(.sceneDepth)
+        }
         return configuration
     }
 
@@ -246,11 +252,14 @@ extension ARTableCapture: ARSessionDelegate {
     /// bookkeeping over to the main actor as plain `Sendable` values.
     nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
         let camera = frame.camera
+        let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth
         let tableFrame = ARTableFrame(pixelBuffer: frame.capturedImage,
                                       cameraTransform: camera.transform,
                                       intrinsics: camera.intrinsics,
                                       imageResolution: camera.imageResolution,
                                       lightLux: frame.lightEstimate.map { Double($0.ambientIntensity) },
+                                      depthMap: sceneDepth?.depthMap,
+                                      depthConfidence: sceneDepth?.confidenceMap,
                                       timestamp: frame.timestamp)
         frameLock.lock()
         _latestFrame = tableFrame
