@@ -218,6 +218,9 @@ final class CoachLiveSession: Identifiable {
     /// Dev-only diagnostics the loop records every tick — powers the
     /// triple-tap debug HUD; see `LiveDiagnostics`.
     var diagnostics = LiveDiagnostics()
+    /// Shadow 3D census. It receives the exact detections already used by
+    /// `TableTracker`; it never schedules model work of its own.
+    private(set) var worldCensusController: WorldCensusController?
     /// `tracker.diagnostics` passthrough for the HUD — `nil` tracker (mock
     /// path) reads as all-zero rather than requiring the HUD to unwrap.
     var trackerDiagnostics: Recognition.TrackerDiagnostics { tracker?.diagnostics ?? Recognition.TrackerDiagnostics() }
@@ -698,7 +701,7 @@ final class CoachLiveSession: Identifiable {
                 // begin/restore the session. Nothing above this point ever
                 // ingests — `self.tracker` staying nil IS "still hunting."
                 if self.tracker == nil {
-                    guard arCapture.lockedPlaneTransform != nil else {
+                    guard let lockedPlaneTransform = arCapture.lockedPlaneTransform else {
                         try? await Task.sleep(for: Self.pollInterval)
                         continue
                     }
@@ -739,6 +742,10 @@ final class CoachLiveSession: Identifiable {
                     forceNextInference = true
 
                     let sessionStart = CACurrentMediaTime()
+                    self.worldCensusController = WorldCensusController(
+                        worldToTable: simd_inverse(lockedPlaneTransform),
+                        tableExtent: SIMD2<Float>(repeating: Float(planeExtent))
+                    )
                     self.zoneTrackingStartedAt = sessionStart
                     if let persisted {
                         newTracker.restore(persisted.remapped(toNowMono: sessionStart), at: sessionStart)
@@ -921,19 +928,33 @@ final class CoachLiveSession: Identifiable {
                         // ~15px each when the whole 4:3 frame is letterboxed to
                         // 640 — clear the detector's gate instead of vanishing.
                         let fullTiles: [DetectedTile]
+                        let fullRecognizerSucceeded: Bool
                         if Self.tilesFullFrameRefresh {
+                            var tiledRecognizerFailed = false
                             self.diagnostics.inferencesRun += TiledTileRecognizer.gridCols * TiledTileRecognizer.gridRows
                             fullTiles = await TiledTileRecognizer.recognize(
                                 buffer: frame.pixelBuffer, roi: nil, minConfidence: 0.30,
-                                using: { f in (try? await rec.recognize(f)) ?? .empty })
-                            self.lastPipelineError = nil
+                                using: { f in
+                                    do {
+                                        return try await rec.recognize(f)
+                                    } catch {
+                                        tiledRecognizerFailed = true
+                                        return .empty
+                                    }
+                                })
+                            fullRecognizerSucceeded = !tiledRecognizerFailed
+                            self.lastPipelineError = tiledRecognizerFailed
+                                ? "one or more tiled recognizer calls failed"
+                                : nil
                         } else {
                             self.diagnostics.inferencesRun += 1
                             let recognizerFrame = RecognizerFrame.buffer(frame.pixelBuffer, orientation: .right)
                             do {
                                 fullTiles = try await rec.recognize(recognizerFrame).tiles
+                                fullRecognizerSucceeded = true
                                 self.lastPipelineError = nil
                             } catch {
+                                fullRecognizerSucceeded = false
                                 self.recognizerErrorCount += 1
                                 self.lastPipelineError = String(describing: error)
                                 Self.logger.error("recognize() threw (\(self.recognizerErrorCount, privacy: .public) total): \(String(describing: error), privacy: .public)")
@@ -962,6 +983,18 @@ final class CoachLiveSession: Identifiable {
                         // `visibleRegion` gate.
                         let outcome = tracker.ingest(projected, at: CACurrentMediaTime(), motion: sample)
                         self.logAndSnapshot(outcome, frame: frame.pixelBuffer, tracker: tracker)
+                        self.worldCensusController?.ingest(
+                            detections: fullTiles,
+                            frame: frame,
+                            projection: projection,
+                            coverageRects: [
+                                TileBoundingBox(x: 0, y: 0, width: 1, height: 1),
+                            ],
+                            recognizerSucceeded: fullRecognizerSucceeded,
+                            trackingIsNormal: arCapture.captureStage == .tracking,
+                            at: now
+                        )
+                        self.updateWorldCensusDiagnostics()
 
                     case let .crops(rects):
                         self.recountRequest = nil
@@ -969,8 +1002,12 @@ final class CoachLiveSession: Identifiable {
                         // though `ROIScheduler` may return more candidates.
                         var mergedImageSpace: [DetectedTile] = []
                         var visibleRegionRect: TileBoundingBox?
+                        var censusCoverageRects: [TileBoundingBox] = []
+                        var cropRecognizerSucceeded = true
+                        var attemptedCrop = false
                         for rect in rects.prefix(2) {
                             guard let cropBuffer = pixelBufferCropper.crop(frame.pixelBuffer, to: rect) else { continue }
+                            attemptedCrop = true
                             self.diagnostics.inferencesRun += 1
                             // Crop the NATIVE (un-rotated) buffer, then
                             // orient it exactly like the full frame — Vision
@@ -985,6 +1022,7 @@ final class CoachLiveSession: Identifiable {
                                 cropResult = try await rec.recognize(cropFrame)
                                 self.lastPipelineError = nil
                             } catch {
+                                cropRecognizerSucceeded = false
                                 self.recognizerErrorCount += 1
                                 self.lastPipelineError = String(describing: error)
                                 Self.logger.error("recognize() threw on ROI crop (\(self.recognizerErrorCount, privacy: .public) total): \(String(describing: error), privacy: .public)")
@@ -1007,6 +1045,7 @@ final class CoachLiveSession: Identifiable {
                             // across every crop this tick.
                             let cropOriented = ROICropMapper.orientedNormalizedRect(
                                 fromRawRect: rect, rawSize: frame.imageResolution, orientedSize: frame.orientedImageSize)
+                            censusCoverageRects.append(cropOriented)
                             if let tableRect = Self.tableSpaceRect(ofOrientedRect: cropOriented, projection: projection,
                                                                    orientedImageSize: orientedSize, tableExtent: extent) {
                                 visibleRegionRect = visibleRegionRect.map { Self.union($0, tableRect) } ?? tableRect
@@ -1040,6 +1079,16 @@ final class CoachLiveSession: Identifiable {
                         let outcome = tracker.ingest(projected, at: CACurrentMediaTime(), motion: sample,
                                                      visibleRegion: visibleRegionRect)
                         self.logAndSnapshot(outcome, frame: frame.pixelBuffer, tracker: tracker)
+                        self.worldCensusController?.ingest(
+                            detections: deduped,
+                            frame: frame,
+                            projection: projection,
+                            coverageRects: censusCoverageRects,
+                            recognizerSucceeded: attemptedCrop && cropRecognizerSucceeded,
+                            trackingIsNormal: arCapture.captureStage == .tracking,
+                            at: now
+                        )
+                        self.updateWorldCensusDiagnostics()
 
                     case .none:
                         break
@@ -1599,6 +1648,19 @@ final class CoachLiveSession: Identifiable {
         Task { @MainActor [weak self] in await self?.refreshAdvice(for: state) }
     }
 
+    @MainActor
+    private func updateWorldCensusDiagnostics() {
+        guard let controller = worldCensusController else { return }
+        let snapshot = controller.snapshot
+        diagnostics.worldCensusTracks = snapshot.tracks.count
+        diagnostics.worldCensusConfirmed = snapshot.tracks.filter {
+            $0.lifecycle == .confirmed
+        }.count
+        diagnostics.worldCensus = controller.census.diagnostics
+        diagnostics.worldCensusDepthRejections = controller.diagnostics.depthRejections
+        diagnostics.worldCensusMilliseconds = controller.diagnostics.lastIngestMilliseconds
+    }
+
     /// Projects a fresh `TrackedTableState` (+ pending boundary + event log)
     /// onto the published surface. Synchronous — advice is refreshed separately
     /// (`refreshAdvice`). Preserves one UUID per underlying tracker id across
@@ -2129,4 +2191,9 @@ struct LiveDiagnostics {
     /// on `startLoop`'s image-space path or the mock path (no scheduler
     /// runs there).
     var roiPlan = "—"
+    var worldCensusTracks = 0
+    var worldCensusConfirmed = 0
+    var worldCensus = CensusDiagnostics()
+    var worldCensusDepthRejections: [DepthSampleRejection: Int] = [:]
+    var worldCensusMilliseconds: Double = 0
 }

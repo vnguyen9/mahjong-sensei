@@ -37,24 +37,27 @@ enum OwnershipResolver {
     /// ownership boundary beyond tolerance → unresolved").
     static func resolve(center: SIMD2<Float>, footprintRadius: Float,
                         zones: [SemanticZoneID: [SIMD2<Float>]]) -> CensusBucket {
-        let samples = samplePoints(center: center, radius: footprintRadius)
-        var buckets: Set<CensusBucket> = []
-        for point in samples {
-            buckets.insert(bucketAtPoint(point, zones: zones))
-        }
-        return buckets.count == 1 ? buckets.first! : .unresolved
+        bucket(for: semanticZone(center: center, footprintRadius: footprintRadius, zones: zones))
     }
 
-    private static func bucketAtPoint(_ point: SIMD2<Float>,
-                                      zones: [SemanticZoneID: [SIMD2<Float>]]) -> CensusBucket {
-        var containingBuckets: Set<CensusBucket> = []
-        for (zoneID, vertices) in zones where pointInPolygon(point, vertices: vertices) {
-            containingBuckets.insert(bucket(for: zoneID))
+    static func semanticZone(center: SIMD2<Float>, footprintRadius: Float,
+                             zones: [SemanticZoneID: [SIMD2<Float>]]) -> SemanticZoneID {
+        let samples = samplePoints(center: center, radius: footprintRadius)
+        var resolvedZones: Set<SemanticZoneID> = []
+        for point in samples {
+            resolvedZones.insert(zoneAtPoint(point, zones: zones))
         }
-        // No zone claims the point, or two zones with different buckets both
-        // claim it: either way, don't guess.
-        guard containingBuckets.count == 1 else { return .unresolved }
-        return containingBuckets.first!
+        return resolvedZones.count == 1 ? resolvedZones.first! : .boundaryUnresolved
+    }
+
+    private static func zoneAtPoint(_ point: SIMD2<Float>,
+                                    zones: [SemanticZoneID: [SIMD2<Float>]]) -> SemanticZoneID {
+        var containingZones: Set<SemanticZoneID> = []
+        for (zoneID, vertices) in zones where pointInPolygon(point, vertices: vertices) {
+            containingZones.insert(zoneID)
+        }
+        guard containingZones.count == 1 else { return .boundaryUnresolved }
+        return containingZones.first!
     }
 
     private static func samplePoints(center: SIMD2<Float>, radius: Float) -> [SIMD2<Float>] {

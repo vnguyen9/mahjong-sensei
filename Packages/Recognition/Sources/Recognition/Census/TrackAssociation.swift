@@ -67,6 +67,18 @@ enum TrackAssociator {
     /// `nil` means a hard gate rejected the pair as physically impossible.
     private static func matchCost(track: PhysicalTrack, observation: TileObservation,
                                   config: CensusConfig) -> Float? {
+        if let trackWorld = track.worldPosition, let observationWorld = observation.worldPosition {
+            let distance = simd_distance(trackWorld, observationWorld)
+            guard distance <= config.worldMatchRadius else { return nil }
+            // World geometry is authoritative when both sides have depth.
+            // A small image/face term only provides deterministic tie help
+            // in the rare case two candidates fall within the same gate.
+            let worldCost = distance / max(config.worldMatchRadius, CensusConfig.epsilon)
+            let imageCost = 1 - iou(track.imageBox, observation.box)
+            let faceCost = faceDistributionCost(track: track, observation: observation)
+            return 0.8 * worldCost + 0.1 * imageCost + 0.1 * faceCost
+        }
+
         var centerCost: Float = 0
         var footprintCost: Float = 0
 

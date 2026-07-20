@@ -19,13 +19,13 @@ public struct CensusTrackID: Sendable, Hashable, Comparable, Codable {
 /// tentative --window expires without 3 hits--> (dropped)
 /// confirmed --qualified covered miss--> temporarilyMissing
 /// temporarilyMissing --matched again--> confirmed
-/// temporarilyMissing --3 qualified misses AND >=0.8s--> retired
+/// temporarilyMissing --5 qualified misses AND >=0.8s--> retired
 /// confirmed --coverage lost (not a miss)--> stale
 /// stale --reacquired--> confirmed
 /// ```
 ///
 /// Only `.confirmed` tracks ever contribute to `CensusSnapshot.mine`/`.table`.
-public enum TrackLifecycleState: Sendable, Hashable {
+public enum TrackLifecycleState: Sendable, Hashable, Codable {
     case tentative
     case confirmed
     case temporarilyMissing
@@ -41,6 +41,7 @@ struct PhysicalTrack {
 
     // MARK: Geometry (anchor-local metres unless noted)
     var anchorCenter: SIMD2<Float>
+    var worldPosition: SIMD3<Float>?
     var footprintRadius: Float
     /// Last known image-space box (whatever coordinate space `TileObservation.box`
     /// uses), kept only for the association cost's image-continuity term.
@@ -60,6 +61,8 @@ struct PhysicalTrack {
 
     // MARK: Ownership (§10.1) — geometric only, never touched by face fusion.
     var bucket: CensusBucket = .unresolved
+    var semanticZone: SemanticZoneID = .boundaryUnresolved
+    var semanticZoneOverride: SemanticZoneID?
 
     // MARK: Lifecycle (§9.2)
     var state: TrackLifecycleState = .tentative
@@ -71,10 +74,12 @@ struct PhysicalTrack {
     var lastHitAt: TimeInterval
     var createdAt: TimeInterval
 
-    init(id: CensusTrackID, anchorCenter: SIMD2<Float>, footprintRadius: Float,
+    init(id: CensusTrackID, anchorCenter: SIMD2<Float>, worldPosition: SIMD3<Float>? = nil,
+         footprintRadius: Float,
          imageBox: TileBoundingBox, at time: TimeInterval) {
         self.id = id
         self.anchorCenter = anchorCenter
+        self.worldPosition = worldPosition
         self.footprintRadius = footprintRadius
         self.imageBox = imageBox
         self.lastHitAt = time

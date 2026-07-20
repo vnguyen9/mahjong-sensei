@@ -83,6 +83,34 @@ struct LiveGeometryDebugOverlay: View {
         polygon(pondCorners(geometry.pond), fill: MJColor.jadeAccent.opacity(0.16), stroke: MJColor.jadeAccent.opacity(0.9))
         polygon(geometry.handBand.corners, fill: MJColor.gold.opacity(0.14), stroke: MJColor.gold.opacity(0.9))
 
+        // LiDAR census anchors (cyan): world points are projected fresh from
+        // the current camera pose, so on-device drift is immediately visible
+        // while panning or changing angle.
+        if let census = session.worldCensusController?.snapshot {
+            for track in census.tracks where track.lifecycle == .confirmed {
+                guard let world = track.worldPosition,
+                      let uv = projection.normalizedOrientedPoint(
+                        ofWorldPoint: SIMD3<Double>(
+                            Double(world.x), Double(world.y), Double(world.z)
+                        ),
+                        orientedImageSize: orientedSIMD
+                      ) else { continue }
+                let point = AspectFillMapping.previewRect(
+                    ofNormalized: TileBoundingBox(
+                        x: uv.x, y: uv.y, width: 0, height: 0
+                    ),
+                    previewBounds: previewBounds,
+                    orientedImageSize: orientedCG
+                ).origin
+                let anchor = Path(
+                    ellipseIn: CGRect(
+                        x: point.x - 4, y: point.y - 4, width: 8, height: 8
+                    )
+                )
+                context.fill(anchor, with: .color(.cyan.opacity(0.9)))
+            }
+        }
+
         // Seat + wind markers.
         for seat in geometry.seats {
             guard let p = screen(seat.edgeMidpoint) else { continue }

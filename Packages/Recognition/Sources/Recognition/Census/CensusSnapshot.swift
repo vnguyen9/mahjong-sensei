@@ -83,6 +83,62 @@ public enum CensusConfidence: Sendable, Hashable, Comparable {
     public static func < (l: CensusConfidence, r: CensusConfidence) -> Bool { l.rank < r.rank }
 }
 
+public struct CensusAnchor: Sendable, Hashable {
+    public var id: CensusTrackID
+    public var worldPosition: SIMD3<Float>
+
+    public init(id: CensusTrackID, worldPosition: SIMD3<Float>) {
+        self.id = id
+        self.worldPosition = worldPosition
+    }
+}
+
+/// Frame-specific facts computed by the app from AR tracking, exact
+/// recognizer coverage, and depth/occlusion tests. The package never guesses
+/// which unmatched world tracks were genuinely visible.
+public struct CensusFrameContext: Sendable {
+    public var worldToTable: simd_float4x4
+    public var visibleTrackIDs: Set<CensusTrackID>
+
+    public init(worldToTable: simd_float4x4,
+                visibleTrackIDs: Set<CensusTrackID>) {
+        self.worldToTable = worldToTable
+        self.visibleTrackIDs = visibleTrackIDs
+    }
+}
+
+public struct CensusTrackSnapshot: Sendable, Hashable {
+    public var id: CensusTrackID
+    public var worldPosition: SIMD3<Float>?
+    public var tablePoint: SIMD2<Float>
+    public var face: TileFace?
+    public var faceConfidence: Float
+    public var semanticZone: SemanticZoneID
+    public var lifecycle: TrackLifecycleState
+    public var firstSeen: TimeInterval
+    public var lastSeen: TimeInterval
+
+    public init(id: CensusTrackID,
+                worldPosition: SIMD3<Float>?,
+                tablePoint: SIMD2<Float>,
+                face: TileFace?,
+                faceConfidence: Float,
+                semanticZone: SemanticZoneID,
+                lifecycle: TrackLifecycleState,
+                firstSeen: TimeInterval,
+                lastSeen: TimeInterval) {
+        self.id = id
+        self.worldPosition = worldPosition
+        self.tablePoint = tablePoint
+        self.face = face
+        self.faceConfidence = faceConfidence
+        self.semanticZone = semanticZone
+        self.lifecycle = lifecycle
+        self.firstSeen = firstSeen
+        self.lastSeen = lastSeen
+    }
+}
+
 /// The census's entire public output (§10.2). Only confirmed tracks with a
 /// confirmed, visible face ever enter `mine`/`table`; everything else the
 /// pipeline is unsure about is explicit in `unresolved`, never guessed into
@@ -95,11 +151,12 @@ public struct CensusSnapshot: Sendable {
     public var coverage: [SemanticZoneID: Float]
     public var confidence: CensusConfidence
     public var generatedAt: TimeInterval
+    public var tracks: [CensusTrackSnapshot]
 
     public init(mine: TileMultiset = TileMultiset(), table: TileMultiset = TileMultiset(),
                 unresolved: [UnresolvedTile] = [], zoneFreshness: [SemanticZoneID: ZoneFreshness] = [:],
                 coverage: [SemanticZoneID: Float] = [:], confidence: CensusConfidence = .low,
-                generatedAt: TimeInterval) {
+                generatedAt: TimeInterval, tracks: [CensusTrackSnapshot] = []) {
         self.mine = mine
         self.table = table
         self.unresolved = unresolved
@@ -107,5 +164,6 @@ public struct CensusSnapshot: Sendable {
         self.coverage = coverage
         self.confidence = confidence
         self.generatedAt = generatedAt
+        self.tracks = tracks
     }
 }
