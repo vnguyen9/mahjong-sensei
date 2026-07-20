@@ -206,6 +206,9 @@ final class ARTableCapture: NSObject {
             captureStage = .unavailable
             return
         }
+        // Coach Live is intentionally fresh-only for now. A killed process
+        // must not silently reopen yesterday's table coordinate system.
+        ARWorldMapStore.discard()
         captureStage = .starting
         lockedPlaneTransform = nil
         lockedPlaneIdentifier = nil
@@ -217,49 +220,17 @@ final class ARTableCapture: NSObject {
         planeDetectionRequested = true
         mappingIsSaveable = false
 
-        if let restored = ARWorldMapStore.load() {
-            restoringWorldMap = true
-            restoredTableCalibration = restored.calibration
-            tableCalibration = restored.calibration
-            tableCalibrationIsDraft = false
-            lockedPlaneTransform = restored.calibration.tableToWorld
-            lockedPlaneIdentifier = nil
-            lockedPlaneExtent = Double(
-                (restored.calibration.extent.x
-                    + restored.calibration.extent.y) * 0.5
-            )
-            tableOriginExtent = restored.calibration.extent
-            tableOriginTransform = restored.calibration.tableToWorld
-            tableOriginAnchorID = restored.worldMap.anchors.first {
-                $0.name == ARWorldMapStore.tableOriginAnchorName
-            }?.identifier
-            planeDetectionRequested = false
-            stageBeforeRelocalizing = .tableLocked
-            captureStage = .relocalizing
-            let configuration = Self.makeConfiguration(
-                planeDetection: false,
-                initialWorldMap: restored.worldMap
-            )
-            runConfiguration(
-                configuration,
-                options: [.resetTracking, .removeExistingAnchors],
-                reason: .restoreWorldMap
-            )
-            scheduleRelocalizationTimeout()
-        } else {
-            restoringWorldMap = false
-            runConfiguration(
-                Self.makeConfiguration(planeDetection: true),
-                reason: .initialStart
-            )
-        }
+        restoringWorldMap = false
+        runConfiguration(
+            Self.makeConfiguration(planeDetection: true),
+            reason: .initialStart
+        )
     }
 
     /// Pauses the underlying `ARSession` (e.g. app backgrounding). Cheap
     /// and reversible — `resume()` continues the same world-tracking
     /// session rather than re-finding the table from scratch.
     func pause() {
-        saveWorldMapIfEligible()
         session.pause()
     }
 
@@ -354,9 +325,8 @@ final class ARTableCapture: NSObject {
             extent: calibration.extent,
             persist: persist
         )
-        if persist && calibrationChanged && originAlreadyMatches {
-            scheduleWorldMapSave()
-        }
+        _ = calibrationChanged
+        _ = originAlreadyMatches
     }
 
     func updateTableOrigin(
@@ -386,9 +356,7 @@ final class ARTableCapture: NSObject {
         tableOriginAnchorID = anchor.identifier
         tableOriginTransform = transform
         tableOriginExtent = extent
-        if persist && tableCalibration != nil {
-            scheduleWorldMapSave()
-        }
+        _ = persist
     }
 
     /// Recalibration supersedes any previously archived coordinate frame.

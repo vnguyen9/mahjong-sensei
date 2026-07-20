@@ -609,8 +609,7 @@ final class CoachLiveSession: Identifiable {
         resetSpatialTrackingState()
 
         guard let recognizerProvider, tracker == nil else { return }
-        // Fresh start supersedes any stale resume — a new `begin()` means the
-        // user explicitly chose not to (or had nothing to) resume.
+        // Coach Live is fresh-only: stale in-flight state is never resumed.
         Task { await CoachLiveSessionStore.shared.clear() }
         isWarmingUp = true
         startupStage = .startingCamera
@@ -1936,7 +1935,10 @@ final class CoachLiveSession: Identifiable {
         // through this whole class's call graph. Every call site of `end()`
         // is a SwiftUI teardown path (view `onDisappear`/coordinator
         // methods), so this is always true in practice.
-        MainActor.assumeIsolated { arCapture?.pause() }
+        MainActor.assumeIsolated {
+            arCapture?.invalidatePersistedCalibration()
+            arCapture?.pause()
+        }
         if tracker != nil {
             Task { await CoachLiveSessionStore.shared.clear() }
         }
@@ -1947,7 +1949,6 @@ final class CoachLiveSession: Identifiable {
     /// next, so that save can't be starved by the throttle.
     func pauseLoop() {
         isPaused = true
-        persistIfDue(now: CACurrentMediaTime(), force: true)
     }
     /// scenePhase → foreground: resume polling.
     func resumeLoop() { isPaused = false }

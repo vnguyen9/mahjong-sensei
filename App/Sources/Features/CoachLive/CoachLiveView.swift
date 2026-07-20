@@ -147,9 +147,11 @@ struct CoachLiveView: View {
                     onCancel: { session.finishARCalibration(nil) })
             }
         }
-        .confirmationDialog("End the live session?", isPresented: $showExitConfirm, titleVisibility: .visible) {
-            Button("End session", role: .destructive, action: onExit)
+        .confirmationDialog("Exit Coach Live?", isPresented: $showExitConfirm, titleVisibility: .visible) {
+            Button("Exit and clear table", role: .destructive, action: onExit)
             Button("Keep watching", role: .cancel) {}
+        } message: {
+            Text("Current tile counts, hand progress, and table calibration will be cleared.")
         }
         .confirmationDialog(reassignDialogTitle, isPresented: reassignDialogPresented, titleVisibility: .visible) {
             Button(reassignDialogConfirmLabel) {

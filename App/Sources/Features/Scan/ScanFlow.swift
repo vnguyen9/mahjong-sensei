@@ -278,7 +278,19 @@ final class ScanCoordinator {
     /// the mock demo scenario since there's no real tracker loop yet.
     var coachLive: CoachLiveSession?
 
+    /// Coach Live is LiDAR-first while the spatial pipeline is stabilized.
+    /// Simulator debug scenes remain available for UI development, but a
+    /// physical non-LiDAR device cannot enter the flow or silently use 2D.
+    var isCoachLiveAvailable: Bool {
+        #if targetEnvironment(simulator)
+        true
+        #else
+        ARTableCapture.isSupported && ARTableCapture.supportsSceneDepth
+        #endif
+    }
+
     func startCoachLive() {
+        guard isCoachLiveAvailable else { return }
         #if DEBUG && targetEnvironment(simulator)
         coachLive = MockCoachLive.make(scene: "coach-live")
         #else

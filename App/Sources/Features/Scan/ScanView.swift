@@ -69,7 +69,9 @@ struct ScanView: View {
                                               (ScanMode.tracker, "Tracker")],
                                     fontSize: 12, hPad: 11, vPad: 9)
                     HintPill(text: hint)
-                    CoachLiveButton { coordinator.startCoachLive() }
+                    CoachLiveButton(isAvailable: coordinator.isCoachLiveAvailable) {
+                        coordinator.startCoachLive()
+                    }
                         .padding(.top, 2)
                 }
                 .padding(.top, 16)
@@ -312,33 +314,51 @@ private struct HintPill: View {
 /// frosted pill above it: a solid gold capsule, always visible (not gated by
 /// `mode`; the lookup card lives at the bottom, no collision).
 private struct CoachLiveButton: View {
+    let isAvailable: Bool
     let action: () -> Void
     @State private var pulse = false
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 7) {
-                Circle().fill(MJColor.liveRed).frame(width: 7, height: 7)
-                    .opacity(pulse ? 1 : 0.35)
-                Text("Coach Live").font(MJFont.ui(14, weight: .bold))
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .bold))
-                    .opacity(0.7)
-                    .padding(.leading, 1)
+        VStack(spacing: 5) {
+            Button(action: action) {
+                HStack(spacing: 7) {
+                    Circle().fill(isAvailable ? MJColor.liveRed : MJColor.cream(0.45))
+                        .frame(width: 7, height: 7)
+                        .opacity(isAvailable ? (pulse ? 1 : 0.35) : 1)
+                    Text("Coach Live").font(MJFont.ui(14, weight: .bold))
+                    Image(systemName: isAvailable ? "chevron.right" : "lock.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .opacity(0.7)
+                        .padding(.leading, 1)
+                }
+                .foregroundStyle(isAvailable ? MJColor.inkOnGold : MJColor.cream(0.7))
+                .padding(.leading, 20)
+                .padding(.trailing, 16)
+                .frame(height: 44)
+                .background(
+                    isAvailable
+                        ? AnyShapeStyle(LinearGradient(colors: [MJColor.lightGold, MJColor.gold],
+                                                       startPoint: .top, endPoint: .bottom))
+                        : AnyShapeStyle(Color(hex: 0x183A31, alpha: 0.9)),
+                    in: Capsule()
+                )
+                .shadow(color: isAvailable ? MJColor.gold(0.35) : .clear, radius: 8, y: 5)
             }
-            .foregroundStyle(MJColor.inkOnGold)
-            .padding(.leading, 20)
-            .padding(.trailing, 16)
-            .frame(height: 40)
-            .background(
-                LinearGradient(colors: [MJColor.lightGold, MJColor.gold],
-                               startPoint: .top, endPoint: .bottom),
-                in: Capsule()
-            )
-            .shadow(color: MJColor.gold(0.35), radius: 8, y: 5)
+            .buttonStyle(.plain)
+            .disabled(!isAvailable)
+            .accessibilityLabel(isAvailable
+                ? "Start Coach Live session"
+                : "Coach Live unavailable")
+            .accessibilityHint(isAvailable
+                ? "Begins LiDAR table calibration"
+                : "Coach Live currently requires a LiDAR-equipped iPad")
+
+            if !isAvailable {
+                Text("Requires a LiDAR-equipped iPad")
+                    .font(MJFont.ui(11, weight: .medium))
+                    .foregroundStyle(MJColor.cream(0.65))
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Start Coach Live session")
         .onAppear { withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) { pulse = true } }
     }
 }

@@ -3,23 +3,16 @@ import UIKit
 import DesignSystem
 import MahjongCore
 
-/// UserDefaults-backed settings for Coach Live — the ONLY two, following the
+/// UserDefaults-backed settings for Coach Live, following the
 /// `TileDetector.prefersHighAccuracy` pattern exactly (UI plan §13).
 enum CoachLivePrefs {
     static let blurKey = "coachLiveBlursFeed"
     static let correctionHintKey = "coachLiveHasSeenCorrectionHint"
-    static let arPrimerKey = "coachLiveHasSeenARPrimer"
 
     /// Unset → true (blur on) — privacy default.
     static var blursFeed: Bool {
         get { UserDefaults.standard.object(forKey: blurKey) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: blurKey) }
-    }
-    /// Unset → false (show the illustrated AR calibration primer once, ever) —
-    /// the first-run "Teach Coach your table" card. Re-showable from Settings.
-    static var hasSeenARPrimer: Bool {
-        get { UserDefaults.standard.bool(forKey: arPrimerKey) }
-        set { UserDefaults.standard.set(newValue, forKey: arPrimerKey) }
     }
     /// Unset → false (show the one-time correction tip once) — see
     /// `CorrectionHintBanner`. `MockCoachLive.make` marks this seen at
@@ -50,7 +43,7 @@ struct CoachLiveFlowView: View {
     var onExit: () -> Void = {}
     var onScoreHandoff: () -> Void = {}
 
-    enum FlowState { case setup, primer, restore, calibration, live }
+    enum FlowState { case setup, primer, calibration, live }
     @State private var flowState: FlowState
     @Environment(\.scenePhase) private var scenePhase
 
@@ -81,18 +74,14 @@ struct CoachLiveFlowView: View {
                         // primer/calibration. Guided marks are a draft applied
                         // to this already-running pipeline, never a second run.
                         session.begin(roundWind: session.roundWind, seatWind: session.seatWind)
-                        resolveRestoreOrBeginGuidedCalibration()
-                    },
-                    onResume: {
-                        // resume() already spun the loop up — skip calibration.
-                        withAnimation(.easeInOut(duration: 0.3)) { flowState = .live }
+                        session.beginARCalibration()
+                        withAnimation(.easeInOut(duration: 0.3)) { flowState = .primer }
                     },
                     onCancel: onExit)
                 .transition(.opacity)
             case .primer:
                 CalibrationPrimerView(
                     onContinue: {
-                        CoachLivePrefs.hasSeenARPrimer = true
                         withAnimation(.easeInOut(duration: 0.3)) { flowState = .calibration }
                     },
                     onCancel: {
@@ -100,20 +89,6 @@ struct CoachLiveFlowView: View {
                         onExit()
                     })
                 .transition(.opacity)
-            case .restore:
-                if let capture = session.arCapture {
-                    TableRestoreView(
-                        capture: capture,
-                        onCancel: {
-                            session.cancelARRestore()
-                            onExit()
-                        })
-                    .onAppear { resolveRestoreOrBeginGuidedCalibration() }
-                    .onChange(of: capture.calibrationRestoreStatus) { _, _ in
-                        resolveRestoreOrBeginGuidedCalibration()
-                    }
-                    .transition(.opacity)
-                }
             case .calibration:
                 if let capture = session.arCapture {
                     ARCalibrationView(
@@ -170,56 +145,4 @@ struct CoachLiveFlowView: View {
         .statusBarHidden()
     }
 
-    /// Restore is a flow decision, not a second session lifecycle. A timeout
-    /// transitions the same begun pipeline into the standard guided flow.
-    private func resolveRestoreOrBeginGuidedCalibration() {
-        switch session.calibrationRestoreStatus {
-        case .restoring:
-            withAnimation(.easeInOut(duration: 0.3)) { flowState = .restore }
-        case .restored:
-            guard session.adoptRestoredARCalibrationIfAvailable() else { return }
-            withAnimation(.easeInOut(duration: 0.3)) { flowState = .live }
-        case .none:
-            session.beginARCalibration()
-            let next: FlowState = CoachLivePrefs.hasSeenARPrimer ? .calibration : .primer
-            withAnimation(.easeInOut(duration: 0.3)) { flowState = next }
-        }
-    }
-}
-
-/// Dedicated ARWorldMap relocalization presentation. It renders the same
-/// already-running AR session as Live, and intentionally cannot start, pause,
-/// or reconfigure it.
-private struct TableRestoreView: View {
-    let capture: ARTableCapture
-    let onCancel: () -> Void
-
-    var body: some View {
-        ZStack {
-            ARCameraPreview(capture: capture)
-                .ignoresSafeArea()
-            Color.black.opacity(0.30).ignoresSafeArea()
-            VStack(spacing: 14) {
-                ProgressView().controlSize(.large).tint(MJColor.gold)
-                Text("Restoring your table…")
-                    .font(MJFont.serif(22, weight: .bold))
-                    .foregroundStyle(MJColor.creamHeading)
-                Text("Point at the table. This can take up to 8 seconds.")
-                    .font(MJFont.ui(13))
-                    .foregroundStyle(MJColor.cream(0.7))
-                    .multilineTextAlignment(.center)
-                Button("Cancel restore", action: onCancel)
-                    .font(MJFont.ui(15, weight: .semibold))
-                    .foregroundStyle(MJColor.creamHeading)
-                    .frame(minWidth: 160, minHeight: 44)
-                    .background(MJColor.sheetGlass, in: Capsule())
-                    .accessibilityLabel("Cancel table restore")
-                    .accessibilityHint("Stops Coach Live and returns to the previous screen.")
-            }
-            .padding(28)
-            .frame(maxWidth: 320)
-            .mjCard(cornerRadius: 20)
-            .padding(20)
-        }
-    }
 }
