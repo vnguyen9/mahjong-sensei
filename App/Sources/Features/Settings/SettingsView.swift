@@ -40,6 +40,11 @@ struct SettingsView: View {
                                 SettingRow(name: "Detector model", value: app.devDetectorModel.label)
                             }
                             .buttonStyle(.plain)
+                            Divider().overlay(MJColor.gold(0.12))
+                            NavigationLink { GameLauncherView() } label: {
+                                SettingRow(name: "Mahjong game · Experimental", value: "")
+                            }
+                            .buttonStyle(.plain)
                         }
                         .mjCard(padding: 4)
                         #else
