@@ -143,6 +143,7 @@ struct CoachLiveView: View {
                     capture: capture,
                     mySeatWind: session.seatWind,
                     onComplete: { session.finishARCalibration($0) },
+                    onCalibrationChanged: { session.applyARCalibrationDraft($0) },
                     onCancel: { session.finishARCalibration(nil) })
             }
         }

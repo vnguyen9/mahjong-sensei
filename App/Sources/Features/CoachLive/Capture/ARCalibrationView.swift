@@ -25,12 +25,16 @@ struct ARCalibrationView: UIViewControllerRepresentable {
     /// The user's seat wind (from the setup card), used to label the seats.
     var mySeatWind: Wind = .east
     var onComplete: (WorldTableCalibration) -> Void
+    /// Draft calibration updates are applied to the already-running Coach Live
+    /// pipeline while review is visible. `onComplete` only finalizes that draft.
+    var onCalibrationChanged: (WorldTableCalibration) -> Void = { _ in }
     var onCancel: () -> Void
 
     func makeUIViewController(context: Context) -> ARCalibrationViewController {
         let controller = ARCalibrationViewController(capture: capture)
         controller.mySeatWind = mySeatWind
         controller.onComplete = onComplete
+        controller.onCalibrationChanged = onCalibrationChanged
         controller.onCancel = onCancel
         return controller
     }
@@ -46,6 +50,7 @@ struct ARCalibrationView: UIViewControllerRepresentable {
 final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
     var mySeatWind: Wind = .east
     var onComplete: ((WorldTableCalibration) -> Void)?
+    var onCalibrationChanged: ((WorldTableCalibration) -> Void)?
     var onCancel: (() -> Void)?
     private let capture: ARTableCapture
 
@@ -652,6 +657,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         for seat: RelativeSeat in [.left, .right, .across] { placeSeatMarker(seat) }
         stage = .review
         refreshReviewGeometry()
+        publishDraftCalibration()
         refreshUI()
     }
 
@@ -828,6 +834,12 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             placeSeatMarker(seat)
         }
         refreshReviewGeometry()
+        publishDraftCalibration()
+    }
+
+    private func publishDraftCalibration() {
+        guard stage == .review, let calibration = currentCalibration() else { return }
+        onCalibrationChanged?(calibration)
     }
 
     private func moveHandRegion(to center: SIMD2<Double>) {

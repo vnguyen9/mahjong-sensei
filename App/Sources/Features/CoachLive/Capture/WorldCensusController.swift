@@ -117,6 +117,7 @@ final class WorldCensusController {
         coverageRects: [TileBoundingBox],
         recognizerSucceeded: Bool,
         trackingIsNormal: Bool,
+        allowsQualifiedMisses: Bool = true,
         at time: TimeInterval
     ) {
         let started = CACurrentMediaTime()
@@ -280,7 +281,10 @@ final class WorldCensusController {
             zones: zones,
             context: CensusFrameContext(
                 worldToTable: worldToTable,
-                visibleTrackIDs: visibleIDs
+                // During guided calibration the recognizer may warm and add
+                // or match candidates, but a moving mark/review must never
+                // turn a temporarily uncovered location into a retirement.
+                visibleTrackIDs: allowsQualifiedMisses ? visibleIDs : []
             ),
             at: time
         )

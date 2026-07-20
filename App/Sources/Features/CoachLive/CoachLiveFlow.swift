@@ -77,9 +77,13 @@ struct CoachLiveFlowView: View {
             case .setup:
                 CoachLiveSetupView(
                     onStart: {
-                        // Fresh start → first-run primer (once), else straight
-                        // to calibration. begin() is deferred to calibration.
-                        let next: FlowState = CoachLivePrefs.hasSeenARPrimer ? .calibration : .primer
+                        // Start the single AR/census pipeline before the
+                        // primer/calibration. Guided marks are a draft applied
+                        // to this already-running pipeline, never a second run.
+                        session.begin(roundWind: session.roundWind, seatWind: session.seatWind)
+                        session.beginARCalibration()
+                        let hasSeenPrimer = CoachLivePrefs.hasSeenARPrimer
+                        let next: FlowState = hasSeenPrimer ? .calibration : .primer
                         withAnimation(.easeInOut(duration: 0.3)) { flowState = next }
                     },
                     onResume: {
@@ -94,7 +98,10 @@ struct CoachLiveFlowView: View {
                         CoachLivePrefs.hasSeenARPrimer = true
                         withAnimation(.easeInOut(duration: 0.3)) { flowState = .calibration }
                     },
-                    onCancel: onExit)
+                    onCancel: {
+                        session.cancelInitialARCalibration()
+                        onExit()
+                    })
                 .transition(.opacity)
             case .calibration:
                 if let capture = session.arCapture {
@@ -103,11 +110,12 @@ struct CoachLiveFlowView: View {
                         mySeatWind: session.seatWind,
                         onComplete: { calibration in
                             session.finishARCalibration(calibration)
-                            session.begin(roundWind: session.roundWind, seatWind: session.seatWind)
                             withAnimation(.easeInOut(duration: 0.3)) { flowState = .live }
                         },
+                        onCalibrationChanged: { session.applyARCalibrationDraft($0) },
                         onCancel: {
                             // Back from the first mark → return to the setup card.
+                            session.finishARCalibration(nil)
                             withAnimation(.easeInOut(duration: 0.3)) { flowState = .setup }
                         })
                     .ignoresSafeArea()

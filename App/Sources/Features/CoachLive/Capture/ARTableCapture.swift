@@ -152,6 +152,10 @@ final class ARTableCapture: NSObject {
     private var tableOriginTransform: simd_float4x4?
     private var tableOriginExtent: SIMD2<Float>?
     private var tableCalibration: WorldTableCalibration?
+    /// True only for an unsaved calibration-review update. It lets an initial
+    /// cancellation remove the transient named origin without touching a
+    /// previously accepted world-map archive.
+    private var tableCalibrationIsDraft = false
     private var mappingIsSaveable = false
     private var restoringWorldMap = false
     private var relocalizationTimeoutTask: Task<Void, Never>?
@@ -188,6 +192,7 @@ final class ARTableCapture: NSObject {
         lockedPlaneExtent = nil
         restoredTableCalibration = nil
         tableCalibration = nil
+        tableCalibrationIsDraft = false
         planeLockPolicy = nil
         planeDetectionRequested = true
         mappingIsSaveable = false
@@ -196,6 +201,7 @@ final class ARTableCapture: NSObject {
             restoringWorldMap = true
             restoredTableCalibration = restored.calibration
             tableCalibration = restored.calibration
+            tableCalibrationIsDraft = false
             lockedPlaneTransform = restored.calibration.tableToWorld
             lockedPlaneIdentifier = nil
             lockedPlaneExtent = Double(
@@ -311,7 +317,10 @@ final class ARTableCapture: NSObject {
 
     /// Keeps exactly one named AR anchor for the fitted table origin. Tile
     /// tracks remain ordinary census data and are never promoted to ARAnchor.
-    func updateTableCalibration(_ calibration: WorldTableCalibration) {
+    func updateTableCalibration(
+        _ calibration: WorldTableCalibration,
+        persist: Bool = true
+    ) {
         let calibrationChanged = tableCalibration != calibration
         let originAlreadyMatches = tableOriginTransform.map {
             Self.transformsAreNear($0, calibration.tableToWorld)
@@ -319,18 +328,21 @@ final class ARTableCapture: NSObject {
             simd_length($0 - calibration.extent) < 0.001
         } == true
         tableCalibration = calibration
+        tableCalibrationIsDraft = !persist
         updateTableOrigin(
             transform: calibration.tableToWorld,
-            extent: calibration.extent
+            extent: calibration.extent,
+            persist: persist
         )
-        if calibrationChanged && originAlreadyMatches {
+        if persist && calibrationChanged && originAlreadyMatches {
             scheduleWorldMapSave()
         }
     }
 
     func updateTableOrigin(
         transform: simd_float4x4,
-        extent: SIMD2<Float>
+        extent: SIMD2<Float>,
+        persist: Bool = true
     ) {
         if let current = tableOriginTransform,
            Self.transformsAreNear(current, transform),
@@ -354,7 +366,7 @@ final class ARTableCapture: NSObject {
         tableOriginAnchorID = anchor.identifier
         tableOriginTransform = transform
         tableOriginExtent = extent
-        if tableCalibration != nil {
+        if persist && tableCalibration != nil {
             scheduleWorldMapSave()
         }
     }
@@ -363,8 +375,29 @@ final class ARTableCapture: NSObject {
     func invalidatePersistedCalibration() {
         ARWorldMapStore.discard()
         tableCalibration = nil
+        tableCalibrationIsDraft = false
         worldMapSaveTask?.cancel()
         worldMapSaveTask = nil
+    }
+
+    /// Removes only an in-memory origin that has never been accepted: either
+    /// the uncalibrated plane-centroid origin or a provisional guided draft.
+    /// This is intentionally narrower than
+    /// `invalidatePersistedCalibration()`: cancelling a first-run review must
+    /// not delete an already accepted archive.
+    func discardInMemoryUnacceptedOrigin() {
+        guard tableCalibration == nil || tableCalibrationIsDraft else { return }
+        if let tableOriginAnchorID,
+           let existing = session.currentFrame?.anchors.first(where: {
+               $0.identifier == tableOriginAnchorID
+           }) {
+            session.remove(anchor: existing)
+        }
+        tableOriginAnchorID = nil
+        tableOriginTransform = nil
+        tableOriginExtent = nil
+        tableCalibration = nil
+        tableCalibrationIsDraft = false
     }
 
     private static func makeConfiguration(
