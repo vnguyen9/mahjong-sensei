@@ -47,7 +47,15 @@ enum TiledTileRecognizer {
     /// `recognize` per crop, and merging + deduping the results. `recognize`
     /// is injected so this file has no `VisionRecognizer`/loader dependency —
     /// `ScanCoordinator` supplies the shared recognizer.
+    /// - Parameter minConfidence: acceptance floor for the final tiles. Defaults
+    ///   to `confidenceThreshold` (0.5) for the Scan/Record photo path. Coach
+    ///   Live passes the recognizer's own 0.30 so the tiled REFRESH pass gates
+    ///   identically to its per-zone crop path (which passes raw 0.30) — a
+    ///   mismatch there made the tiled pass return far fewer tiles, flipping
+    ///   unmatched tracks live→missing and churning the count. The live
+    ///   tracker's own birth/confirm gates reject wood/shadow FPs downstream.
     static func recognize(buffer: CVPixelBuffer, roi: TileBoundingBox?,
+                           minConfidence: Double = confidenceThreshold,
                            using recognize: (RecognizerFrame) async -> RecognitionResult) async -> [DetectedTile] {
         let orientedImageSize = RecognizerFrame.buffer(buffer, orientation: .right).orientedPixelSize
         let imageResolution = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
@@ -74,17 +82,17 @@ enum TiledTileRecognizer {
             // Fallback: a single full-frame recognize, filtered to roi — never
             // worse than today's non-tiled path.
             let result = await recognize(RecognizerFrame.buffer(buffer, orientation: .right))
-            return accepting(result.keepingTiles(insideROI: roi).tiles)
+            return accepting(result.keepingTiles(insideROI: roi).tiles, minConfidence: minConfidence)
         }
 
-        return accepting(deduplicatingOverlaps(merged))
+        return accepting(deduplicatingOverlaps(merged), minConfidence: minConfidence)
     }
 
     /// Confidence + box-area gate — used after tiled NMS and on the photo
     /// single-pass path so both Record entry points share the same bar.
-    static func accepting(_ tiles: [DetectedTile]) -> [DetectedTile] {
+    static func accepting(_ tiles: [DetectedTile], minConfidence: Double = confidenceThreshold) -> [DetectedTile] {
         tiles.filter { det in
-            guard det.confidence >= confidenceThreshold else { return false }
+            guard det.confidence >= minConfidence else { return false }
             let area = det.box.width * det.box.height
             return area >= minBoxArea && area <= maxBoxArea
         }

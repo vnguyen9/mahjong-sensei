@@ -36,7 +36,7 @@ struct StartupStatusOverlay: View {
     var body: some View {
         Group {
             if session.arCapture?.captureStage == .relocalizing {
-                statusCard("Hold on — re-finding your table…")
+                relocalizingCard
             } else if session.arCapture?.captureStage == .sweeping {
                 sweepCard
                     .allowsHitTesting(true)
@@ -61,6 +61,34 @@ struct StartupStatusOverlay: View {
         case .loadingDetector: return "Loading detector…"
         case .lookingForTiles: return "Looking for tiles…"
         }
+    }
+
+    /// Workstream G (spec screen 14): a calmer replacement for the plain
+    /// `statusCard` during a mid-session relocalization — same card chrome,
+    /// but a reassuring two-line copy ("still saved") instead of a bare
+    /// "hold on" — since world-anchored geometry survives a relocalization,
+    /// this really is just a brief interruption, not data loss. Paired with
+    /// `LiveFeedPane`'s feed-dim scrim (`session.isRelocalizing`), which
+    /// drives from the same `captureStage == .relocalizing` state so the two
+    /// show/hide in lockstep with no separate timer.
+    private var relocalizingCard: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "viewfinder")
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundStyle(MJColor.gold)
+            Text("Point back at the table — resuming automatically")
+                .font(MJFont.ui(15, weight: .semibold))
+                .foregroundStyle(MJColor.creamHeading)
+                .multilineTextAlignment(.center)
+            Text("Your zones are still saved.")
+                .font(MJFont.ui(11.5))
+                .foregroundStyle(MJColor.cream(0.6))
+                .multilineTextAlignment(.center)
+        }
+        .padding(28)
+        .frame(minWidth: 220, maxWidth: 280)
+        .mjCard(cornerRadius: 20)
+        .transition(.opacity)
     }
 
     private func statusCard(_ text: String) -> some View {

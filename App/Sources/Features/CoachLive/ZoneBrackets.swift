@@ -39,17 +39,25 @@ struct CornerBracketShape: Shape {
     }
 }
 
-/// Zone corner brackets over the (fixed, full-screen) live feed (UI plan §7).
+/// Zone corner brackets over the (fixed, full-screen) live feed (UI plan §7,
+/// redesigned under Workstream E2 — "faint zone guides, not loud boxes").
 ///
 /// For each zone the overlay folds `session.zoneBoxes` into a union box (MINE =
-/// hand+bonus+melds, TABLE = pond+opponent melds) — unresolved tiles get one
-/// bracket *each* — maps it through `AspectFillMapping.previewRect` against the
-/// constant full-screen `previewBounds`, pads it, and converts it into the
-/// overlay's local space. A ±4pt stabilizer keeps the tracker's box jitter from
-/// shimmering the brackets; committed moves ease with a short spring.
+/// hand+bonus+melds, TABLE = pond+opponent melds), maps it through
+/// `AspectFillMapping.previewRect` against the constant full-screen
+/// `previewBounds`, pads it, and converts it into the overlay's local space. A
+/// ±4pt stabilizer keeps the tracker's box jitter from shimmering the
+/// brackets; committed moves ease with a short spring.
 ///
-/// The amber unresolved brackets and the MINE/POND **label chips** are the
-/// only hit-testable elements — tapping an unresolved bracket opens the
+/// E2 replaced the old "one amber bracket per unresolved tile" spam (dozens of
+/// "N ? · tap" boxes tiling the feed) with a SINGLE consolidated chip — the
+/// MINE/POND brackets themselves are now drawn faint/thin (calm guides, not
+/// loud boxes), and the MINE bracket brightens while it reads as the player's
+/// turn (`session.phase` `.thinking`/`.action`) as a low-cost "your move"
+/// signal.
+///
+/// The consolidated unresolved chip and the MINE/POND **label chips** are the
+/// only hit-testable elements — tapping the unresolved chip opens the
 /// existing unresolved-assignment sheet; tapping a zone chip opens the
 /// bracket-reassign confirmation (plan A3: "the tiles under THIS bracket are
 /// actually X"). The bracket strokes themselves stay
@@ -71,32 +79,46 @@ struct ZoneBracketsOverlay: View {
 
     @State private var mineRect: CGRect?
     @State private var tableRect: CGRect?
-    @State private var unresolvedRects: [CGRect] = []
+
+    /// While it reads as the player's turn, the MINE bracket brightens from
+    /// its default faint/calm treatment to a fuller-opacity, thicker stroke —
+    /// a cheap "your move" nicety, no new state needed.
+    private var isMyTurn: Bool { session.phase == .thinking || session.phase == .action }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             if let r = mineRect {
                 bracket(r, color: MJColor.gold, label: mineLabel,
                         chipBG: MJColor.gold, chipFG: MJColor.inkOnGold,
+                        strokeOpacity: isMyTurn ? 0.9 : 0.35,
+                        lineWidth: isMyTurn ? 2.5 : 1.5,
                         onTapChip: { onTapZoneChip(.mine) })
             }
             if let r = tableRect {
                 bracket(r, color: Self.creamBracket, label: tableLabel,
                         chipBG: MJColor.cream, chipFG: MJColor.inkOnGold,
+                        strokeOpacity: 0.3, lineWidth: 1.5,
                         onTapChip: { onTapZoneChip(.table) })
-            }
-            ForEach(Array(unresolvedRects.enumerated()), id: \.offset) { _, r in
-                Button(action: onTapUnresolved) {
-                    bracket(r, color: MJColor.amberZone, label: unresolvedLabel,
-                            chipBG: MJColor.amberZone, chipFG: MJColor.inkOnAmber)
-                }
-                .buttonStyle(.plain)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .overlay(alignment: .topTrailing) {
+            if !session.unresolved.isEmpty {
+                unresolvedChip
+                    // Clears the torch button / LIVE pill / suggestion chips
+                    // in the chrome above (same `chromeClearance` budget the
+                    // zone labels use) and sits well inside the feed pane's
+                    // smallest breathing split so it never gets clipped by
+                    // the seam.
+                    .padding(.top, Self.chromeClearance + 8)
+                    .padding(.trailing, 16)
+                    .transition(.opacity)
+            }
+        }
         .animation(.smooth(duration: 0.35), value: mineRect)
         .animation(.smooth(duration: 0.35), value: tableRect)
-        .animation(.smooth(duration: 0.35), value: unresolvedRects)
+        .animation(.easeInOut(duration: 0.2), value: isMyTurn)
+        .animation(.easeInOut(duration: 0.2), value: session.unresolved.isEmpty)
         .onAppear(perform: recompute)
         .onChange(of: previewBounds) { _, _ in recompute() }
         .onChange(of: session.orientedImageSize) { _, _ in recompute() }
@@ -111,7 +133,27 @@ struct ZoneBracketsOverlay: View {
         return "YOURS · \(count)"
     }
     private var tableLabel: String { "POND · \(session.pond.count)" }
-    private var unresolvedLabel: String { "\(session.unresolved.count) ? · tap" }
+
+    // MARK: - Consolidated unresolved chip
+
+    /// The single replacement for the old per-tile amber brackets — one small
+    /// pill, always in the same corner, that opens the same unresolved-
+    /// assignment sheet the individual brackets used to.
+    private var unresolvedChip: some View {
+        Button(action: onTapUnresolved) {
+            HStack(spacing: 5) {
+                Image(systemName: "questionmark.circle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("\(session.unresolved.count) unresolved · tap")
+                    .font(MJFont.ui(12, weight: .bold))
+            }
+            .foregroundStyle(MJColor.inkOnAmber)
+            .padding(.vertical, 5).padding(.horizontal, 10)
+            .background(MJColor.amberZone.opacity(0.92), in: Capsule())
+            .overlay { Capsule().strokeBorder(MJColor.inkOnAmber.opacity(0.15), lineWidth: 1) }
+        }
+        .buttonStyle(.plain)
+    }
 
     // MARK: - Bracket + chip
 
@@ -120,19 +162,20 @@ struct ZoneBracketsOverlay: View {
     /// edge up there would collide with it, so the label tucks inside instead.
     private static let chromeClearance: CGFloat = 132
 
-    /// `onTapChip` nil (the unresolved-bracket call site) ⇒ the label stays a
-    /// plain, non-interactive `Text` — that whole bracket is instead wrapped
-    /// in its own `Button` by the caller. Non-nil (the MINE/POND call sites)
-    /// ⇒ ONLY the chip becomes a tappable `Button` with a pencil affordance;
-    /// the `CornerBracketShape` stroke is explicitly `allowsHitTesting(false)`
-    /// either way, so it never intercepts a tap meant for the chip or the
-    /// feed chrome beneath it.
+    /// The MINE/POND chip is always the tappable element (`onTapChip`) — the
+    /// `CornerBracketShape` stroke stays `allowsHitTesting(false)` so it never
+    /// intercepts a tap meant for the chip or the feed chrome beneath it.
+    /// `strokeOpacity`/`lineWidth` are what make E2's brackets read as faint,
+    /// calm zone guides instead of the old loud 3pt boxes — MINE brightens
+    /// while it's the player's turn (see `isMyTurn`), POND stays faint always.
     private func bracket(_ rect: CGRect, color: Color, label: String,
-                         chipBG: Color, chipFG: Color, onTapChip: (() -> Void)? = nil) -> some View {
+                         chipBG: Color, chipFG: Color, strokeOpacity: Double, lineWidth: CGFloat,
+                         onTapChip: @escaping () -> Void) -> some View {
         let labelInside = rect.minY < Self.chromeClearance
         return ZStack(alignment: .topLeading) {
             CornerBracketShape()
-                .stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+                .stroke(color.opacity(strokeOpacity),
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
                 .frame(width: rect.width, height: rect.height)
                 .allowsHitTesting(false)
             chip(label, chipBG: chipBG, chipFG: chipFG, onTap: onTapChip)
@@ -142,14 +185,9 @@ struct ZoneBracketsOverlay: View {
         .position(x: rect.midX, y: rect.midY)
     }
 
-    @ViewBuilder
-    private func chip(_ label: String, chipBG: Color, chipFG: Color, onTap: (() -> Void)?) -> some View {
-        if let onTap {
-            Button(action: onTap) { chipLabel(label, chipBG: chipBG, chipFG: chipFG, showsPencil: true) }
-                .buttonStyle(.plain)
-        } else {
-            chipLabel(label, chipBG: chipBG, chipFG: chipFG, showsPencil: false)
-        }
+    private func chip(_ label: String, chipBG: Color, chipFG: Color, onTap: @escaping () -> Void) -> some View {
+        Button(action: onTap) { chipLabel(label, chipBG: chipBG, chipFG: chipFG, showsPencil: true) }
+            .buttonStyle(.plain)
     }
 
     /// The chip's own visual — a small pencil glyph is the tappability
@@ -172,7 +210,9 @@ struct ZoneBracketsOverlay: View {
     // MARK: - Mapping + stabilizing
 
     /// Combined key so any zone-box change (mock or real tracker) triggers a
-    /// remap; `[TileBoundingBox]` is `Equatable`.
+    /// remap; `[TileBoundingBox]` is `Equatable`. Includes `.unresolved` even
+    /// though only its *count* now renders (the consolidated chip) — the
+    /// array itself isn't otherwise observed by this view.
     private var boxesKey: [TileBoundingBox] {
         session.zoneBoxes.mine + session.zoneBoxes.table + session.zoneBoxes.unresolved
     }
@@ -180,8 +220,6 @@ struct ZoneBracketsOverlay: View {
     private func recompute() {
         mineRect = stabilize(mineRect, mappedRect(for: session.zoneBoxes.mine))
         tableRect = stabilize(tableRect, mappedRect(for: session.zoneBoxes.table))
-        let targets = session.zoneBoxes.unresolved.compactMap { mappedRect(for: [$0]) }
-        unresolvedRects = stabilizeList(unresolvedRects, targets)
     }
 
     /// Fold `boxes` into their union, map to the preview, pad +6pt, and shift
@@ -211,10 +249,5 @@ struct ZoneBracketsOverlay: View {
         let moved = abs(old.minX - new.minX) > 4 || abs(old.minY - new.minY) > 4 ||
                     abs(old.maxX - new.maxX) > 4 || abs(old.maxY - new.maxY) > 4
         return moved ? new : old
-    }
-
-    private func stabilizeList(_ old: [CGRect], _ new: [CGRect]) -> [CGRect] {
-        guard old.count == new.count else { return new }
-        return zip(old, new).map { stabilize($0, $1) ?? $1 }
     }
 }

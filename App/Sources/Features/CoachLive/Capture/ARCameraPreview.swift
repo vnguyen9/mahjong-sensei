@@ -36,7 +36,9 @@ struct ARCameraPreview: UIViewRepresentable {
             metalLayer.device = device
             metalLayer.pixelFormat = .bgra8Unorm
             metalLayer.framebufferOnly = false
-            metalLayer.contentsScale = UIScreen.main.scale
+            // No window yet at init — seed from the trait environment; the real
+            // window-scene scale is applied in `layoutSubviews`.
+            metalLayer.contentsScale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 2
             layer.addSublayer(metalLayer)
 
             let link = CADisplayLink(target: self, selector: #selector(tick))
@@ -56,8 +58,12 @@ struct ARCameraPreview: UIViewRepresentable {
         override func layoutSubviews() {
             super.layoutSubviews()
             metalLayer.frame = bounds
-            let scale = metalLayer.contentsScale
-            metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            // Prefer the window scene's screen scale (iOS 26 replacement for the
+            // deprecated `UIScreen.main`), falling back to the trait environment.
+            let scale = window?.windowScene?.screen.scale ?? traitCollection.displayScale
+            if scale > 0 { metalLayer.contentsScale = scale }
+            let effective = metalLayer.contentsScale
+            metalLayer.drawableSize = CGSize(width: bounds.width * effective, height: bounds.height * effective)
         }
 
         @objc private func tick() {

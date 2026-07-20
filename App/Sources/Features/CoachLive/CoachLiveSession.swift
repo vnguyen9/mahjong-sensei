@@ -218,6 +218,15 @@ final class CoachLiveSession: Identifiable {
     }
     var rescanPrompt: RescanPrompt?
 
+    /// Workstream F: set by `requestRecount(zone:)` (the force-recount FAB's
+    /// long-press menu) to redirect the AR loop's very next tick to a one-shot
+    /// crop of just this zone, bypassing both cadence and the normal
+    /// motion-driven `ROIScheduler.decide` for that one tick — see the
+    /// `startARLoop` check right before `roiScheduler.decide`. Consumed
+    /// (cleared) by that same tick whether or not the zone was actually on
+    /// screen. Never set on the mock/fallback paths.
+    private var forcedZoneRecount: TableZoneID?
+
     /// Dev-only diagnostics the loop records every tick — powers the
     /// triple-tap debug HUD; see `LiveDiagnostics`.
     var diagnostics = LiveDiagnostics()
@@ -225,66 +234,23 @@ final class CoachLiveSession: Identifiable {
     /// path) reads as all-zero rather than requiring the HUD to unwrap.
     var trackerDiagnostics: Recognition.TrackerDiagnostics { tracker?.diagnostics ?? Recognition.TrackerDiagnostics() }
 
-    #if DEBUG
-    /// Chunk D (v2.5 §7, Phase C "shadow mode") — the placeholder-model
-    /// `PhysicalCensus` pipeline, run beside (never instead of) the trusted
-    /// v2 `tracker`. Lazily constructed the first time `startARLoop`
-    /// resolves a recognizer post table-lock (see `updateShadowCensus`) —
-    /// `nil` until then, and always `nil` on the mock path (nothing calls
-    /// `updateShadowCensus` there).
-    private var shadowCensus: ShadowCensusEngine?
-    /// A default 0.9m plane-local square stand-in for the real
-    /// `TableCalibrationController`/`CalibratedTable` confirmation flow
-    /// (Chunk C) — wiring the real user-confirmed quad into this loop is a
-    /// later integration; shadow mode only needs SOME calibrated zones to
-    /// exercise the census pipeline. Derived once, lazily, alongside
-    /// `shadowCensus` itself.
-    private var shadowCensusTable: CalibratedTable?
-    /// Debug-HUD-only summary of `shadowCensus.latestSnapshot`
-    /// (`LiveFeedPane.debugHUD`) — never read by any production UI, and
-    /// nothing in `updateShadowCensus` ever writes to `tracker` or any
-    /// other published production property.
-    var shadowCensusSummary: String = "—"
-    /// A/B escape hatch mirroring `useROIScheduler` — flips the shadow
-    /// census off without touching the trusted v2 loop at all. Default OFF:
-    /// the shadow pass runs the locator per zone PLUS the 43-class classifier
-    /// once per tile crop (≤40) every settle tick — a ~45×-inference thermal
-    /// multiplier on top of the production tracker. Toggle on only for A/B.
-    var runShadowCensus = false
-
-    /// The real Stage-1 locator: the bundled single-class `tile` model
-    /// (`MahjongTileLocatorV3`), loaded once and shared by the census engine.
-    /// `PrototypeLocator` keeps only its box + confidence, so a one-class
-    /// model works through the same seam as the 43-class placeholder. Nil
-    /// until the first `updateShadowCensus`; falls back to the caller's
-    /// 43-class recognizer if the locator model isn't bundled (see
-    /// `resolveLocatorRecognizer`).
-    private var shadowLocatorRecognizer: (any Recognizer)?
-    /// True once we've attempted to load `shadowLocatorRecognizer` (so a
-    /// failed/absent load falls back to the 43-class recognizer exactly once
-    /// rather than re-attempting the bundle lookup every frame).
-    private var shadowLocatorResolved = false
-
-    /// User-confirmed table from the DEBUG calibration flow (Chunk C).
-    /// Preferred by `updateShadowCensus` over `makeDefaultShadowCensusTable()`;
-    /// nil until the user confirms, so the census stays green off the square.
-    private var confirmedShadowCensusTable: CalibratedTable?
-    /// Drives the DEBUG-only calibration cover in `CoachLiveView`. Set once on
-    /// table lock (in `startARLoop`), cleared on confirm/rescan. `Identifiable`
-    /// so `.fullScreenCover(item:)` can carry the locked-plane snapshot the
-    /// view needs without publishing the raw transform separately.
-    var shadowCalibrationRequest: ShadowCalibrationRequest?
-
-    struct ShadowCalibrationRequest: Identifiable {
-        let id = UUID()
-        let lockedPlaneTransform: simd_float4x4
-    }
-
-    /// Drives the DEBUG ARKit-native calibration cover (`ARCalibrationView`).
-    /// The calibration screen runs its OWN self-contained ARKit session, so we
+    /// Drives the ARKit-native calibration cover (`ARCalibrationView`). The
+    /// calibration screen runs its OWN self-contained ARKit session, so we
     /// pause `arCapture` while it's up to avoid two live `ARSession`s. On
     /// confirm it sets `calibratedTableGeometry`, which the NEXT `.tableSpace`
     /// tracker build consumes (calibrate before lock, or after a rescan).
+    /// Originally DEBUG-only (wired to the debug HUD's "Calibrate table (AR)"
+    /// button); hoisted into the production surface for Workstream G's
+    /// "Recalibrate" affordance (`LiveFeedPane`), which reuses this exact
+    /// mechanism rather than inventing a new one. NOTE (`// TODO: G`):
+    /// `calibratedTableGeometry` is consumed only ONCE, at the `.tableSpace`
+    /// tracker build in `startARLoop` — recalibrating mid-session (after the
+    /// tracker already exists) updates this property but does NOT rebuild the
+    /// running tracker's geometry, so today "Recalibrate" re-captures a fresh
+    /// quad without it taking visible effect until a future session/rescan
+    /// rebuilds the tracker. A real fix needs `startARLoop` to react to a
+    /// geometry change post-lock (re-derive zone rects / re-run the sweep),
+    /// which is out of scope here.
     var showARCalibration = false
 
     @MainActor
@@ -299,7 +265,6 @@ final class CoachLiveSession: Identifiable {
         showARCalibration = false
         arCapture?.resume()
     }
-    #endif
 
     /// User-confirmed table geometry from the ARKit-native calibration flow
     /// (`ARCalibrationView`). `TableGeometry`'s three scalars are orientation-
@@ -365,6 +330,21 @@ final class CoachLiveSession: Identifiable {
     // committed-change cadence, ≤ ~3 Hz, only on a `revision` bump).
     private static let publishInterval: TimeInterval = 0.3
     private static let pollInterval: Duration = .milliseconds(120)
+    /// When true, the AR loop SKIPS inference/ingest while the camera reads as
+    /// moving (`CameraMotionGate`) — the old thermal/blur guard. Now **false**
+    /// by default: detection runs continuously so tracking keeps up while you
+    /// pan a handheld iPad (per-track position smoothing, `TrackerConfig
+    /// .positionSmoothing`, absorbs the extra motion-frame noise). The `moving`
+    /// signal is still computed for the "hold steady" chip + bracket re-project.
+    private static let motionPausesInference = false
+    /// When true, the AR loop's `.fullFrame` refresh passes (the periodic
+    /// safety net + each moving→still settle) are recognized via
+    /// `TiledTileRecognizer` — an overlapping NATIVE-resolution 3×4 grid over
+    /// the whole table — instead of one 640-letterboxed full-frame pass. This
+    /// is the recall fix for the dense central pond (~45 tiles, ~15px each when
+    /// the 4:3 frame is squished to 640) AND the opponents' revealed melds.
+    /// Between refreshes the cheap per-zone crop path keeps latency down.
+    private static let tilesFullFrameRefresh = true
     private var lastPublishedRevision = -1
     private var lastPublishTime: TimeInterval = 0
 
@@ -760,9 +740,23 @@ final class CoachLiveSession: Identifiable {
                         ScoringEngine.isWinningShape(Hand(concealedTiles: concealed, melds: melds))
                     }
                     config.coordinateSpace = .tableSpace
-                    // Prefer the user's ARKit-calibrated geometry; fall back to
-                    // the default square so the flow stays green pre-calibration.
-                    config.tableGeometry = self.calibratedTableGeometry ?? TrackerConfig.TableGeometry()
+                    // Detections are pose-projected table points, so smooth each
+                    // track's center to stop pond/hand boundary flicker (steadier
+                    // counts) — see `TrackerConfig.positionSmoothing`.
+                    config.positionSmoothing = 0.35
+                    // Auto table-clear hand-end is off in AR: camera motion /
+                    // relocalization / TrackID churn mimic a "swept table". The
+                    // user ends a hand manually (`requestHandEnd()`).
+                    config.autoHandEndEnabled = false
+                    // Prefer the user's edited layout; otherwise generate the
+                    // whole-table auto-partition (you=bottom, pond=center,
+                    // opponents=sides, no gaps) IN THE LIVE FRAME from the locked
+                    // plane's real extent — so it's aligned by construction (no
+                    // cross-session transfer of positional corners).
+                    let planeExtent = arCapture.lockedPlaneExtent ?? TrackerConfig.TableGeometry().extent
+                    config.tableGeometry = self.calibratedTableGeometry
+                        ?? TableCalibrationGeometry.autoPartition(extentMetres: planeExtent,
+                                                                  mySeatWind: self.seatWind)
                     self.trackerConfig = config
 
                     let newTracker = TableTracker(config: config)
@@ -782,19 +776,6 @@ final class CoachLiveSession: Identifiable {
                     self.zoneLastPromptedAt = [:]
                     self.rescanPrompt = nil
                     arCapture.enterSweeping()
-
-                    #if DEBUG
-                    // Chunk C: on first lock, offer the DEBUG shadow-census
-                    // calibration cover (`CoachLiveView`). One-shot — this
-                    // whole block runs once, when `tracker` goes non-nil.
-                    // Shadow-only: it never gates the production sweep/tracker.
-                    if self.runShadowCensus,
-                       self.confirmedShadowCensusTable == nil,
-                       self.shadowCalibrationRequest == nil,
-                       let locked = arCapture.lockedPlaneTransform {
-                        self.shadowCalibrationRequest = ShadowCalibrationRequest(lockedPlaneTransform: locked)
-                    }
-                    #endif
 
                     let sessionStart = CACurrentMediaTime()
                     self.zoneTrackingStartedAt = sessionStart
@@ -858,7 +839,10 @@ final class CoachLiveSession: Identifiable {
                     let elapsed = now - (sweepStartedAt ?? now)
                     let coverageComplete = Set(TableZoneID.allCases).isSubset(of: self.sweepZonesSeen)
 
-                    if doneTapped || (elapsed >= 12 && coverageComplete) {
+                    // Hard cap so the "pan slowly… Done" card can never hang
+                    // indefinitely if coverage tracking under-counts a zone —
+                    // auto-exit to live tracking after 30s regardless.
+                    if doneTapped || (elapsed >= 12 && coverageComplete) || elapsed >= 30 {
                         wasSweeping = false
                         motionGate = CameraMotionGate()
                         arCapture.enterTracking()
@@ -970,7 +954,7 @@ final class CoachLiveSession: Identifiable {
                     forceNextInference = true
                     self.updateARZoneBoxes(from: tracker.state)
                 }
-                if moving {
+                if moving, Self.motionPausesInference {
                     await self.finishTick(loopStart: loopStart)
                     continue
                 }
@@ -1013,6 +997,11 @@ final class CoachLiveSession: Identifiable {
                 // settled table promptly rather than waiting out idle/burst.
                 if forceNextInference, decision == .skip { decision = .infer }
                 forceNextInference = false
+                // Workstream F: the force-recount FAB's per-zone request
+                // bypasses cadence the same way — the user tapped an explicit
+                // "look now" affordance, so a `.skip` tick shouldn't make
+                // them wait out the idle/burst window.
+                if self.forcedZoneRecount != nil, decision == .skip { decision = .infer }
 
                 switch decision {
                 case .suspend:
@@ -1058,8 +1047,28 @@ final class CoachLiveSession: Identifiable {
                     // Lane B chunk E: ask the ROI scheduler what to infer.
                     // `useROIScheduler == false` always forces the original
                     // full-frame behavior (an A/B escape hatch).
+                    //
+                    // Workstream F: a pending per-zone force-recount request
+                    // (the FAB's long-press menu — "Just the pond"/"Just my
+                    // hand") preempts BOTH of the above for exactly one tick —
+                    // one-shot crop of just that zone's rect, consuming the
+                    // request whether or not the zone actually projected this
+                    // tick (a stale request that can never resolve — e.g. the
+                    // camera panned off that zone right after the tap —
+                    // shouldn't silently keep hijacking every future tick).
                     let plan: ROIScheduler.InferencePlan
-                    if self.useROIScheduler {
+                    if let requestedZone = self.forcedZoneRecount {
+                        self.forcedZoneRecount = nil
+                        if let rect = zones.identified.first(where: { $0.id == requestedZone })?.rect {
+                            let cropRect = ROICropMapper.cropRect(forZoneImageRect: rect, orientedImageSize: frame.orientedImageSize,
+                                                                  imageResolution: frame.imageResolution)
+                            plan = cropRect.width >= 2 && cropRect.height >= 2 ? .crops([cropRect]) : .fullFrame
+                        } else {
+                            // Requested zone isn't on screen right now — fall
+                            // back to full-frame rather than drop the tap.
+                            plan = .fullFrame
+                        }
+                    } else if self.useROIScheduler {
                         let myTurn = tracker.state.currentTurn == .me || tracker.state.myHand.count % 3 == 2
                         plan = roiScheduler.decide(motionField: field, zones: zones, myTurn: myTurn,
                                                    justSettled: justSettled, orientedImageSize: frame.orientedImageSize,
@@ -1077,25 +1086,37 @@ final class CoachLiveSession: Identifiable {
 
                     switch plan {
                     case .fullFrame:
-                        self.diagnostics.inferencesRun += 1
                         // Recognize the FULL captured frame — the periodic
-                        // safety net, the moving→still edge, or ROI
-                        // scheduling disabled.
-                        let recognizerFrame = RecognizerFrame.buffer(frame.pixelBuffer, orientation: .right)
-                        let result: RecognitionResult
-                        do {
-                            result = try await rec.recognize(recognizerFrame)
+                        // safety net, the moving→still edge, or ROI scheduling
+                        // disabled. In AR this is TILED into an overlapping
+                        // native-resolution 3×4 grid (`TiledTileRecognizer`) so
+                        // the dense central pond + opponents' revealed melds —
+                        // ~15px each when the whole 4:3 frame is letterboxed to
+                        // 640 — clear the detector's gate instead of vanishing.
+                        let fullTiles: [DetectedTile]
+                        if Self.tilesFullFrameRefresh {
+                            self.diagnostics.inferencesRun += TiledTileRecognizer.gridCols * TiledTileRecognizer.gridRows
+                            fullTiles = await TiledTileRecognizer.recognize(
+                                buffer: frame.pixelBuffer, roi: nil, minConfidence: 0.30,
+                                using: { f in (try? await rec.recognize(f)) ?? .empty })
                             self.lastPipelineError = nil
-                        } catch {
-                            self.recognizerErrorCount += 1
-                            self.lastPipelineError = String(describing: error)
-                            Self.logger.error("recognize() threw (\(self.recognizerErrorCount, privacy: .public) total): \(String(describing: error), privacy: .public)")
-                            result = .empty
+                        } else {
+                            self.diagnostics.inferencesRun += 1
+                            let recognizerFrame = RecognizerFrame.buffer(frame.pixelBuffer, orientation: .right)
+                            do {
+                                fullTiles = try await rec.recognize(recognizerFrame).tiles
+                                self.lastPipelineError = nil
+                            } catch {
+                                self.recognizerErrorCount += 1
+                                self.lastPipelineError = String(describing: error)
+                                Self.logger.error("recognize() threw (\(self.recognizerErrorCount, privacy: .public) total): \(String(describing: error), privacy: .public)")
+                                fullTiles = []
+                            }
                         }
                         self.isWarmingUp = false
                         if self.startupStage == .loadingDetector { self.startupStage = .lookingForTiles }
-                        self.diagnostics.lastRawDetectionCount = result.tiles.count
-                        self.diagnostics.lastTopDetections = result.tiles
+                        self.diagnostics.lastRawDetectionCount = fullTiles.count
+                        self.diagnostics.lastTopDetections = fullTiles
                             .sorted { $0.confidence > $1.confidence }
                             .prefix(3)
                             .map { "\($0.tile.code)@\(String(format: "%.2f", $0.confidence))" }
@@ -1105,7 +1126,7 @@ final class CoachLiveSession: Identifiable {
                         // (the seam that keeps `Recognition` ARKit-free — see
                         // `TableProjection`/`DetectionProjector`'s own docs).
                         let projected = DetectionProjector.projectToTableSpace(
-                            result.tiles, projection: projection, orientedImageSize: orientedSize,
+                            fullTiles, projection: projection, orientedImageSize: orientedSize,
                             tableExtent: extent, tileSize: SIMD2<Double>(0.024, 0.032))
 
                         // The loop is serial, so at most one inference is
@@ -1114,15 +1135,6 @@ final class CoachLiveSession: Identifiable {
                         // `visibleRegion` gate.
                         let outcome = tracker.ingest(projected, at: CACurrentMediaTime(), motion: sample)
                         self.logAndSnapshot(outcome, frame: frame.pixelBuffer, tracker: tracker)
-                        #if DEBUG
-                        // Chunk D shadow census (v2.5 §7, Phase C) — full-
-                        // frame/settle ticks only, never the ROI-crop path
-                        // below; awaited AFTER the trusted v2 ingest above
-                        // so a slow/broken shadow pass can never delay or
-                        // disrupt it.
-                        await self.updateShadowCensus(recognizer: rec, frame: frame, planeTransform: planeTransform,
-                                                      trackingNormal: arCapture.captureStage != .relocalizing)
-                        #endif
 
                     case let .crops(rects):
                         // Cap 2 crops/tick (thermal/latency budget) even
@@ -1538,6 +1550,16 @@ final class CoachLiveSession: Identifiable {
         events.removeAll { $0.id == id }
     }
 
+    /// Manually proposes a hand end (the AR path's automatic table-clear
+    /// detector is off — `config.autoHandEndEnabled == false`). Surfaces the
+    /// existing `HandEndedCard` (pick winner / dismiss) via the facade's
+    /// `requestHandEnd`. No-op on the mock path (no tracker).
+    func requestHandEnd() {
+        guard let tracker else { return }
+        tracker.requestHandEnd()
+        publishAfterCorrection()
+    }
+
     /// Applies the confirmed rotation and continues into the next hand. Real
     /// path: the facade rotates the winds + resets the table (`confirmHandEnd`);
     /// `applyState` then pulls the fresh winds/empty table. Mock path: the
@@ -1659,6 +1681,43 @@ final class CoachLiveSession: Identifiable {
     /// makes sense on this path.
     var isARCaptureActive: Bool { arCapture != nil && !usingFallbackCapture }
 
+    /// Workstream G: true while ARKit has lost world tracking and is trying
+    /// to relocalize (`ARCamera.trackingState == .limited(.relocalizing)`,
+    /// surfaced as `CaptureStage.relocalizing`) — `LiveFeedPane`'s calm
+    /// dim-and-nudge overlay keys off this. World-anchored geometry survives
+    /// a relocalization (the locked plane transform doesn't change), so the
+    /// overlay is purely reassurance, not a re-setup flow.
+    ///
+    /// Guarded by `!usingFallbackCapture`: once the loop degrades to the
+    /// image-space fallback, `arCapture.pause()` freezes `captureStage`
+    /// wherever it last was — including possibly `.relocalizing` — and
+    /// nothing ever moves it off that again. Without this guard the overlay
+    /// could get stuck on forever after a fallback that happened to trip
+    /// mid-relocalization.
+    @MainActor
+    var isRelocalizing: Bool { arCapture?.captureStage == .relocalizing && !usingFallbackCapture }
+
+    /// Workstream G: the 2D-fallback banner's "Retry AR setup" button
+    /// (`LiveFeedPane`). `usingFallbackCapture` is documented as one-way —
+    /// "a session doesn't re-attempt AR mid-flight" (see that property) —
+    /// because once the loop falls back, the plain `camera` AVCaptureSession
+    /// owns the capture device and `arCapture` is paused; re-establishing a
+    /// live `ARSession` from here would need to tear `camera` down first and
+    /// rebuild an `ARTableCapture`, which risks fighting the two capture
+    /// backends for the device and isn't something this class currently does
+    /// anywhere. `rescanTable()` is the closest REAL, already-wired
+    /// affordance reachable from this view — it no-ops while
+    /// `usingFallbackCapture` is true (via its own `isARCaptureActive`
+    /// guard), which is an honest "there's nothing to rescan" rather than a
+    /// silent lie about retrying AR.
+    /// TODO: G — a genuine retry needs to stop `camera`, construct a fresh
+    /// `ARTableCapture`, and re-run `startARLoop` (or have `ScanCoordinator`
+    /// re-enter `CoachLiveFlowView` with a new session) — neither is safely
+    /// reachable from `CoachLiveSession` alone today.
+    func retryARSetup() {
+        rescanTable()
+    }
+
     /// "Rescan table" (Lane B chunk H item 3): re-enters the guided sweep
     /// stage without resetting the tracker — the sweep card reappears
     /// (`StartupStatusOverlay` reads `arCapture.captureStage` directly, so
@@ -1674,6 +1733,33 @@ final class CoachLiveSession: Identifiable {
     /// Consumed (and reset) by the AR loop's very next tick. A no-op off
     /// the AR/sweeping path (the link isn't shown there).
     func finishSweepEarly() { sweepDoneRequested = true }
+
+    /// Workstream F: the live-feed's force-recount FAB. `zone == nil`
+    /// ("Recount everything") reuses `rescanTable()` verbatim — a REAL
+    /// force-inference mechanism already wired to the AR loop (re-enters the
+    /// guided full-frame sweep). A non-nil `zone` ("Just the pond"/"Just my
+    /// hand") sets `forcedZoneRecount`, which `startARLoop`'s tracking-mode
+    /// tick checks before `roiScheduler.decide` to substitute a one-shot crop
+    /// of just that zone — see the check right before that call. Both are AR-
+    /// path-only (matching `rescanTable()`'s own `isARCaptureActive` gate);
+    /// off that path this degrades to a harmless advice recompute — there is
+    /// no "zone" concept on the image-space fallback or mock loops, and no
+    /// per-tick force-inference hook on `startLoop` to redirect either.
+    /// TODO: F — a real per-zone (or even per-tick force) hook for the
+    /// non-AR `startLoop` path is out of scope here; wire one if the
+    /// image-space fallback ever needs this FAB to do more than no-op.
+    func requestRecount(zone: TableZoneID? = nil) {
+        if let zone {
+            if isARCaptureActive { forcedZoneRecount = zone }
+        } else {
+            rescanTable()
+        }
+        if tracker != nil {
+            publishAfterCorrection()
+        } else {
+            recomputeAdvice()
+        }
+    }
 
     /// Dismisses the current rescan-prompt chip's "×". The zone's normal
     /// 90s re-prompt cooldown already started when the prompt was first
@@ -2009,115 +2095,6 @@ final class CoachLiveSession: Identifiable {
             lastFrameSnapshot = ScanView.photo(from: buffer)
         }
     }
-
-    #if DEBUG
-    /// Chunk D shadow pass (v2.5 §7) — runs the placeholder-model census
-    /// pipeline for one already-resolved recognizer/frame, fire-and-forget
-    /// from `startARLoop`'s full-frame/settle ticks only. `recognizer` is
-    /// the SAME instance the v2 loop just resolved (never re-resolves its
-    /// own — `recognizerProvider()` may not be cheap to call twice).
-    /// `ShadowCensusEngine.observe` never throws, so no `do/catch` is
-    /// needed here to protect the caller — any internal failure is folded
-    /// into the engine's own `PhysicalCensus` (§8), never propagated.
-    /// Touches only shadow state (`shadowCensus`/`shadowCensusTable`/
-    /// `shadowCensusSummary`/`shadowLocator*`/`confirmedShadowCensusTable`)
-    /// — never `tracker` or any other published production state.
-    /// `@MainActor` (matching `ShadowCensusEngine` itself, and the
-    /// `Task { @MainActor in ... }` this is always called from) so the
-    /// compiler can statically verify same-actor access to `shadowCensus`'s
-    /// state without an extra `await` hop.
-    @MainActor
-    private func updateShadowCensus(recognizer: any Recognizer, frame: ARTableFrame,
-                                    planeTransform: simd_float4x4, trackingNormal: Bool) async {
-        guard runShadowCensus else { return }
-        if shadowCensus == nil {
-            // Stage 1 = the real single-class locator (falls back to the
-            // 43-class `recognizer` if unbundled); Stage 2 = the 43-class
-            // placeholder classifier. One-line swap the code always advertised.
-            let locatorRecognizer = await resolveLocatorRecognizer(fallback: recognizer)
-            shadowCensus = ShadowCensusEngine(locatorRecognizer: locatorRecognizer,
-                                              classifierRecognizer: recognizer)
-        }
-        if shadowCensusTable == nil { shadowCensusTable = Self.makeDefaultShadowCensusTable() }
-        // Prefer the user-confirmed calibration quad; the default square keeps
-        // the pipeline exercised before (or without) any confirmation.
-        let table = confirmedShadowCensusTable ?? shadowCensusTable
-        guard let shadowCensus, let table else { return }
-        await shadowCensus.observe(frame: frame, planeTransform: planeTransform, table: table,
-                                   trackingNormal: trackingNormal, at: CACurrentMediaTime())
-        shadowCensusSummary = Self.shadowCensusSummaryText(shadowCensus.latestSnapshot)
-    }
-
-    /// Load the bundled single-class locator once, off the main actor, and
-    /// cache it. Returns `fallback` (the already-resolved 43-class recognizer)
-    /// if the locator model isn't bundled or won't load — so the census still
-    /// runs (through the placeholder locator) rather than going dark.
-    @MainActor
-    private func resolveLocatorRecognizer(fallback: any Recognizer) async -> any Recognizer {
-        if shadowLocatorResolved { return shadowLocatorRecognizer ?? fallback }
-        shadowLocatorResolved = true
-        let loaded = await Task.detached(priority: .userInitiated) {
-            (try? VisionRecognizer(bundledModelNamed: "MahjongTileLocatorV3")) as (any Recognizer)?
-        }.value
-        if loaded != nil {
-            Self.logger.notice("shadow census: single-class locator loaded (MahjongTileLocatorV3)")
-        } else {
-            Self.logger.notice("shadow census: locator model unbundled — falling back to 43-class recognizer")
-        }
-        shadowLocatorRecognizer = loaded
-        return loaded ?? fallback
-    }
-
-    /// Store the user-confirmed calibration quad and dismiss the cover.
-    @MainActor
-    func confirmShadowCensusTable(_ table: CalibratedTable) {
-        confirmedShadowCensusTable = table
-        shadowCalibrationRequest = nil
-    }
-
-    /// "Rescan": drop the confirmation and re-present a fresh (default-square)
-    /// calibration against the SAME locked plane — plane detection is off
-    /// post-lock, so the transform is stable and there's nothing to re-lock.
-    @MainActor
-    func rescanShadowCalibration() {
-        confirmedShadowCensusTable = nil
-        if let locked = arCapture?.lockedPlaneTransform {
-            shadowCalibrationRequest = ShadowCalibrationRequest(lockedPlaneTransform: locked)
-        }
-    }
-
-    @MainActor
-    func dismissShadowCalibration() { shadowCalibrationRequest = nil }
-
-    /// The census's default-square seed, re-exposed for `TableCalibrationView`'s
-    /// `initialTable` so the view and the `updateShadowCensus` fallback can
-    /// never drift apart.
-    static func debugDefaultShadowCensusTable() -> CalibratedTable { makeDefaultShadowCensusTable() }
-
-    /// A 0.9m plane-local square centered at the table anchor's origin,
-    /// corners near-left/near-right/far-right/far-left with +Z toward the
-    /// user — `TableQuadProposal.Proposal`'s own winding/axis convention
-    /// (see that type's doc), which is what `CalibratedTable.defaultZones`
-    /// expects. Stands in for the real Chunk C calibration UX (see
-    /// `shadowCensusTable`'s doc).
-    private static func makeDefaultShadowCensusTable() -> CalibratedTable {
-        let half: Float = 0.45
-        let corners: [SIMD2<Float>] = [SIMD2(-half, half), SIMD2(half, half), SIMD2(half, -half), SIMD2(-half, -half)]
-        // A 4-element corners array always constructs successfully —
-        // `CalibratedTable.init?(corners:)` only fails on a different count.
-        guard let table = CalibratedTable(corners: corners) else {
-            fatalError("CalibratedTable(corners:) with exactly 4 corners must succeed")
-        }
-        return table
-    }
-
-    private static func shadowCensusSummaryText(_ snapshot: Recognition.CensusSnapshot?) -> String {
-        guard let snapshot else { return "—" }
-        let coverages = snapshot.coverage.values
-        let avgCoveragePercent = coverages.isEmpty ? 0 : Int((coverages.reduce(0, +) / Float(coverages.count)) * 100)
-        return "MINE \(snapshot.mine.total) · TABLE \(snapshot.table.total) · unres \(snapshot.unresolved.count) · cov \(avgCoveragePercent)%"
-    }
-    #endif
 
     /// One projected UI event, plus the pond track it references (for a tile fix).
     private struct ProjectedEvent {

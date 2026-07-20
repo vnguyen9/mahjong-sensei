@@ -234,4 +234,40 @@ final class TableSpaceZoneTests: XCTestCase {
         XCTAssertEqual(meld.count, 3, "image-space default still splits the right-edge cluster out of pond")
         XCTAssertTrue(meld.allSatisfy { $0.seat == .right }, "image-space displacement owner = .right")
     }
+
+    // MARK: - 7. Whole-table auto-partition (the AR default) — no gaps
+
+    /// A `.tableSpace` config with the gapless whole-table auto-partition.
+    private func partitionConfig() -> TrackerConfig {
+        var config = TrackerConfig()
+        config.coordinateSpace = .tableSpace
+        config.tableGeometry = TableCalibrationGeometry.autoPartition(extentMetres: 0.9, mySeatWind: .east)
+        return config
+    }
+
+    func testPartitionAssignsEveryTileToPondOrNearestEdge() {
+        let cfg = partitionConfig()
+        let store = TrackStore(config: cfg), zone = ZoneModel(config: cfg)
+        // One well-separated tile per region — plus a "moat" tile between the
+        // pond and the left edge that the legacy thin bands would have dropped
+        // to `.unresolved` (the exact bug this layout fixes).
+        let dets = [det(.m(1), box(0.50, 0.50)),   // centre        → pond
+                    det(.m(2), box(0.50, 0.95)),   // my (high-y) edge → myHand
+                    det(.m(3), box(0.50, 0.05)),   // far (low-y) edge → across
+                    det(.m(4), box(0.05, 0.50)),   // left edge       → left
+                    det(.m(5), box(0.95, 0.50)),   // right edge      → right
+                    det(.m(6), box(0.15, 0.50))]   // moat (x<0.28)   → nearest = left
+        for i in 0..<8 { ingest(dets, store, zone, at: Double(i) * 0.2) }
+
+        let byFace = Dictionary(store.tracks.map { ($0.face, $0) }, uniquingKeysWith: { a, _ in a })
+        XCTAssertEqual(byFace[.m(1)]?.zone, .pond)
+        XCTAssertEqual(byFace[.m(2)]?.zone, .myHand)
+        XCTAssertEqual(byFace[.m(3)]?.zone, .opponentMeld); XCTAssertEqual(byFace[.m(3)]?.seat, .across)
+        XCTAssertEqual(byFace[.m(4)]?.zone, .opponentMeld); XCTAssertEqual(byFace[.m(4)]?.seat, .left)
+        XCTAssertEqual(byFace[.m(5)]?.zone, .opponentMeld); XCTAssertEqual(byFace[.m(5)]?.seat, .right)
+        // The moat tile is claimed (nearest = left), NOT left unresolved.
+        XCTAssertEqual(byFace[.m(6)]?.zone, .opponentMeld); XCTAssertEqual(byFace[.m(6)]?.seat, .left)
+        XCTAssertFalse(store.tracks.contains { $0.zone == .unresolved },
+                       "partition tiles the whole table — nothing is unresolved: \(zoneSummary(store.tracks))")
+    }
 }

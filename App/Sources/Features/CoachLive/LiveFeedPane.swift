@@ -37,6 +37,20 @@ struct LiveFeedPane: View {
     /// Dev-only diagnostics overlay, toggled by a triple-tap on the LIVE
     /// pill — see `debugHUD`. Not a Settings entry; a bisect aid only.
     @State private var showHUD = false
+    #if DEBUG
+    /// Dev-only: draw the calibrated table geometry projected onto the feed
+    /// (`LiveGeometryDebugOverlay`). Default on in DEBUG; toggled from the HUD.
+    @State private var showGeometryDebug = true
+    #endif
+    /// E2's one-time "Calibrated · tracking live" toast — flips true on this
+    /// view's first appearance (i.e. once per live session, since
+    /// `LiveFeedPane` lives for the session's lifetime) and back false ~2.5s
+    /// later so it reads as a brief confirmation, not a persistent chip.
+    @State private var showCalibratedToast = false
+    /// Workstream F: long-pressing the force-recount FAB opens this menu
+    /// ("Recount everything / Just the pond / Just my hand") instead of
+    /// firing the FAB's default tap action.
+    @State private var showRecountMenu = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -51,6 +65,19 @@ struct LiveFeedPane: View {
                     .transition(.opacity)
             }
 
+            // Workstream G (spec screen 14): dims the feed slightly during a
+            // mid-session ARKit relocalization — the calm half of the
+            // relocalization treatment, paired with `StartupStatusOverlay`'s
+            // `relocalizingCard` for the centered nudge. Both key off the same
+            // `session.isRelocalizing` state, so they show/hide together with
+            // no separate timer — auto-hides the instant tracking resumes.
+            if session.isRelocalizing {
+                Color.black.opacity(0.35)
+                    .frame(width: fullSize.width, height: fullSize.height)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
+
             StartupStatusOverlay()
                 .frame(width: fullSize.width, height: fullSize.height)
                 .animation(.easeInOut(duration: 0.25), value: session.startupStage)
@@ -59,11 +86,41 @@ struct LiveFeedPane: View {
                                 onTapZoneChip: onTapZoneChip)
                 .frame(width: fullSize.width, height: fullSize.height)
 
+            #if DEBUG
+            // Dev-only: the calibrated geometry projected onto the feed.
+            if showGeometryDebug {
+                LiveGeometryDebugOverlay(previewBounds: previewFrame)
+                    .frame(width: fullSize.width, height: fullSize.height)
+            }
+            #endif
+
+            if showCalibratedToast {
+                calibratedToast
+                    .frame(width: fullSize.width, height: fullSize.height, alignment: .top)
+                    .transition(.opacity)
+            }
+
             chrome
                 .frame(width: fullSize.width, height: fullSize.height, alignment: .top)
+
+            // Workstream F: force-recount FAB. Anchored from the TOP at the
+            // smallest possible feed-pane height (`BreathingController`'s
+            // range floor) rather than bottom-aligned against `fullSize` —
+            // `LiveFeedPane`'s own content is laid out over the FULL screen
+            // height here but the pane itself is clipped to the current
+            // (breathing-seam-adjustable) fraction of it from the top, so a
+            // bottom-anchored button would vanish under the clip whenever the
+            // seam is dragged toward its shorter end. This position stays
+            // inside the visible region at every seam position.
+            recountFAB
+                .padding(.top, recountFABTopInset)
+                .padding(.trailing, 16)
+                .frame(width: fullSize.width, height: fullSize.height, alignment: .topTrailing)
         }
         .frame(width: fullSize.width, height: fullSize.height, alignment: .top)
         .animation(.easeInOut(duration: 0.25), value: blursFeed)
+        .animation(.easeInOut(duration: 0.4), value: showCalibratedToast)
+        .animation(.easeInOut(duration: 0.25), value: session.isRelocalizing)
         .onAppear {
             withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) { pulse = true }
             #if !targetEnvironment(simulator)
@@ -77,7 +134,76 @@ struct LiveFeedPane: View {
             // `requestAndStart()` here would fight ARKit for it.
             if session.arCapture == nil { session.camera.requestAndStart() }
             #endif
+            showCalibratedToast = true
+            Task {
+                try? await Task.sleep(for: .seconds(2.5))
+                showCalibratedToast = false
+            }
         }
+        .confirmationDialog("Force recount", isPresented: $showRecountMenu, titleVisibility: .visible) {
+            Button("Recount everything") { session.requestRecount() }
+            Button("Just the pond") { session.requestRecount(zone: .pond) }
+            Button("Just my hand") { session.requestRecount(zone: .hand) }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    /// A brief, centered confirmation that tracking is live — shown once per
+    /// session on this pane's first appearance, then fades. Purely
+    /// informational (no tap target), sits below the top chrome so it
+    /// doesn't collide with the back/torch buttons or the LIVE pill.
+    private var calibratedToast: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(MJColor.jadeAccent)
+            Text("Calibrated · tracking live")
+                .font(MJFont.ui(13, weight: .semibold))
+                .foregroundStyle(MJColor.creamHeading)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background {
+            Capsule().fill(.ultraThinMaterial).environment(\.colorScheme, .dark)
+            Capsule().fill(Color(hex: 0x0A241D, alpha: 0.7))
+        }
+        .overlay { Capsule().strokeBorder(MJColor.gold(0.3), lineWidth: 1) }
+        .padding(.top, safeTop + 96)
+        .allowsHitTesting(false)
+    }
+
+    // MARK: - Force-recount FAB (Workstream F)
+
+    /// Distance from the pane's top at which the FAB sits — pinned just
+    /// inside the shortest possible visible feed height
+    /// (`BreathingController.range.lowerBound` of `fullSize.height`) so it's
+    /// never clipped by the breathing seam, however far the user has dragged
+    /// it. See the body's placement comment for why bottom-anchoring against
+    /// `fullSize` doesn't work here.
+    private var recountFABTopInset: CGFloat {
+        max(safeTop + 60, fullSize.height * BreathingController.range.lowerBound - 68)
+    }
+
+    /// Tap = "Recount everything" (the common case — reuses the real
+    /// `rescanTable()` force-inference mechanism). Long-press = the
+    /// per-zone menu. Plain `Circle` button, not `Button`, so the tap and
+    /// long-press gestures compose cleanly (a `Button`'s own gesture
+    /// recognizer would otherwise eat the long-press before
+    /// `onLongPressGesture` sees it).
+    private var recountFAB: some View {
+        Image(systemName: "arrow.triangle.2.circlepath")
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(MJColor.gold)
+            .frame(width: 48, height: 48)
+            .background {
+                Circle().fill(.ultraThinMaterial).environment(\.colorScheme, .dark)
+                Circle().fill(Color(hex: 0x0A241D, alpha: 0.6))
+            }
+            .overlay { Circle().strokeBorder(MJColor.gold(0.35), lineWidth: 1) }
+            .contentShape(Circle())
+            .onTapGesture { session.requestRecount() }
+            .onLongPressGesture(minimumDuration: 0.5) { showRecountMenu = true }
+            .accessibilityLabel("Force recount")
+            .accessibilityHint("Double tap to recount everything; touch and hold for more options")
     }
 
     // MARK: - Fixed feed layer
@@ -110,7 +236,11 @@ struct LiveFeedPane: View {
             // and the dark-table suggestion both live in this same slot —
             // they can't both be relevant at once, and cameraMoving wins
             // (there's no point suggesting the torch while the frame itself
-            // is unusable for tracking).
+            // is unusable for tracking). Workstream G adds the 2D-fallback
+            // banner as the lowest-priority member of the same one-at-a-time
+            // chain (spec screen 15) — it's persistent (stays up the whole
+            // time `usingFallbackCapture` is true) but yields to anything
+            // more urgent/actionable above it.
             if session.cameraMoving {
                 holdSteadyChip
                     .transition(.opacity)
@@ -120,6 +250,17 @@ struct LiveFeedPane: View {
             } else if session.isDark && !torchOn && !session.torchSuggestionDismissed {
                 darkTableChip
                     .transition(.opacity)
+            } else if session.usingFallbackCapture {
+                fallbackCaptureChip
+                    .transition(.opacity)
+            }
+            // Workstream G: always-available recalibrate link (spec screen
+            // 14/15's "Recalibrate" affordance) — AR-active only, same gate
+            // `CoachLiveView`'s state-pane "Rescan table" link already uses,
+            // since re-entering `ARCalibrationView` needs a live `arCapture`
+            // (see `beginARCalibration()`).
+            if session.isARCaptureActive {
+                recalibrateLink
             }
             if showHUD {
                 debugHUD.frame(maxWidth: .infinity, alignment: .leading)
@@ -131,6 +272,7 @@ struct LiveFeedPane: View {
         .animation(.easeInOut(duration: 0.2), value: session.isDark)
         .animation(.easeInOut(duration: 0.2), value: session.cameraMoving)
         .animation(.easeInOut(duration: 0.2), value: session.rescanPrompt)
+        .animation(.easeInOut(duration: 0.2), value: session.usingFallbackCapture)
     }
 
     /// Lane B chunk D's "hold steady" chip — same capsule styling family as
@@ -224,6 +366,56 @@ struct LiveFeedPane: View {
         .overlay { Capsule().strokeBorder(MJColor.amberZone.opacity(0.45), lineWidth: 1) }
     }
 
+    /// Workstream G (spec screen 15): the persistent "we've degraded to 2D"
+    /// banner — shown for the rest of the session once `startARLoop`'s
+    /// never-locks/unavailable fallback hands off to the classic image-space
+    /// loop (`session.usingFallbackCapture`). Unobtrusive (same capsule
+    /// family as the other chips, not a takeover), but doesn't self-dismiss —
+    /// unlike `holdSteadyChip`/`darkTableChip`, there's nothing transient
+    /// about this state to wait out. See `retryARSetup()` for what "Retry AR
+    /// setup" actually does today (and its gap).
+    private var fallbackCaptureChip: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "square.on.square")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("Switched to 2D mode — still tracking, just without depth")
+                    .font(MJFont.ui(12, weight: .semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(MJColor.cream)
+
+            Button {
+                session.retryARSetup()
+            } label: {
+                Text("Retry AR setup")
+                    .font(MJFont.ui(11, weight: .bold))
+                    .foregroundStyle(MJColor.gold)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background {
+            Capsule().fill(.ultraThinMaterial).environment(\.colorScheme, .dark)
+            Capsule().fill(Color(hex: 0x0A241D, alpha: 0.6))
+        }
+        .overlay { Capsule().strokeBorder(MJColor.gold(0.3), lineWidth: 1) }
+    }
+
+    /// Workstream G's "Recalibrate" affordance (spec screens 14/15) — reuses
+    /// the exact ARKit-native calibration flow (`beginARCalibration()` →
+    /// `ARCalibrationView` cover in `CoachLiveView`) that used to be a
+    /// debug-HUD-only button, hoisted into production for this. See
+    /// `calibratedTableGeometry`'s doc for the known gap: recalibrating
+    /// mid-session captures a fresh geometry but doesn't retroactively rebuild
+    /// the already-running tracker.
+    private var recalibrateLink: some View {
+        Button("Recalibrate") { session.beginARCalibration() }
+            .font(MJFont.ui(11, weight: .semibold))
+            .foregroundStyle(MJColor.cream(0.55))
+            .buttonStyle(.plain)
+    }
+
     private var torchButton: some View {
         Button {
             torchOn.toggle()
@@ -315,12 +507,11 @@ struct LiveFeedPane: View {
             Text(session.diagnostics.roiPlan)
             Text("err(\(session.recognizerErrorCount)): \(session.lastPipelineError ?? "—")")
             #if DEBUG
-            Text("census: \(session.shadowCensusSummary)")
             let geo = session.calibratedTableGeometry
             Text("cal: \(geo.map { String(format: "ext %.2f · band %.2f · pond %.2f", $0.extent, $0.handBandDepth, $0.pondRadius) } ?? "—")")
-            Button("Calibrate table (AR)") { session.beginARCalibration() }
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(MJColor.cream(1))
+            Text("geom overlay: \(showGeometryDebug ? "ON" : "off") · tap")
+                .foregroundStyle(showGeometryDebug ? MJColor.jadeAccent : MJColor.cream(0.6))
+                .onTapGesture { showGeometryDebug.toggle() }
             #endif
         }
         .font(.system(size: 10, design: .monospaced))

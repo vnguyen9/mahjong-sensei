@@ -7,6 +7,13 @@ import MahjongData
 /// hand-tile-fix and events-tile-fix sheets reuse `CorrectionPicker`
 /// (de-privatized from `CorrectView.swift`) directly — no new type needed
 /// for those.
+///
+/// TODO: F — "drag tiles between MY HAND / TABLE on a frozen frame" (UI plan
+/// §12 step 12) is explicitly out of scope for this workstream: it's a new
+/// gesture surface (freeze a frame, drag-and-drop reassignment) layered on
+/// top of this same Mine/Table/Not-a-tile triage, not an extension of it.
+/// `assignUnresolved(_:to:)` below is the intent it would ultimately call —
+/// wire the gesture to that when it's built.
 struct UnresolvedAssignSheet: View {
     @Environment(CoachLiveSession.self) private var session
 
@@ -102,6 +109,20 @@ struct CountAdjustSheet<Footer: View>: View {
 
                 GoldButton("Apply") {
                     onApply(count)
+                }
+
+                // Workstream F: one-tap "all four copies are accounted for"
+                // shortcut — the stepper already covers "set an exact count"
+                // (tap +/- to any of 0–4), so this is purely a shortcut to
+                // the common "no more of these are live" case, not a
+                // separate exact-count affordance. Reuses the same
+                // `onApply` path as the stepper (`setSeenCount`/mock
+                // equivalent) — no new session API needed.
+                if count != 4 {
+                    TextLink("Mark all dead") {
+                        count = 4
+                        onApply(4)
+                    }
                 }
 
                 footer()

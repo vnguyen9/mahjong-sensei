@@ -98,7 +98,10 @@ struct CoachLiveView: View {
             .compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive }?
             .keyWindow?.safeAreaInsets.top ?? 0
-        return max(reported, 44)
+        // iPad has no notch/Island, so the 44pt iPhone floor would over-pad the
+        // chrome — floor it lower there. iPhone keeps the Island clearance.
+        let floor: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 20 : 44
+        return max(reported, floor)
     }
 
     var body: some View {
@@ -129,37 +132,14 @@ struct CoachLiveView: View {
         .ignoresSafeArea(edges: .top)
         .background(ScreenBackground(.live).ignoresSafeArea())
         .environment(session)
-        .onChange(of: session.phase) { _, newPhase in breathing.autoTarget(for: newPhase) }
-        .onChange(of: app.autoBreathing) { _, on in
-            breathing.autoEnabled = on
-            if on { breathing.autoTarget(for: session.phase) }
-        }
-        .onAppear {
-            breathing.autoEnabled = app.autoBreathing
-            breathing.autoTarget(for: session.phase, animated: false)
-        }
         .sheet(item: $sheet) { sheetContent($0) }
-        #if DEBUG
-        // Chunk C (shadow-only): after the AR plane locks, present the table
-        // calibration cover so the DEBUG census runs off a real user-confirmed
-        // quad instead of the default square. Full-screen (not a sheet) so its
-        // corner-handle geometry owns hit-testing.
-        .fullScreenCover(item: Binding(
-            get: { session.shadowCalibrationRequest },
-            set: { if $0 == nil { session.dismissShadowCalibration() } }
-        )) { request in
-            if let arCapture = session.arCapture {
-                TableCalibrationView(
-                    capture: arCapture,
-                    lockedPlaneTransform: request.lockedPlaneTransform,
-                    initialTable: CoachLiveSession.debugDefaultShadowCensusTable(),
-                    onConfirm: { session.confirmShadowCensusTable($0) },
-                    onRescan: { session.rescanShadowCalibration() })
-            }
-        }
         // ARKit-native table calibration (grey grid + coaching overlay +
         // point/tap zone marks) — its own self-contained session; produces the
-        // TableGeometry the next tracker build uses.
+        // TableGeometry the next tracker build uses. Was DEBUG-only (a debug-HUD
+        // affordance); hoisted into production for Workstream G's live-feed
+        // "Recalibrate" link (`LiveFeedPane`), which sets `session
+        // .showARCalibration` via `beginARCalibration()` — same mechanism, no
+        // new capture plumbing.
         .fullScreenCover(isPresented: Binding(
             get: { session.showARCalibration },
             set: { if !$0 { session.finishARCalibration(nil) } }
@@ -168,7 +148,6 @@ struct CoachLiveView: View {
                 onComplete: { session.finishARCalibration($0) },
                 onCancel: { session.finishARCalibration(nil) })
         }
-        #endif
         .confirmationDialog("End the live session?", isPresented: $showExitConfirm, titleVisibility: .visible) {
             Button("End session", role: .destructive, action: onExit)
             Button("Keep watching", role: .cancel) {}
@@ -216,10 +195,16 @@ struct CoachLiveView: View {
             // AR mode only (`arCapture.enterSweeping()` — a no-op on the
             // mock/fallback paths, so this stays hidden there).
             if session.isARCaptureActive {
-                Button("Rescan table") { session.rescanTable() }
-                    .font(MJFont.ui(11, weight: .semibold))
-                    .foregroundStyle(MJColor.cream(0.55))
-                    .buttonStyle(.plain)
+                // Rescan (force a fresh read) + manual hand-end (the AR path's
+                // automatic table-clear detector is off, so ending a hand is a
+                // deliberate tap).
+                HStack(spacing: 18) {
+                    Button("Rescan table") { session.rescanTable() }
+                    Button("End hand") { session.requestHandEnd() }
+                }
+                .font(MJFont.ui(11, weight: .semibold))
+                .foregroundStyle(MJColor.cream(0.55))
+                .buttonStyle(.plain)
             }
             // WaitChips fold at `.minimal` — excluded entirely (not just
             // emptied) so their VStack slot + spacing is reclaimed for the
@@ -232,6 +217,9 @@ struct CoachLiveView: View {
         .padding(.horizontal, 16)
         .padding(.top, 10)
         .padding(.bottom, 10)
+        // Readable-width cap so the pane's rows don't stretch edge-to-edge on a
+        // wide iPad; the deepJade background still fills the full width.
+        .frame(maxWidth: 560)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(MJColor.deepJade)
         .overlay {

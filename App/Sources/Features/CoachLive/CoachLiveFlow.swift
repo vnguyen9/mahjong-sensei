@@ -7,19 +7,20 @@ import MahjongCore
 /// `TileDetector.prefersHighAccuracy` pattern exactly (UI plan §13).
 enum CoachLivePrefs {
     static let blurKey = "coachLiveBlursFeed"
-    static let breatheKey = "coachLiveAutoBreathes"
     static let correctionHintKey = "coachLiveHasSeenCorrectionHint"
     static let pluggedInHintKey = "coachLiveHasSeenPluggedInHint"
+    static let arPrimerKey = "coachLiveHasSeenARPrimer"
 
     /// Unset → true (blur on) — privacy default.
     static var blursFeed: Bool {
         get { UserDefaults.standard.object(forKey: blurKey) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: blurKey) }
     }
-    /// Unset → true (auto-breathing on).
-    static var autoBreathes: Bool {
-        get { UserDefaults.standard.object(forKey: breatheKey) as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: breatheKey) }
+    /// Unset → false (show the illustrated AR calibration primer once, ever) —
+    /// the first-run "Teach Coach your table" card. Re-showable from Settings.
+    static var hasSeenARPrimer: Bool {
+        get { UserDefaults.standard.bool(forKey: arPrimerKey) }
+        set { UserDefaults.standard.set(newValue, forKey: arPrimerKey) }
     }
     /// Unset → false (show the one-time correction tip once) — see
     /// `CorrectionHintBanner`. `MockCoachLive.make` marks this seen at
@@ -57,7 +58,7 @@ struct CoachLiveFlowView: View {
     var onExit: () -> Void = {}
     var onScoreHandoff: () -> Void = {}
 
-    enum FlowState { case setup, live }
+    enum FlowState { case setup, primer, calibration, live }
     @State private var flowState: FlowState
     @Environment(\.scenePhase) private var scenePhase
 
@@ -82,9 +83,40 @@ struct CoachLiveFlowView: View {
         ZStack {
             switch flowState {
             case .setup:
-                CoachLiveSetupView(onStart: {
-                    withAnimation(.easeInOut(duration: 0.3)) { flowState = .live }
-                }, onCancel: onExit)
+                CoachLiveSetupView(
+                    onStart: {
+                        // Fresh start → first-run primer (once), else straight
+                        // to calibration. begin() is deferred to calibration.
+                        let next: FlowState = CoachLivePrefs.hasSeenARPrimer ? .calibration : .primer
+                        withAnimation(.easeInOut(duration: 0.3)) { flowState = next }
+                    },
+                    onResume: {
+                        // resume() already spun the loop up — skip calibration.
+                        withAnimation(.easeInOut(duration: 0.3)) { flowState = .live }
+                    },
+                    onCancel: onExit)
+                .transition(.opacity)
+            case .primer:
+                CalibrationPrimerView(
+                    onContinue: {
+                        CoachLivePrefs.hasSeenARPrimer = true
+                        withAnimation(.easeInOut(duration: 0.3)) { flowState = .calibration }
+                    },
+                    onCancel: onExit)
+                .transition(.opacity)
+            case .calibration:
+                ARCalibrationView(
+                    mySeatWind: session.seatWind,
+                    onComplete: { geometry in
+                        session.calibratedTableGeometry = geometry
+                        session.begin(roundWind: session.roundWind, seatWind: session.seatWind)
+                        withAnimation(.easeInOut(duration: 0.3)) { flowState = .live }
+                    },
+                    onCancel: {
+                        // Back from the first mark → return to the setup card.
+                        withAnimation(.easeInOut(duration: 0.3)) { flowState = .setup }
+                    })
+                .ignoresSafeArea()
                 .transition(.opacity)
             case .live:
                 CoachLiveView(session: session, initialTab: debugInitialTab, initialSheet: debugSheet,

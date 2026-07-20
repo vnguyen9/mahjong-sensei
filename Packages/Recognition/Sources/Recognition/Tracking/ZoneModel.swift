@@ -292,82 +292,146 @@ public final class ZoneModel {
                                      trackFor: [UUID: TrackID],
                                      store: TrackStore) -> [UUID: ZoneDecision] {
         guard let geometry = config.tableGeometry else { return [:] }
-        let band = geometry.handBandDepth, pondR = geometry.pondRadius
+        // Whole-table auto-partition (the AR default) reads zones by position
+        // alone — no thin bands, no `.unresolved` moat.
+        if geometry.layout == .partition {
+            return zoneVotesPartition(detections, trackFor: trackFor, store: store, geometry: geometry)
+        }
+        let handBand = geometry.handBand, pond = geometry.pond
         var out: [UUID: ZoneDecision] = [:]
 
         func votedFace(_ d: DetectedTile) -> Tile {
             store.track(trackFor[d.id] ?? TrackID(raw: -1))?.face ?? d.tile
         }
+        /// The detection's position for zone membership — the matched track's
+        /// (smoothed, in AR table-space) box center, falling back to the raw
+        /// detection when it has no track yet. Identical to `d.box` when
+        /// `positionSmoothing == 0` (the track box IS this frame's detection),
+        /// so legacy zoning is unchanged.
+        func center(_ d: DetectedTile) -> SIMD2<Double> {
+            if let box = store.track(trackFor[d.id] ?? TrackID(raw: -1))?.box {
+                return SIMD2(box.centerX, box.centerY)
+            }
+            return SIMD2(d.box.centerX, d.box.centerY)
+        }
 
         let clusters = TableSceneParser.cluster(detections, config: config.sceneConfig)
-        let centroids = clusters.map { cluster -> (cx: Double, cy: Double) in
-            (cluster.map(\.box.centerX).reduce(0, +) / Double(cluster.count),
-             cluster.map(\.box.centerY).reduce(0, +) / Double(cluster.count))
+        let centroids = clusters.map { cluster -> SIMD2<Double> in
+            let pts = cluster.map(center)
+            return SIMD2(pts.map(\.x).reduce(0, +) / Double(pts.count),
+                         pts.map(\.y).reduce(0, +) / Double(pts.count))
         }
-        let nears = centroids.map { nearestEdge(cx: $0.cx, cy: $0.cy) }
 
-        // The hand row is whichever ≥3-tile my-edge cluster is LARGEST —
-        // computed up front so every other my-edge cluster this frame can be
-        // tested against it (a meld candidate) rather than also claiming
-        // `.myHand`. Ties keep the first (deterministic cluster ordering).
-        let myEdgeIndices = clusters.indices.filter {
-            nears[$0].edge == .my && nears[$0].distance <= band && clusters[$0].count >= 3
+        /// The nearest opponent meld band whose oriented rectangle contains
+        /// `p`, plus its penetration (smaller = closer to that edge — the
+        /// generalized tie-break that replaces `nearestEdge`'s min-distance).
+        func nearestOpponent(_ p: SIMD2<Double>) -> (seat: RelativeSeat, penetration: Double)? {
+            var best: (seat: RelativeSeat, penetration: Double)?
+            for (seat, band) in geometry.meldBands where band.contains(p) {
+                let pen = band.penetration(p)
+                if best == nil || pen < best!.penetration { best = (seat, pen) }
+            }
+            return best
         }
-        let handRowIndex = myEdgeIndices.max { clusters[$0].count < clusters[$1].count }
+
+        // The hand row is whichever ≥3-tile cluster inside the (possibly
+        // tilted) hand band is LARGEST — computed up front so every other
+        // hand-band cluster this frame is tested against it (a meld candidate)
+        // rather than also claiming `.myHand`. Ties keep the first.
+        let handIndices = clusters.indices.filter {
+            handBand.contains(centroids[$0]) && clusters[$0].count >= 3
+        }
+        let handRowIndex = handIndices.max { clusters[$0].count < clusters[$1].count }
 
         for i in clusters.indices {
             let cluster = clusters[i]
-            let near = nears[i]
+            let p = centroids[i]
 
-            // My hand row: the largest my-edge cluster. Bonus faces → myBonus.
+            // My hand row: the largest hand-band cluster. Bonus faces → myBonus.
             if i == handRowIndex {
                 for d in cluster { out[d.id] = ZoneDecision(votedFace(d).isBonus ? .myBonus : .myHand, nil) }
                 continue
             }
 
-            // My exposed meld: another my-edge cluster (same band test), 3–4
-            // tiles, meld-shaped — an exposed pung/kong/chow set apart from
-            // the hand row.
-            if near.edge == .my, near.distance <= band, (3...4).contains(cluster.count),
-               MeldClassifier.classify(cluster.map(votedFace)) != nil {
+            let meldShaped = (3...4).contains(cluster.count)
+                && MeldClassifier.classify(cluster.map(votedFace)) != nil
+            let handContains = handBand.contains(p)
+            let handPen = handBand.penetration(p)
+            let opponent = nearestOpponent(p)
+
+            // My exposed meld: another hand-band cluster, 3–4 tiles, meld-shaped
+            // — an exposed pung/kong/chow set apart from the hand row. At a
+            // corner where both my band and an opponent band contain it, the
+            // smaller penetration (closer edge) wins.
+            if handContains, meldShaped, opponent == nil || handPen <= opponent!.penetration {
                 for d in cluster { out[d.id] = ZoneDecision(.myMeld, nil) }
                 continue
             }
 
-            // Opponent meld: a 3–4 meld-shaped cluster hugging another edge.
-            if let seat = near.opponentSeat, near.distance <= band, (3...4).contains(cluster.count),
-               MeldClassifier.classify(cluster.map(votedFace)) != nil {
-                for d in cluster { out[d.id] = ZoneDecision(.opponentMeld, seat) }
+            // Opponent meld: a 3–4 meld-shaped cluster hugging a seat's edge.
+            if let opp = opponent, meldShaped, !handContains || opp.penetration < handPen {
+                for d in cluster { out[d.id] = ZoneDecision(.opponentMeld, opp.seat) }
                 continue
             }
 
-            // Otherwise decide each tile on its own: central disk → pond, else
-            // unresolved. (A slid lone hand-edge tile lands here too.)
+            // Otherwise decide each tile on its own: inside the pond region →
+            // pond, else unresolved. (A slid lone hand-edge tile lands here too.)
             for d in cluster {
-                let dx = d.box.centerX - 0.5, dy = d.box.centerY - 0.5
-                let inPond = (dx * dx + dy * dy).squareRoot() <= pondR
+                let inPond = pond.contains(center(d))
                 out[d.id] = ZoneDecision(inPond ? .pond : .unresolved, nil)
             }
         }
         return out
     }
 
-    private enum TableEdge { case my, left, right, far }
+    /// Zone votes for the `.partition` whole-table layout (the AR auto-layout).
+    /// Every tile is decided by position alone: inside the central pond rect →
+    /// `.pond`; otherwise assigned to the NEAREST table edge — `me` (high y),
+    /// `across` (low y), `left` (low x), `right` (high x) — → that seat's zone.
+    /// This tiles the entire table with no gaps, so nothing is `.unresolved`
+    /// and the "moat" between the shallow edge bands and the pond disappears.
+    /// My edge → `.myHand` (bonus faces → `.myBonus`); each opponent edge →
+    /// `.opponentMeld` owned by that seat (their revealed tiles). Position is
+    /// the matched track's smoothed table-space center (identical to
+    /// `zoneVotesTableSpace`), so `positionSmoothing` damps boundary flicker.
+    private func zoneVotesPartition(_ detections: [DetectedTile],
+                                    trackFor: [UUID: TrackID],
+                                    store: TrackStore,
+                                    geometry: TrackerConfig.TableGeometry) -> [UUID: ZoneDecision] {
+        let pond = geometry.pond
+        var out: [UUID: ZoneDecision] = [:]
 
-    /// The table edge a normalized table-space point sits nearest, plus its
-    /// distance to that edge and — for the three non-me edges — the seat that
-    /// edge belongs to (oriented contract: my = high y, across = low y, left =
-    /// low x, right = high x).
-    private func nearestEdge(cx: Double, cy: Double)
-        -> (edge: TableEdge, distance: Double, opponentSeat: RelativeSeat?) {
-        let candidates: [(edge: TableEdge, distance: Double, seat: RelativeSeat?)] = [
-            (.my,    1 - cy, nil),
-            (.far,   cy,     .across),
-            (.left,  cx,     .left),
-            (.right, 1 - cx, .right),
-        ]
-        let best = candidates.min { $0.distance < $1.distance }!
-        return (best.edge, best.distance, best.seat)
+        func votedFace(_ d: DetectedTile) -> Tile {
+            store.track(trackFor[d.id] ?? TrackID(raw: -1))?.face ?? d.tile
+        }
+        func center(_ d: DetectedTile) -> SIMD2<Double> {
+            if let box = store.track(trackFor[d.id] ?? TrackID(raw: -1))?.box {
+                return SIMD2(box.centerX, box.centerY)
+            }
+            return SIMD2(d.box.centerX, d.box.centerY)
+        }
+
+        for d in detections {
+            let p = center(d)
+            if pond.contains(p) {
+                out[d.id] = ZoneDecision(.pond, nil)
+                continue
+            }
+            // Nearest of the 4 edges (my edge is y = 1). Ties (measure-zero)
+            // resolve me > left > right > across.
+            let dMe = 1 - p.y, dAcross = p.y, dLeft = p.x, dRight = 1 - p.x
+            let nearest = Swift.min(dMe, dAcross, dLeft, dRight)
+            if nearest == dMe {
+                out[d.id] = ZoneDecision(votedFace(d).isBonus ? .myBonus : .myHand, nil)
+            } else if nearest == dLeft {
+                out[d.id] = ZoneDecision(.opponentMeld, .left)
+            } else if nearest == dRight {
+                out[d.id] = ZoneDecision(.opponentMeld, .right)
+            } else {
+                out[d.id] = ZoneDecision(.opponentMeld, .across)
+            }
+        }
+        return out
     }
 
     /// Table-space pond centroid = mean of the current pond-zone track centers.

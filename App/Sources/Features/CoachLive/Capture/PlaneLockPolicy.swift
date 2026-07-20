@@ -87,10 +87,16 @@ public struct PlaneLockPolicy {
     public struct LockedPlane: Equatable {
         public var id: UUID
         public var transform: simd_float4x4
+        /// The plane's larger horizontal side in metres (`max(extentX, extentZ)`)
+        /// — the physical size the normalized [0,1] table space spans, used to
+        /// build the auto-partition geometry (matches calibration's
+        /// `max(planeExtent.width, planeExtent.height)`).
+        public var extent: Double
 
-        public init(id: UUID, transform: simd_float4x4) {
+        public init(id: UUID, transform: simd_float4x4, extent: Double) {
             self.id = id
             self.transform = transform
+            self.extent = extent
         }
     }
 
@@ -178,7 +184,8 @@ public struct PlaneLockPolicy {
         guard let since = trackingSince, t - since >= stableDuration else { return }
 
         lockedPlane = LockedPlane(id: winner.id,
-                                  transform: Self.yawAligned(winner.transform, towards: initialCameraPosition))
+                                  transform: Self.yawAligned(winner.transform, towards: initialCameraPosition),
+                                  extent: Double(max(winner.extentX, winner.extentZ)))
     }
 
     /// Composes `transform` (already centered — its translation IS the

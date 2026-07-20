@@ -24,7 +24,13 @@ struct CoachLiveSetupView: View {
     /// session →" option below Start. Loaded once in `.task`; nil on a
     /// clean setup card (no prior kill, or the archive aged out).
     @State private var resumable: PersistedCoachLiveSession?
+    /// Fresh start: winds are stashed on the session; the caller advances to
+    /// calibration and calls `session.begin(...)` only once calibration
+    /// completes (so the calibrated geometry is set before the tracker builds).
     let onStart: () -> Void
+    /// Resume: `session.resume(...)` has already spun the loop up here, so the
+    /// caller goes straight to the live screen, skipping calibration.
+    var onResume: () -> Void = {}
     let onCancel: () -> Void
 
     var body: some View {
@@ -47,7 +53,10 @@ struct CoachLiveSetupView: View {
                 // reads as instantly registered on slow phones.
                 GoldButton(isStarting ? "Starting…" : "Start tracking →") {
                     isStarting = true
-                    session.begin(roundWind: roundWind, seatWind: seatWind)
+                    // Stash winds; defer begin() until calibration completes so
+                    // the calibrated geometry is set before the tracker builds.
+                    session.seatWind = seatWind
+                    session.roundWind = roundWind
                     onStart()
                 }
                 .overlay(alignment: .trailing) {
@@ -67,7 +76,7 @@ struct CoachLiveSetupView: View {
                         SecondaryButton("Resume session →") {
                             isStarting = true
                             session.resume(from: resumable)
-                            onStart()
+                            onResume()
                         }
                         .disabled(isStarting)
                     }

@@ -26,17 +26,12 @@ final class AppState {
     var blursLiveFeed: Bool {
         didSet { CoachLivePrefs.blursFeed = blursLiveFeed }
     }
-    /// Coach Live: the feed pane grows/shrinks with the action automatically.
-    var autoBreathing: Bool {
-        didSet { CoachLivePrefs.autoBreathes = autoBreathing }
-    }
 
     init() {
         hasOnboarded = UserDefaults.standard.bool(forKey: Self.onboardKey)
         prefersHighAccuracy = TileDetector.prefersHighAccuracy
         devDetectorModel = TileDetector.devModel
         blursLiveFeed = CoachLivePrefs.blursFeed
-        autoBreathing = CoachLivePrefs.autoBreathes
     }
 
     func completeOnboarding() {

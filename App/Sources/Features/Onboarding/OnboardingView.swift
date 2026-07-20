@@ -28,6 +28,10 @@ struct OnboardingView: View {
             }
             .id(step)
             .transition(.opacity)
+            // Readable-width column so onboarding content stays centered rather
+            // than stretching edge-to-edge on a wide iPad.
+            .frame(maxWidth: 560)
+            .frame(maxWidth: .infinity)
         }
     }
 

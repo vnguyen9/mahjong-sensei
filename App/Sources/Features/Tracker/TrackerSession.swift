@@ -3,37 +3,44 @@ import Observation
 import MahjongCore
 import Recognition
 
-/// Manual tile-counter state for Tracker mode (3rd Scan segment, plan §2) — a
-/// running 34-tile "seen" count for the current game. The user frames the
-/// table and hits Record; `recordReplaceFromShot` overwrites counts from that
-/// frame. No live/continuous detection — record-triggered only.
-/// Optionally paired with the user's own hand for real ukeire/win-odds via
-/// the existing engines (`EfficiencyEngine`/`CoachEngine`, wired in a later
-/// chunk). Persisted to disk (`TrackerStore`) so counts survive relaunch;
-/// `reset()` clears both in-memory state and the file (new game).
+/// Manual tile-counter state for Tracker mode — table histogram + optional hand.
+/// Record replaces table counts only; hand edits stay independent but count toward
+/// totals / display pips.
 @Observable
 final class TrackerSession {
-    /// 34-slot, classIndex-keyed count of tiles seen on the table (discards +
-    /// exposed melds) — same convention as `ScanSession.seenHistogram`
-    /// (`ScanFlow.swift:149`). Whole-table Record replaces this from one shot
-    /// rather than max-merging across shots.
+    static let maxHandSize = 18
+
+    /// 34-slot, classIndex-keyed count of tiles seen on the **table** (discards +
+    /// exposed melds). Whole-table Record replaces this from one shot.
     var seenHistogram: [Int] = [Int](repeating: 0, count: Tile.baseClassCount)
-    /// The user's own hand, if they've chosen to enter one. Empty = none.
+    /// The user's own hand tiles.
     var hand: [Tile] = []
 
     /// Tiles never yet seen anywhere (table + hand) — the rough draw pool,
     /// floored at 1 so a %-based odds calc never divides by zero.
     var unseenCount: Int { max(1, 136 - seenHistogram.reduce(0, +) - hand.count) }
-    /// Total tiles counted on the table so far (sum of the histogram).
-    var totalCounted: Int { seenHistogram.reduce(0, +) }
+    /// Table + hand accounted for.
+    var totalCounted: Int { seenHistogram.reduce(0, +) + hand.count }
+
+    /// Per-face display counts for the grid: `min(4, table + hand)`.
+    var displayHistogram: [Int] {
+        (0..<Tile.baseClassCount).map { i in
+            let face = Tile(classIndex: i)!
+            return min(4, tableSeen(face) + handCount(face))
+        }
+    }
+
+    /// Per-face hand-only counts for split-color pips on the grid.
+    var handHistogram: [Int] {
+        (0..<Tile.baseClassCount).map { i in
+            handCount(Tile(classIndex: i)!)
+        }
+    }
 
     private let store: TrackerStore
 
     init(store: TrackerStore = .shared) {
         self.store = store
-        // Load on init via a Task that sets state on MainActor — mirrors
-        // CoachLive's persisted-session load (`CoachLiveSetupView.loadResumable`)
-        // being an async fire-and-forget against the same-shaped store actor.
         Task { @MainActor [weak self] in
             guard let persisted = await store.load() else { return }
             self?.seenHistogram = persisted.seen
@@ -41,11 +48,26 @@ final class TrackerSession {
         }
     }
 
-    /// Record = trust this frame: build a 34-slot histogram of this shot's
-    /// detections (non-bonus only, keyed by `classIndex`), clamp each face to
-    /// 0…4, and **replace** the running histogram (including zeroing faces
-    /// not seen). Hand tray is untouched. Returns the classIndexes that
-    /// actually changed, for the UI's count-up animation.
+    // MARK: - Face accounting
+
+    func tableSeen(_ tile: Tile) -> Int {
+        guard (0..<Tile.baseClassCount).contains(tile.classIndex) else { return 0 }
+        return seenHistogram.indices.contains(tile.classIndex) ? seenHistogram[tile.classIndex] : 0
+    }
+
+    func handCount(_ tile: Tile) -> Int { hand.filter { $0 == tile }.count }
+
+    func remainingForFace(_ tile: Tile) -> Int {
+        max(0, 4 - tableSeen(tile) - handCount(tile))
+    }
+
+    func canAddToHand(_ tile: Tile) -> Bool {
+        remainingForFace(tile) > 0 && hand.count < Self.maxHandSize
+    }
+
+    // MARK: - Record / mutations
+
+    /// Record = trust this frame: replace table histogram (hand untouched).
     @discardableResult
     func recordReplaceFromShot(_ detections: [DetectedTile]) -> Set<Int> {
         var shot = [Int](repeating: 0, count: Tile.baseClassCount)
@@ -54,7 +76,9 @@ final class TrackerSession {
         }
         var changed = Set<Int>()
         for i in 0..<Tile.baseClassCount {
-            let next = min(4, shot[i])
+            let face = Tile(classIndex: i)!
+            let held = handCount(face)
+            let next = min(4 - held, max(0, shot[i]))
             if next != seenHistogram[i] {
                 seenHistogram[i] = next
                 changed.insert(i)
@@ -64,10 +88,12 @@ final class TrackerSession {
         return changed
     }
 
-    /// Manual correction from the tap-a-tile stepper.
+    /// Table count stepper — clamped so table + hand ≤ 4.
     func setCount(classIndex: Int, count: Int) {
-        guard (0..<Tile.baseClassCount).contains(classIndex) else { return }
-        let clamped = min(4, max(0, count))
+        guard (0..<Tile.baseClassCount).contains(classIndex),
+              let tile = Tile(classIndex: classIndex) else { return }
+        let held = handCount(tile)
+        let clamped = min(4 - held, max(0, count))
         guard seenHistogram[classIndex] != clamped else { return }
         seenHistogram[classIndex] = clamped
         persist()
@@ -78,6 +104,25 @@ final class TrackerSession {
         persist()
     }
 
+    /// Rewrite this face in the hand to exactly `count` copies (clamped by
+    /// remaining table room and soft hand length).
+    func setHandCount(classIndex: Int, count: Int) {
+        guard (0..<Tile.baseClassCount).contains(classIndex),
+              let tile = Tile(classIndex: classIndex) else { return }
+        let table = tableSeen(tile)
+        let current = handCount(tile)
+        var target = min(4 - table, max(0, count))
+        if target > current {
+            let room = Self.maxHandSize - hand.count
+            target = current + min(target - current, max(0, room))
+        }
+        guard target != current else { return }
+        var next = hand.filter { $0 != tile }
+        next.append(contentsOf: Array(repeating: tile, count: target))
+        hand = next
+        persist()
+    }
+
     /// New game: zero the histogram, clear the hand, delete the on-disk file.
     func reset() {
         seenHistogram = [Int](repeating: 0, count: Tile.baseClassCount)
@@ -85,8 +130,6 @@ final class TrackerSession {
         Task { await store.clear() }
     }
 
-    /// A debounced Task per mutation is fine here — Record is user-triggered
-    /// and low frequency, unlike Coach Live's continuous tracking loop.
     private func persist() {
         let snapshot = TrackerStore.Persisted(seen: seenHistogram, hand: hand)
         let store = store

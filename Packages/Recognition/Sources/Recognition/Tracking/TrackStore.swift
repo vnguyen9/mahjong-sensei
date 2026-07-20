@@ -357,7 +357,18 @@ public final class TrackStore {
         let weight = det.confidence * (band == .high ? 1.0 : config.lowBandVoteWeight)
         track.addVote(det.tile.classIndex, weight, cap: config.voteWindow)
         track.recomputeFace(margin: config.voteHysteresisMargin)
-        track.box = det.box
+        // Published box: raw detection (legacy), or an EMA of the CENTER toward
+        // the detection when position smoothing is on (AR table-space). Size is
+        // always the detection's; the raw box still feeds `boxHistory`.
+        let f = config.positionSmoothing
+        if f > 0 {
+            let cx = track.box.centerX * f + det.box.centerX * (1 - f)
+            let cy = track.box.centerY * f + det.box.centerY * (1 - f)
+            track.box = TileBoundingBox(x: cx - det.box.width / 2, y: cy - det.box.height / 2,
+                                        width: det.box.width, height: det.box.height)
+        } else {
+            track.box = det.box
+        }
         track.pushBox(det.box, cap: config.boxHistoryCap)
         track.lastSeen = t
         track.observationCount += 1

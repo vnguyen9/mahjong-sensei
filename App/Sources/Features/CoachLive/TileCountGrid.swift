@@ -19,8 +19,12 @@ import MahjongCore
 /// count grid.
 struct TileCountGrid: View {
     let histogram: [Int]
+    /// Optional per-face hand counts — when non-nil, pips split gold (table) / cream (hand).
+    var handHistogram: [Int]? = nil
     var highlight: Set<Tile> = []
     var tileWidthCap: CGFloat = 22
+    /// When true (Tracker), show short East/South/…/Red captions under the honors row.
+    var showHonorCaptions: Bool = false
     let onTap: (Tile) -> Void
 
     /// classIndex order: chars 0..<9, dots 9..<18, bamboo 18..<27, honors
@@ -36,16 +40,18 @@ struct TileCountGrid: View {
     private static let colSpacing: CGFloat = 5
     /// Height a full-scale (22pt) seen-pip row occupies; scales with the tile.
     private static let pipsBase: CGFloat = 4.5
+    private static let captionBase: CGFloat = 9
 
     var body: some View {
         GeometryReader { geo in
             let width = tileWidth(for: geo.size)
             let pipScale = min(1, width / tileWidthCap)
             VStack(spacing: Self.rowSpacing) {
-                ForEach(Array(Self.rows.enumerated()), id: \.offset) { _, row in
+                ForEach(Array(Self.rows.enumerated()), id: \.offset) { rowIndex, row in
                     HStack(spacing: Self.colSpacing) {
                         ForEach(row, id: \.self) { tile in
-                            cell(tile, width: width, pipScale: pipScale)
+                            cell(tile, width: width, pipScale: pipScale,
+                                 showCaption: showHonorCaptions && rowIndex == 3)
                         }
                     }
                 }
@@ -54,29 +60,41 @@ struct TileCountGrid: View {
         }
     }
 
-    /// The tile width that lets all four rows fit the measured space, capped at
-    /// the mockup's ~21pt and bounded by the 9-tile row width. No lower clamp —
-    /// so the grid always fits rather than clipping a row.
     private func tileWidth(for size: CGSize) -> CGFloat {
-        // Width: 9 tiles + 8 gaps + per-cell horizontal padding.
         let byWidth = (size.width - 8 * Self.colSpacing - 9 * 2 * Self.cellPad) / 9
-        // Height: four rows, each 1.35·tile (face) + a tile-proportional pip
-        // row + gap + padding, plus the three inter-row gaps.
         let perRowConstant = Self.cellGap + 2 * Self.cellPad
-        let rowFactor = 1.35 + Self.pipsBase / tileWidthCap   // pip height ≈ base·(tile/maxTile)
-        let available = size.height - 3 * Self.rowSpacing - 4 * perRowConstant
+        let captionExtra = showHonorCaptions ? Self.captionBase / tileWidthCap : 0
+        let rowFactor = 1.35 + Self.pipsBase / tileWidthCap + captionExtra
+        let captionBudget = showHonorCaptions ? Self.captionBase + 2 : 0
+        let available = size.height - 3 * Self.rowSpacing - 4 * perRowConstant - captionBudget
         let byHeight = available / (4 * rowFactor)
         return max(4, min(tileWidthCap, byWidth, byHeight))
     }
 
-    private func cell(_ tile: Tile, width: CGFloat, pipScale: CGFloat) -> some View {
-        let seen = histogram.indices.contains(tile.classIndex) ? histogram[tile.classIndex] : 0
+    private func cell(_ tile: Tile, width: CGFloat, pipScale: CGFloat, showCaption: Bool) -> some View {
+        let table = histogram.indices.contains(tile.classIndex) ? histogram[tile.classIndex] : 0
+        let hand: Int = {
+            guard let handHistogram else { return 0 }
+            return handHistogram.indices.contains(tile.classIndex) ? handHistogram[tile.classIndex] : 0
+        }()
+        let combined = min(4, table + hand)
         let isWait = highlight.contains(tile)
-        let isDead = seen >= 4
+        let isDead = combined >= 4
         return Button { onTap(tile) } label: {
             VStack(spacing: Self.cellGap) {
                 MahjongTileView(tile, theme: .jade, width: width)
-                SeenPips(seen: seen, scale: pipScale)
+                if handHistogram != nil {
+                    SeenPips(table: table, hand: hand, scale: pipScale)
+                } else {
+                    SeenPips(seen: table, scale: pipScale)
+                }
+                if showCaption, let label = honorCaption(tile) {
+                    Text(label)
+                        .font(MJFont.ui(max(7, 8 * pipScale), weight: .semibold))
+                        .foregroundStyle(MJColor.cream(0.55))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                }
             }
             .padding(Self.cellPad)
             .background {
@@ -92,6 +110,19 @@ struct TileCountGrid: View {
             .opacity(isDead ? 0.35 : 1)
         }
         .buttonStyle(.plain)
-        .animation(.easeOut(duration: 0.2), value: seen)
+        .animation(.easeOut(duration: 0.2), value: combined)
+    }
+
+    private func honorCaption(_ tile: Tile) -> String? {
+        switch tile {
+        case .wind(.east): return "East"
+        case .wind(.south): return "South"
+        case .wind(.west): return "West"
+        case .wind(.north): return "North"
+        case .dragon(.red): return "Red"
+        case .dragon(.green): return "Green"
+        case .dragon(.white): return "White"
+        default: return nil
+        }
     }
 }

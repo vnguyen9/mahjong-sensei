@@ -3,14 +3,12 @@ import DesignSystem
 
 /// The draggable divider between the live feed and the state pane (UI plan §8).
 ///
-/// Shows the grabber + an honest state label: `DRAG · AUTO n%` while breathing
-/// follows the table's phase, `DRAG · MANUAL n%` while a drag override holds —
-/// with a subtle "resumes auto" hint when the 10s grace timer will hand control
-/// back. Dragging the seam adjusts the split live via `BreathingController`
-/// (finger-attached, clamped 0.40–0.72).
+/// Shows the grabber + the split percentage. Dragging the seam adjusts the
+/// split live via `BreathingController` (finger-attached, clamped 0.40–0.72);
+/// it stays wherever the user leaves it (auto-breathing was removed).
 struct BreathingSeam: View {
-    /// `@Observable` — reading `fraction`/`isManual` here observes them, so the
-    /// label tracks both auto breaths and live drags.
+    /// `@Observable` — reading `fraction` here observes it, so the label
+    /// tracks live drags.
     let controller: BreathingController
     /// Full-screen height — the denominator that turns a drag translation into
     /// a fraction delta (the fraction is of the full screen).
@@ -34,17 +32,10 @@ struct BreathingSeam: View {
     }
 
     private var label: some View {
-        HStack(spacing: 5) {
-            Text("DRAG · \(controller.isManual ? "MANUAL" : "AUTO") \(percent)%")
-                .font(MJFont.ui(10, weight: .semibold))
-                .tracking(0.5)
-                .foregroundStyle(MJColor.cream(0.5))
-            if controller.isManual && controller.autoEnabled {
-                Text("· resumes auto")
-                    .font(MJFont.ui(9, weight: .medium))
-                    .foregroundStyle(MJColor.gold(0.7))
-            }
-        }
+        Text("DRAG · \(percent)%")
+            .font(MJFont.ui(10, weight: .semibold))
+            .tracking(0.5)
+            .foregroundStyle(MJColor.cream(0.5))
     }
 
     private var percent: Int { Int((controller.fraction * 100).rounded()) }
@@ -54,7 +45,6 @@ struct BreathingSeam: View {
             .onChanged { value in
                 if startFraction == nil {
                     startFraction = controller.fraction
-                    controller.dragBegan()
                 }
                 controller.dragChanged(startFraction: startFraction ?? controller.fraction,
                                        translationY: value.translation.height,

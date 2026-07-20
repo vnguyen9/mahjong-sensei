@@ -57,11 +57,6 @@ struct SettingsView: View {
                                 name: "Blur the live feed",
                                 subtitle: "Coach Live softens the camera for privacy.",
                                 isOn: $app.blursLiveFeed)
-                            Divider().overlay(MJColor.gold(0.12))
-                            SettingToggleRow(
-                                name: "Auto-breathing",
-                                subtitle: "The live view grows and shrinks with the action.",
-                                isOn: $app.autoBreathing)
                         }
                         .mjCard(padding: 4)
 

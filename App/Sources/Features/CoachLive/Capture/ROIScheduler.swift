@@ -125,12 +125,10 @@ struct ROIScheduler {
                                     orientedImageSize: CGSize) -> ZoneRects {
         guard geometry.extent > 0 else { return ZoneRects() }
         let extent = geometry.extent
-        let band = geometry.handBandDepth
-        let pondR = geometry.pondRadius
         let orientedSize = SIMD2<Double>(Double(orientedImageSize.width), Double(orientedImageSize.height))
 
         func local(_ n: Double) -> Double { (n - 0.5) * extent }
-        func rect(_ corners: [(x: Double, y: Double)]) -> TileBoundingBox? {
+        func rect(_ corners: [SIMD2<Double>]) -> TileBoundingBox? {
             let localCorners = corners.map { SIMD2<Double>(local($0.x), local($0.y)) }
             let projected = localCorners.compactMap {
                 projection.normalizedOrientedPoint(ofTablePoint: $0, orientedImageSize: orientedSize)
@@ -141,15 +139,15 @@ struct ROIScheduler {
             return TileBoundingBox(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
         }
 
-        // Table-space normalized [0,1], plane anchor (0.5,0.5), larger y
-        // toward me — `ZoneModel.zoneVotesTableSpace`'s own documented
-        // convention (my edge = y=1, across = y=0, left = x=0, right = x=1).
-        let hand = rect([(0, 1 - band), (1, 1 - band), (1, 1), (0, 1)])
-        let pond = rect([(0.5 - pondR, 0.5 - pondR), (0.5 + pondR, 0.5 - pondR),
-                          (0.5 + pondR, 0.5 + pondR), (0.5 - pondR, 0.5 + pondR)])
-        let left = rect([(0, 0), (band, 0), (band, 1), (0, 1)])
-        let right = rect([(1 - band, 0), (1, 0), (1, 1), (1 - band, 1)])
-        let far = rect([(0, 0), (1, 0), (1, band), (0, band)])
+        // Table-space normalized [0,1], plane anchor (0.5,0.5), larger y toward
+        // me. The hand + opponent-meld regions are oriented bands (their
+        // bounding box, possibly tilted); the pond is a disk or a rect — its
+        // own bounding-box corners either way.
+        let hand = rect(geometry.handBand.corners)
+        let pond = rect(geometry.pond.corners)
+        let left = geometry.meldBands[.left].flatMap { rect($0.corners) }
+        let right = geometry.meldBands[.right].flatMap { rect($0.corners) }
+        let far = geometry.meldBands[.across].flatMap { rect($0.corners) }
 
         return ZoneRects(hand: hand, pond: pond, meldLeft: left, meldRight: right, meldFar: far)
     }
@@ -167,15 +165,15 @@ struct ROIScheduler {
     static func zoneCenters(geometry: TrackerConfig.TableGeometry) -> [TableZoneID: SIMD2<Double>] {
         guard geometry.extent > 0 else { return [:] }
         let extent = geometry.extent
-        let band = geometry.handBandDepth
-        func local(_ n: Double) -> Double { (n - 0.5) * extent }
-        return [
-            .hand: SIMD2(local(0.5), local(1 - band / 2)),
-            .pond: SIMD2(local(0.5), local(0.5)),
-            .meldLeft: SIMD2(local(band / 2), local(0.5)),
-            .meldRight: SIMD2(local(1 - band / 2), local(0.5)),
-            .meldFar: SIMD2(local(0.5), local(band / 2)),
+        func local(_ p: SIMD2<Double>) -> SIMD2<Double> { SIMD2((p.x - 0.5) * extent, (p.y - 0.5) * extent) }
+        var out: [TableZoneID: SIMD2<Double>] = [
+            .hand: local(geometry.handBand.center),
+            .pond: local(geometry.pond.center),
         ]
+        if let l = geometry.meldBands[.left] { out[.meldLeft] = local(l.center) }
+        if let r = geometry.meldBands[.right] { out[.meldRight] = local(r.center) }
+        if let f = geometry.meldBands[.across] { out[.meldFar] = local(f.center) }
+        return out
     }
 
     /// Fraction of `rect`'s own area that falls inside the visible

@@ -42,6 +42,32 @@ final class TrackStoreTests: XCTestCase {
         return store
     }
 
+    // MARK: - Position smoothing (Session-4 count-stability)
+
+    func testPositionSmoothingEasesTheBoxCenter() {
+        // Smoothing 0.5: a track settled at x=0.5, then a detection jumps to
+        // x=0.6, publishes a HALF-eased center (0.55), not the raw 0.6.
+        var config = TrackerConfig()
+        config.positionSmoothing = 0.5
+        let store = TrackStore(config: config)
+        let settled = box(0.5, 0.5)
+        for i in 0..<3 { store.associate([det(.m(1), 0.9, settled)], at: Double(i) * 0.2) }
+        XCTAssertEqual(store.track(id0)?.box.centerX ?? 0, 0.5, accuracy: 1e-9)
+
+        store.associate([det(.m(1), 0.9, box(0.6, 0.5))], at: 0.8)
+        XCTAssertEqual(store.track(id0)?.box.centerX ?? 0, 0.55, accuracy: 1e-9,
+                       "EMA(0.5) of 0.5→0.6 is 0.55, not the raw jump")
+        XCTAssertEqual(store.track(id0)?.box.centerY ?? 0, 0.5, accuracy: 1e-9)
+    }
+
+    func testPositionSmoothingOffJumpsToRawDetection() {
+        // Default (0) is legacy: the published box IS the latest detection.
+        let store = TrackStore()   // positionSmoothing defaults to 0
+        for i in 0..<3 { store.associate([det(.m(1), 0.9, box(0.5, 0.5))], at: Double(i) * 0.2) }
+        store.associate([det(.m(1), 0.9, box(0.6, 0.5))], at: 0.8)
+        XCTAssertEqual(store.track(id0)?.box.centerX ?? 0, 0.6, accuracy: 1e-9)
+    }
+
     // MARK: - Admission (§3.1.4)
 
     func testTentativePromotesExactlyAtConfirmFrames() {

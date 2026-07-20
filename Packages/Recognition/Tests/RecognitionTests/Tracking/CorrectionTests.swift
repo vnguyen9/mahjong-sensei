@@ -364,4 +364,40 @@ final class CorrectionTests: XCTestCase {
         XCTAssertEqual(tracker.state.mySeatWind, .south, "winds are untouched by a dismissal")
         XCTAssertTrue(tracker.events.contains { if case .handEndCancelled = $0.kind { return true }; return false })
     }
+
+    func testAutoHandEndDisabledSuppressesProposalButManualRequestStillWorks() {
+        // The AR `.tableSpace` config turns the automatic table-clear detector
+        // OFF (motion / reloc / TrackID churn mimic a sweep); hand-end there is
+        // the user's manual call instead.
+        var config = TrackerConfig()
+        config.autoHandEndEnabled = false
+
+        var game = ScriptedGame(seed: 5_010)
+        game.deal(myHand: dealHand())
+        game.clearTable(at: 1.0)
+        let frames = extendCalm(game.frames(fps: 10, noise: NoiseModel(boxJitter: 0, dropoutIdle: 0, dropoutAction: 0, faceFlicker: 0)),
+                               by: TrackerConfig().handClearSustain + 3.0)
+
+        let tracker = TableTracker(config: config)
+        tracker.beginSession(mySeatWind: .east, roundWind: .east, at: 0)
+        for f in frames { tracker.ingest(f.tiles, at: f.t, motion: f.motion) }
+
+        // The same sustained clear that fires a proposal by default is suppressed.
+        XCTAssertNil(tracker.pendingHandEnd, "auto hand-end must not fire when the detector is disabled")
+
+        // The manual entry point proposes one — with the UI's wind prediction —
+        // and flows through the existing confirm/dismiss machinery.
+        tracker.requestHandEnd()
+        guard let proposal = tracker.pendingHandEnd else {
+            return XCTFail("requestHandEnd should manually propose a hand end")
+        }
+        XCTAssertNotNil(proposal.predictedWinds)
+        XCTAssertEqual(tracker.state.phase, .endProposed)
+
+        tracker.requestHandEnd()   // idempotent while one is pending
+        XCTAssertNotNil(tracker.pendingHandEnd)
+
+        tracker.dismissHandEnd()
+        XCTAssertNil(tracker.pendingHandEnd)
+    }
 }

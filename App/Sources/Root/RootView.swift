@@ -67,8 +67,14 @@ struct RootView: View {
         // `-resume` variant, plan A6's synthetic resume-card screenshot hook
         // — see `CoachLiveSetupView.loadResumable`) shows the card. Explicit
         // `.live` because the production default is now `.setup`.
-        let flowState: CoachLiveFlowView.FlowState =
-            (scene == "coach-live-setup" || scene == "coach-live-setup-resume") ? .setup : .live
+        let flowState: CoachLiveFlowView.FlowState = {
+            switch scene {
+            case "coach-live-setup", "coach-live-setup-resume": return .setup
+            case "coach-live-primer": return .primer
+            case "coach-live-calibration": return .calibration
+            default: return .live
+            }
+        }()
         let sheet: CoachLiveSheet? = scene == "coach-live-corrections" ? .assign : nil
         return CoachLiveFlowView(session: session, debugFlowState: flowState,
                                  debugInitialTab: initialTab, debugSheet: sheet)

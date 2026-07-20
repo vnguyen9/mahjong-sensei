@@ -79,9 +79,64 @@ enum HandPoseFingertip {
         }
 
         guard indexTipPoint.confidence >= minimumConfidence else { return nil }
-
-        let orientedX = Double(indexTipPoint.location.x)
-        let orientedY = 1 - Double(indexTipPoint.location.y)
-        return SIMD2<Double>(orientedX, orientedY)
+        return orientedPoint(indexTipPoint)
     }
+
+    /// One pinch reading: the thumb+index midpoint (in `tablePoint` input
+    /// space), whether the two tips are close enough to count as an active
+    /// pinch, and their normalized gap (for a light hysteresis in the caller).
+    struct PinchSample {
+        /// Midpoint of the thumb and index tips — a normalized ORIENTED point,
+        /// feed straight into `TableProjection.tablePoint(...)`.
+        let point: SIMD2<Double>
+        /// True when the tips are within `pinchThreshold` of each other.
+        let isPinching: Bool
+        /// Thumb↔index distance in oriented-normalized units.
+        let gap: Double
+    }
+
+    /// Detects a thumb+index **pinch** — the primary calibration gesture
+    /// (drop a post where thumb and index meet). Returns `nil` when a hand or
+    /// either tip is missing / low-confidence; otherwise reports the midpoint
+    /// and whether it's an active pinch (`gap <= pinchThreshold`). The caller
+    /// places a post on the pinch-close edge and keeps `tap` as a fallback.
+    ///
+    /// `pinchThreshold` is in the same oriented-normalized units as `point`
+    /// (fraction of the portrait frame's larger dimension); ~0.045 ≈ tips
+    /// nearly touching. Calibration-only, same bounded Vision cost as the
+    /// index-tip path.
+    static func pinch(in pixelBuffer: CVPixelBuffer,
+                      pinchThreshold: Double = 0.045,
+                      minimumConfidence: Float = 0.3) -> PinchSample? {
+        let request = VNDetectHumanHandPoseRequest()
+        request.maximumHandCount = 1
+
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
+        do { try handler.perform([request]) } catch { return nil }
+        guard let observation = request.results?.first else { return nil }
+
+        let thumb: VNRecognizedPoint
+        let index: VNRecognizedPoint
+        do {
+            thumb = try observation.recognizedPoint(.thumbTip)
+            index = try observation.recognizedPoint(.indexTip)
+        } catch { return nil }
+        guard thumb.confidence >= minimumConfidence, index.confidence >= minimumConfidence else { return nil }
+
+        let t = orientedPoint(thumb), i = orientedPoint(index)
+        let mid = SIMD2<Double>((t.x + i.x) / 2, (t.y + i.y) / 2)
+        let gap = (SIMD2<Double>(t.x - i.x, t.y - i.y)).gapLength
+        return PinchSample(point: mid, isPinching: gap <= pinchThreshold, gap: gap)
+    }
+
+    /// Converts a Vision landmark (bottom-left origin, +y up) into the
+    /// pipeline's oriented-normalized point (top-left origin, +y down) — the
+    /// only adjustment `tablePoint`'s input space needs (see the doc above).
+    private static func orientedPoint(_ p: VNRecognizedPoint) -> SIMD2<Double> {
+        SIMD2<Double>(Double(p.location.x), 1 - Double(p.location.y))
+    }
+}
+
+private extension SIMD2 where Scalar == Double {
+    var gapLength: Double { (x * x + y * y).squareRoot() }
 }

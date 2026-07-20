@@ -225,19 +225,25 @@ public final class TableTracker {
                                                   motionRegion: burstRegion, pondCentroid: zoneModel.pondCentroid, at: t)
         updateHandCompleteLatch(from: newEvents)
 
-        let boundary = boundaryDetector.evaluateSettled(store: store, at: t)
-        if let proposed = boundary.proposed {
-            var proposal = proposed
-            proposal.predictedWinds = predictedWinds().winds
-            pendingHandEnd = proposal
-            newEvents.append(GameEvent(id: turnEngine.mintEventID(), at: t, handIndex: handIndex,
-                                       kind: .handEndProposed(missingFraction: proposal.missingFraction),
-                                       confidence: 1.0))
-        }
-        if boundary.cancelled {
-            pendingHandEnd = nil
-            newEvents.append(GameEvent(id: turnEngine.mintEventID(), at: t, handIndex: handIndex,
-                                       kind: .handEndCancelled, confidence: 1.0))
+        // The automatic table-clear heuristic is a master-switchable behaviour.
+        // Coach Live's AR `.tableSpace` config disables it (motion / reloc /
+        // TrackID churn mimic a sweep) in favour of a manual "End hand" action;
+        // when off, `pendingHandEnd` is never auto-proposed here.
+        if config.autoHandEndEnabled {
+            let boundary = boundaryDetector.evaluateSettled(store: store, at: t)
+            if let proposed = boundary.proposed {
+                var proposal = proposed
+                proposal.predictedWinds = predictedWinds().winds
+                pendingHandEnd = proposal
+                newEvents.append(GameEvent(id: turnEngine.mintEventID(), at: t, handIndex: handIndex,
+                                           kind: .handEndProposed(missingFraction: proposal.missingFraction),
+                                           confidence: 1.0))
+            }
+            if boundary.cancelled {
+                pendingHandEnd = nil
+                newEvents.append(GameEvent(id: turnEngine.mintEventID(), at: t, handIndex: handIndex,
+                                           kind: .handEndCancelled, confidence: 1.0))
+            }
         }
 
         diagnostics = currentDiagnostics(lastSettleAt: t)
@@ -409,6 +415,21 @@ public final class TableTracker {
                                   mySeatWind: newSeatWind, roundWind: newRoundWind)
         appendEvent(.handStarted(mySeatWind: newSeatWind, roundWind: newRoundWind), confidence: 1.0, at: now)
         appendRevisionEvent(.handEndConfirmed)
+        assembleState()
+    }
+
+    /// Manually propose a hand end (the user tapped "End hand"). The
+    /// counterpart to the automatic detector for configs that disable it
+    /// (`config.autoHandEndEnabled == false`, e.g. Coach Live AR): it builds
+    /// the same `pendingHandEnd` the auto path would — with the best-effort
+    /// wind prediction — so the existing confirm/dismiss card flow is unchanged.
+    /// No-op if a proposal is already pending.
+    public func requestHandEnd() {
+        guard pendingHandEnd == nil else { return }
+        var proposal = HandEndProposal(at: now, missingFraction: 1.0)
+        proposal.predictedWinds = predictedWinds().winds
+        pendingHandEnd = proposal
+        appendEvent(.handEndProposed(missingFraction: proposal.missingFraction), confidence: 1.0, at: now)
         assembleState()
     }
 

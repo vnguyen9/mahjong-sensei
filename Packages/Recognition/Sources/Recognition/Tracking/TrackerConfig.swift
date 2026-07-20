@@ -229,31 +229,293 @@ public struct TrackerConfig: Sendable {
     /// calibration (which a world-anchored plane makes unnecessary): geometry
     /// is a session constant read straight off the plane, not something to
     /// accumulate. `nil` in `.imageSpace` (never read there).
-    public struct TableGeometry: Sendable {
+    /// One **oriented** band = the swept rectangle from segment A→B extruded
+    /// inward (toward the table centre (0.5, 0.5)) by `depth`. All points are
+    /// normalized table-space (anchor (0.5, 0.5); my edge y = 1). Unlike the
+    /// old axis-aligned "depth from an edge", A→B may sit at *any* angle, so a
+    /// hand row that isn't parallel to the table edge is still classified
+    /// correctly. Membership is distance-to-oriented-rectangle, and
+    /// `penetration` (perpendicular depth past the A→B line) generalizes the
+    /// old "distance to this edge" used for corner tie-breaking. The
+    /// axis-aligned cases are a strict special case (see `TableGeometry`'s
+    /// legacy init), so `penetration` reproduces the old `nearestEdge`
+    /// distances exactly.
+    public struct OrientedBand: Sendable, Equatable, Codable {
+        /// One end-post of the band's near edge (on the physical table edge).
+        public var a: SIMD2<Double>
+        /// The other end-post of the band's near edge.
+        public var b: SIMD2<Double>
+        /// Band thickness inward from the A→B line, as a fraction of `extent`.
+        public var depth: Double
+
+        public init(a: SIMD2<Double>, b: SIMD2<Double>, depth: Double) {
+            self.a = a
+            self.b = b
+            self.depth = depth
+        }
+
+        /// Unit tangent along A→B, its length, and the inward unit normal
+        /// (perpendicular to A→B, rotated toward the table centre). Degenerate
+        /// A==B falls back to a horizontal band so callers never divide by 0.
+        @inline(__always)
+        private var basis: (t: SIMD2<Double>, length: Double, n: SIMD2<Double>) {
+            let d = b - a
+            let len = (d.x * d.x + d.y * d.y).squareRoot()
+            guard len > 1e-9 else {
+                // Degenerate: treat as a horizontal edge, inward = toward centre.
+                let mid = (a + b) * 0.5
+                let n0 = SIMD2<Double>(0, (0.5 - mid.y) >= 0 ? 1 : -1)
+                return (SIMD2<Double>(1, 0), 0, n0)
+            }
+            let t = SIMD2<Double>(d.x / len, d.y / len)
+            // Two perpendiculars; pick the one pointing toward the centre.
+            var n = SIMD2<Double>(-t.y, t.x)
+            let mid = (a + b) * 0.5
+            let toCentre = SIMD2<Double>(0.5 - mid.x, 0.5 - mid.y)
+            if (n.x * toCentre.x + n.y * toCentre.y) < 0 { n = SIMD2<Double>(-n.x, -n.y) }
+            return (t, len, n)
+        }
+
+        /// True iff `p` lies within the oriented rectangle. `endSlack` extends
+        /// the band past its end-posts along the A→B axis (0 = exact segment).
+        public func contains(_ p: SIMD2<Double>, endSlack: Double = 0) -> Bool {
+            let (t, len, n) = basis
+            let d = SIMD2<Double>(p.x - a.x, p.y - a.y)
+            let along = d.x * t.x + d.y * t.y
+            let perp = d.x * n.x + d.y * n.y
+            return along >= -endSlack && along <= len + endSlack && perp >= 0 && perp <= depth
+        }
+
+        /// Perpendicular penetration of `p` past the A→B line toward the
+        /// centre — the generalized "distance to this edge". Equals the old
+        /// `nearestEdge` distance for the axis-aligned bands.
+        public func penetration(_ p: SIMD2<Double>) -> Double {
+            let (_, _, n) = basis
+            return (p.x - a.x) * n.x + (p.y - a.y) * n.y
+        }
+
+        /// The band's 4 corners a → b → b+depth·n → a+depth·n (for ROI crop
+        /// projection).
+        public var corners: [SIMD2<Double>] {
+            let (_, _, n) = basis
+            let off = SIMD2<Double>(n.x * depth, n.y * depth)
+            return [a, b, SIMD2<Double>(b.x + off.x, b.y + off.y), SIMD2<Double>(a.x + off.x, a.y + off.y)]
+        }
+
+        /// Band centre = midpoint(a, b) + (depth/2)·n (for ROI zone centres).
+        public var center: SIMD2<Double> {
+            let (_, _, n) = basis
+            let mid = (a + b) * 0.5
+            return SIMD2<Double>(mid.x + n.x * depth * 0.5, mid.y + n.y * depth * 0.5)
+        }
+    }
+
+    /// The pond (the central discard area). Historically a disk around the
+    /// table centre; calibration now marks it as an explicit **axis-aligned
+    /// rectangle** (two pinch-dropped opposite corners), which real ponds —
+    /// off-centre toward the discarder and rectangular, not round — need. Both
+    /// shapes are kept so the legacy disk path stays byte-for-byte identical.
+    public enum PondShape: Sendable, Equatable, Codable {
+        /// Disk of `radius` (fraction of extent) around `center` — legacy model.
+        case disk(center: SIMD2<Double>, radius: Double)
+        /// Axis-aligned rectangle in table space; `min`/`max` opposite corners.
+        case rect(min: SIMD2<Double>, max: SIMD2<Double>)
+        /// An arbitrary (convex) quad — 4 corners in winding order — for a
+        /// rotated/irregular pond the axis-aligned rect can't cover. Refined by
+        /// dragging the 4 corners during calibration.
+        case quad(corners: [SIMD2<Double>])
+
+        /// The default central disk (radius 0.30 around the anchor (0.5, 0.5)).
+        public static let defaultPond = PondShape.disk(center: SIMD2(0.5, 0.5), radius: 0.30)
+
+        /// True iff `p` (normalized table space) is inside the pond.
+        public func contains(_ p: SIMD2<Double>) -> Bool {
+            switch self {
+            case let .disk(center, radius):
+                let dx = p.x - center.x, dy = p.y - center.y
+                return (dx * dx + dy * dy).squareRoot() <= radius
+            case let .rect(mn, mx):
+                return p.x >= mn.x && p.x <= mx.x && p.y >= mn.y && p.y <= mx.y
+            case let .quad(c):
+                // Two-triangle test over the ordered corners — robust for any
+                // ordered convex quad (and reasonable near-convex ones).
+                guard c.count == 4 else { return false }
+                return Self.pointInTriangle(p, c[0], c[1], c[2])
+                    || Self.pointInTriangle(p, c[0], c[2], c[3])
+            }
+        }
+
+        /// Pond centre in table space.
+        public var center: SIMD2<Double> {
+            switch self {
+            case let .disk(center, _): return center
+            case let .rect(mn, mx): return (mn + mx) * 0.5
+            case let .quad(c):
+                guard !c.isEmpty else { return SIMD2(0.5, 0.5) }
+                return c.reduce(SIMD2(0, 0), +) / Double(c.count)
+            }
+        }
+
+        /// The 4 corners of the pond's bounding box, for ROI crop projection —
+        /// the circumscribing square for a disk, the rect/quad's own corners
+        /// otherwise.
+        public var corners: [SIMD2<Double>] {
+            switch self {
+            case let .disk(c, r):
+                return [SIMD2(c.x - r, c.y - r), SIMD2(c.x + r, c.y - r),
+                        SIMD2(c.x + r, c.y + r), SIMD2(c.x - r, c.y + r)]
+            case let .rect(mn, mx):
+                return [SIMD2(mn.x, mn.y), SIMD2(mx.x, mn.y),
+                        SIMD2(mx.x, mx.y), SIMD2(mn.x, mx.y)]
+            case let .quad(c):
+                return c
+            }
+        }
+
+        /// Back-compat scalar "radius": the disk radius, or half the shorter
+        /// bounding side (used by the debug HUD + legacy assertions).
+        public var effectiveRadius: Double {
+            switch self {
+            case let .disk(_, r): return r
+            case let .rect(mn, mx): return Swift.min(mx.x - mn.x, mx.y - mn.y) * 0.5
+            case let .quad(c):
+                guard !c.isEmpty else { return 0 }
+                let xs = c.map(\.x), ys = c.map(\.y)
+                return Swift.min(xs.max()! - xs.min()!, ys.max()! - ys.min()!) * 0.5
+            }
+        }
+
+        /// Point-in-triangle via consistent edge-cross signs (allows the
+        /// boundary).
+        private static func pointInTriangle(_ p: SIMD2<Double>,
+                                            _ a: SIMD2<Double>, _ b: SIMD2<Double>, _ c: SIMD2<Double>) -> Bool {
+            func cross(_ o: SIMD2<Double>, _ u: SIMD2<Double>, _ v: SIMD2<Double>) -> Double {
+                (u.x - o.x) * (v.y - o.y) - (u.y - o.y) * (v.x - o.x)
+            }
+            let d1 = cross(p, a, b), d2 = cross(p, b, c), d3 = cross(p, c, a)
+            let hasNeg = d1 < 0 || d2 < 0 || d3 < 0
+            let hasPos = d1 > 0 || d2 > 0 || d3 > 0
+            return !(hasNeg && hasPos)
+        }
+    }
+
+    /// One seat placed on the locked table: which relative seat it is, its
+    /// wind for the hand, and the normalized midpoint of the table edge it
+    /// sits behind. Derived at calibration from the 4 plane-edge midpoints
+    /// (user seat = the +Z / y=1 edge; others counter-clockwise).
+    public struct SeatSlot: Sendable, Equatable, Codable {
+        public var seat: RelativeSeat
+        public var wind: Wind
+        public var edgeMidpoint: SIMD2<Double>
+
+        public init(seat: RelativeSeat, wind: Wind, edgeMidpoint: SIMD2<Double>) {
+            self.seat = seat
+            self.wind = wind
+            self.edgeMidpoint = edgeMidpoint
+        }
+    }
+
+    /// How the locked table space is carved into zones.
+    public enum ZoneLayout: Sendable, Equatable, Codable {
+        /// Legacy: an oriented hand band + thin per-opponent meld bands + a
+        /// pond region; anything inside none of them is `.unresolved`. Leaves a
+        /// gap ("moat") between the shallow edge bands and the pond, so table
+        /// tiles between them fall to `.unresolved`.
+        case bands
+        /// Whole-table partition (the AR auto-layout): a central pond rect, and
+        /// every non-pond tile is assigned to the NEAREST table edge → that
+        /// seat's zone (you = my edge; the other three = opponents). Tiles the
+        /// entire table with no gaps, so nothing falls to `.unresolved`.
+        case partition
+    }
+
+    public struct TableGeometry: Sendable, Equatable, Codable {
+        /// Schema version — lets a decoded geometry from an older archive be
+        /// discarded (→ recalibrate) rather than trusted. Bumped to 4 when a
+        /// `layout` (thin `.bands` vs whole-table `.partition`) was added; was
+        /// 3 when the pond became a `PondShape` (disk **or** rect) instead of a
+        /// scalar.
+        public static let currentVersion = 4
+        public var version: Int
         /// Physical metres spanned by table-space's normalized [0,1] range —
         /// the same value the app passes as `DetectionProjector.tableExtent`.
-        /// Not read by `ZoneModel` (which works purely in the already-
-        /// normalized units below), but carried alongside them so the one
-        /// geometry the app fills at table-lock lives in one struct. Default
-        /// 0.9 ≈ a standard ~0.9m playing area.
+        /// Carried alongside the normalized fields so the one geometry the app
+        /// fills at table-lock lives in one struct. Default 0.9 ≈ a standard
+        /// ~0.9m playing area.
         public var extent: Double
-        /// Depth of the hand-rank band measured inward from an edge, as a
-        /// fraction of `extent`. My concealed rank sits within this of my
-        /// edge (the high-y side, y = 1); the *same* depth is how close an
-        /// opponent's meld must hug one of the other three edges to be read as
-        /// theirs. Default 0.18 ≈ a rank resting within ~15cm of the edge on a
-        /// ~0.9m table.
-        public var handBandDepth: Double
-        /// Radius of the central pond disk around the plane anchor (0.5, 0.5),
-        /// as a fraction of `extent`. A tile inside it — that isn't part of a
-        /// hand row or an edge meld — is a pond discard. Default 0.30 ≈ the
-        /// pond occupying the central ~50cm of a ~0.9m table.
-        public var pondRadius: Double
+        /// My concealed hand row, as an oriented band hugging my edge (y = 1).
+        /// May tilt when my tiles aren't parallel to the table edge.
+        public var handBand: OrientedBand
+        /// The pond region (central discard area) — a disk (legacy) or an
+        /// explicit axis-aligned rectangle (two-corner calibration).
+        public var pond: PondShape
+        /// The 4 seats placed on the table (user seat first).
+        public var seats: [SeatSlot]
+        /// Per-opponent meld band hugging that seat's inner edge. Tiles that
+        /// land in `meldBands[seat]` are read as that opponent's exposed meld.
+        public var meldBands: [RelativeSeat: OrientedBand]
 
-        public init(extent: Double = 0.9, handBandDepth: Double = 0.18, pondRadius: Double = 0.30) {
+        /// How the table is carved into zones — legacy thin `.bands` (default,
+        /// behaviour unchanged) or a gapless whole-table `.partition` (the AR
+        /// auto-layout: pond rect + nearest-edge fill, no `.unresolved` moat).
+        public var layout: ZoneLayout
+
+        /// Back-compat convenience: the hand band's depth (many call sites and
+        /// the meld bands historically shared one scalar depth).
+        public var handBandDepth: Double { handBand.depth }
+
+        /// Back-compat convenience: a scalar pond "radius" (the disk radius, or
+        /// half the rect's shorter side) for the debug HUD + legacy assertions.
+        public var pondRadius: Double { pond.effectiveRadius }
+
+        /// Canonical initializer — an oriented hand band + explicit seats and
+        /// per-opponent meld bands.
+        public init(extent: Double = 0.9,
+                    handBand: OrientedBand,
+                    pond: PondShape = .defaultPond,
+                    seats: [SeatSlot],
+                    meldBands: [RelativeSeat: OrientedBand],
+                    layout: ZoneLayout = .bands,
+                    version: Int = TableGeometry.currentVersion) {
+            self.version = version
             self.extent = extent
-            self.handBandDepth = handBandDepth
-            self.pondRadius = pondRadius
+            self.handBand = handBand
+            self.pond = pond
+            self.seats = seats
+            self.meldBands = meldBands
+            self.layout = layout
+        }
+
+        /// Legacy / back-compat initializer — synthesizes the axis-aligned
+        /// hand band (along y = 1), the 3 axis-aligned opponent meld bands, and
+        /// default seats/winds from a single `handBandDepth` scalar. Chosen so
+        /// `OrientedBand.contains`/`penetration` reproduce the old
+        /// `nearestEdge` zoning byte-for-byte — every pre-existing construction
+        /// site keeps compiling and behaving identically.
+        public init(extent: Double = 0.9,
+                    handBandDepth: Double = 0.18,
+                    pondRadius: Double = 0.30,
+                    mySeatWind: Wind = .east) {
+            let hand = OrientedBand(a: SIMD2(0, 1), b: SIMD2(1, 1), depth: handBandDepth)
+            // Edge midpoints: me=+y(y=1), right=+x(x=1), across=-y(y=0), left=-x(x=0).
+            let midpoints: [RelativeSeat: SIMD2<Double>] = [
+                .me: SIMD2(0.5, 1), .right: SIMD2(1, 0.5),
+                .across: SIMD2(0.5, 0), .left: SIMD2(0, 0.5),
+            ]
+            let seats = RelativeSeat.allCases.map { seat in
+                SeatSlot(seat: seat, wind: seat.wind(mySeatWind: mySeatWind),
+                         edgeMidpoint: midpoints[seat] ?? SIMD2(0.5, 0.5))
+            }
+            // Axis-aligned meld bands whose inward normals reproduce the old
+            // per-edge distances: left → cx, right → 1-cx, across → cy.
+            let melds: [RelativeSeat: OrientedBand] = [
+                .left: OrientedBand(a: SIMD2(0, 0), b: SIMD2(0, 1), depth: handBandDepth),
+                .right: OrientedBand(a: SIMD2(1, 0), b: SIMD2(1, 1), depth: handBandDepth),
+                .across: OrientedBand(a: SIMD2(0, 0), b: SIMD2(1, 0), depth: handBandDepth),
+            ]
+            self.init(extent: extent, handBand: hand,
+                      pond: .disk(center: SIMD2(0.5, 0.5), radius: pondRadius),
+                      seats: seats, meldBands: melds)
         }
     }
 
@@ -291,6 +553,17 @@ public struct TrackerConfig: Sendable {
 
     // MARK: - Hand boundary (HandBoundaryDetector)
 
+    /// Master switch for the automatic table-clear hand-end heuristic
+    /// (`HandBoundaryDetector`). Default `true` — the image-space harness,
+    /// goldens, and tests are unchanged. Coach Live's AR `.tableSpace` config
+    /// sets this **false**: camera motion / relocalization / TrackID churn make
+    /// "tiles vanished" indistinguishable from "table swept clear", so hand-end
+    /// there is user-driven (a manual "End hand" action) instead. When false
+    /// `TableTracker` never calls `HandBoundaryDetector.evaluateSettled`, so
+    /// `pendingHandEnd` stays nil (the real-win `.myHandComplete` path is
+    /// separate and unaffected).
+    public var autoHandEndEnabled: Bool = true
+
     /// Fraction of confirmed tracks that must be simultaneously `missing`
     /// before a hand-end is even considered.
     public var handClearFraction: Double = 0.6
@@ -324,6 +597,16 @@ public struct TrackerConfig: Sendable {
 
     /// Per-track box-history ring capacity (observations, not seconds).
     public var boxHistoryCap: Int = 12
+
+    /// EMA factor for smoothing a matched track's published box CENTER toward
+    /// each new detection: `center = lerp(prevCenter, detCenter, 1 - factor)`
+    /// (higher = steadier, more lag). `0` = OFF — the track box is the raw
+    /// latest detection (legacy behavior; keeps every existing test byte-
+    /// identical). Set > 0 only in the AR `.tableSpace` config, where each
+    /// detection is already a pose-projected table point, so smoothing the
+    /// center stops boundary flicker (pond/hand zoning) without moving the tile
+    /// off its physical spot. Size (w/h) is always taken from the detection.
+    public var positionSmoothing: Double = 0.0
 
     /// After `TableTracker.removeTrack`, the removed box is suppressed
     /// (radius = `rebirthRadius`) for this long so the same ghost detection

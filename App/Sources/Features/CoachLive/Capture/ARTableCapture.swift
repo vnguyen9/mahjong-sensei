@@ -43,6 +43,12 @@ final class ARTableCapture: NSObject {
     /// `nil` until `captureStage` first reaches `.tableLocked`.
     private(set) var lockedPlaneTransform: simd_float4x4?
 
+    /// The locked plane's larger horizontal side in metres — the physical size
+    /// the normalized [0,1] table space spans. Used to build the auto-partition
+    /// `TableGeometry` at tracker-lock time so its central pond fraction maps to
+    /// the real table. `nil` until `.tableLocked`.
+    private(set) var lockedPlaneExtent: Double?
+
     // MARK: - Per-frame state (polled, not observed)
 
     // `@ObservationIgnored` on both: these are manually synchronized via
@@ -74,7 +80,6 @@ final class ARTableCapture: NSObject {
     /// `captureStage` immediately before a `.relocalizing` detour, restored
     /// once tracking recovers.
     private var stageBeforeRelocalizing: CaptureStage?
-    private var torchDevice: AVCaptureDevice?
     /// The last torch state requested via `setTorch(_:)`, re-applied after
     /// any `session.run(_:)` re-configuration (see that method's doc — a
     /// config re-run can silently reset the torch to off).
@@ -103,6 +108,7 @@ final class ARTableCapture: NSObject {
         }
         captureStage = .starting
         lockedPlaneTransform = nil
+        lockedPlaneExtent = nil
         planeLockPolicy = nil
         planeDetectionRequested = true
         session.run(Self.makeConfiguration(planeDetection: true))
@@ -164,12 +170,7 @@ final class ARTableCapture: NSObject {
     /// it afterward.
     func setTorch(_ on: Bool) {
         pendingTorchState = on
-        let device = torchDevice ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
-        guard let device else { return }
-        torchDevice = device
-        guard device.hasTorch, (try? device.lockForConfiguration()) != nil else { return }
-        device.torchMode = on ? .on : .off
-        device.unlockForConfiguration()
+        CameraTorch.set(on)
     }
 
     private static func makeConfiguration(planeDetection: Bool) -> ARWorldTrackingConfiguration {
@@ -208,6 +209,7 @@ final class ARTableCapture: NSObject {
 
         guard let locked = planeLockPolicy?.lockedPlane else { return }
         lockedPlaneTransform = locked.transform
+        lockedPlaneExtent = locked.extent
         captureStage = .tableLocked
         Self.logger.notice("table plane locked (id: \(locked.id.uuidString, privacy: .public))")
 
