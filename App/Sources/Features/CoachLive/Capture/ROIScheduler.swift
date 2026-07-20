@@ -158,6 +158,46 @@ struct ROIScheduler {
         return ZoneRects(hand: hand, pond: pond, meldLeft: left, meldRight: right, meldFar: far)
     }
 
+    /// Projects the exact polygons captured by guided calibration. This is
+    /// the authoritative AR-mode geometry path; it deliberately does not
+    /// reconstruct square bands from a scalar extent.
+    static func projectedZoneRects(
+        calibration: WorldTableCalibration,
+        projection: TableProjection,
+        imageTransform: FrameImageTransform
+    ) -> ZoneRects {
+        func rect(_ corners: [SIMD2<Float>]) -> TileBoundingBox? {
+            let projected = corners.compactMap {
+                projection.normalizedOrientedPoint(
+                    ofTablePoint: SIMD2(Double($0.x), Double($0.y)),
+                    imageTransform: imageTransform
+                )
+            }
+            guard !projected.isEmpty else { return nil }
+            let xs = projected.map(\.x)
+            let ys = projected.map(\.y)
+            guard let minX = xs.min(), let maxX = xs.max(),
+                  let minY = ys.min(), let maxY = ys.max() else {
+                return nil
+            }
+            return TileBoundingBox(
+                x: minX, y: minY,
+                width: maxX - minX, height: maxY - minY
+            )
+        }
+
+        return ZoneRects(
+            hand: rect(calibration.handPolygon),
+            pond: rect(calibration.pondPolygon),
+            meldLeft: calibration.revealedZonePolygons[.tableRevealedLeft]
+                .flatMap(rect),
+            meldRight: calibration.revealedZonePolygons[.tableRevealedRight]
+                .flatMap(rect),
+            meldFar: calibration.revealedZonePolygons[.tableRevealedFar]
+                .flatMap(rect)
+        )
+    }
+
     /// The five zones' TABLE-space centers — fixed, camera-pose-independent
     /// points using the exact same corner geometry `projectedZoneRects`
     /// builds its rects from (Lane B chunk H). The per-zone staleness/
@@ -180,6 +220,31 @@ struct ROIScheduler {
         if let r = geometry.meldBands[.right] { out[.meldRight] = local(r.center) }
         if let f = geometry.meldBands[.across] { out[.meldFar] = local(f.center) }
         return out
+    }
+
+    static func zoneCenters(
+        calibration: WorldTableCalibration
+    ) -> [TableZoneID: SIMD2<Double>] {
+        func center(_ polygon: [SIMD2<Float>]) -> SIMD2<Double>? {
+            guard !polygon.isEmpty else { return nil }
+            let sum = polygon.reduce(SIMD2<Float>.zero, +)
+            let value = sum / Float(polygon.count)
+            return SIMD2(Double(value.x), Double(value.y))
+        }
+
+        var result: [TableZoneID: SIMD2<Double>] = [:]
+        result[.hand] = center(calibration.handPolygon)
+        result[.pond] = center(calibration.pondPolygon)
+        result[.meldLeft] = calibration.revealedZonePolygons[
+            .tableRevealedLeft
+        ].flatMap(center)
+        result[.meldRight] = calibration.revealedZonePolygons[
+            .tableRevealedRight
+        ].flatMap(center)
+        result[.meldFar] = calibration.revealedZonePolygons[
+            .tableRevealedFar
+        ].flatMap(center)
+        return result
     }
 
     /// Fraction of `rect`'s own area that falls inside the visible

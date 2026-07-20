@@ -6,8 +6,16 @@ import simd
 
 struct WorldCensusDiagnostics {
     var depthRejections: [DepthSampleRejection: Int] = [:]
+    var depthSamplesAttempted = 0
+    var depthSamplesAccepted = 0
     var recognizerFailures = 0
     var lastIngestMilliseconds: Double = 0
+    var anchorReprojectionErrorPixels: Double = 0
+
+    var depthAcceptanceRate: Double {
+        guard depthSamplesAttempted > 0 else { return 0 }
+        return Double(depthSamplesAccepted) / Double(depthSamplesAttempted)
+    }
 }
 
 /// App-side AR/depth policy around the platform-pure `PhysicalCensus`.
@@ -136,6 +144,7 @@ final class WorldCensusController {
             var localPoints: [SIMD2<Float>] = []
             var surfaceDepths: [Float] = []
             for point in points {
+                diagnostics.depthSamplesAttempted += 1
                 let sample = DepthSampler.inspect(
                     atOrientedNormalized: point,
                     imageTransform: frame.imageTransform,
@@ -163,6 +172,7 @@ final class WorldCensusController {
                     diagnostics.depthRejections[.heightOutOfRange, default: 0] += 1
                     continue
                 }
+                diagnostics.depthSamplesAccepted += 1
                 localPoints.append(SIMD2(Float(local4.x), Float(local4.z)))
                 surfaceDepths.append(depth)
             }
@@ -174,6 +184,21 @@ final class WorldCensusController {
             let planeWorld4 = projection.planeTransform * SIMD4<Double>(
                 Double(tablePoint.x), 0, Double(tablePoint.y), 1
             )
+            if let reprojected = projection.normalizedOrientedPoint(
+                ofWorldPoint: SIMD3(planeWorld4.x, planeWorld4.y, planeWorld4.z),
+                imageTransform: frame.imageTransform
+            ) {
+                let dx = (reprojected.x - detection.box.centerX)
+                    * frame.orientedImageSize.width
+                let dy = (reprojected.y - detection.box.centerY)
+                    * frame.orientedImageSize.height
+                let error = hypot(dx, dy)
+                diagnostics.anchorReprojectionErrorPixels =
+                    diagnostics.anchorReprojectionErrorPixels == 0
+                    ? error
+                    : diagnostics.anchorReprojectionErrorPixels * 0.9
+                        + error * 0.1
+            }
             let face = TileFace.tile(detection.tile)
             let confidence = Float(detection.confidence)
             return TileObservation(
@@ -228,7 +253,10 @@ final class WorldCensusController {
             }
             // Geometry >40 mm closer than the expected tile point is an
             // occluder (typically a hand), never visible-empty evidence.
-            guard Double(sampledDepth) >= expectedDepth - 0.040 else { return nil }
+            guard Double(sampledDepth) >= expectedDepth - 0.040 else {
+                diagnostics.depthRejections[.occluded, default: 0] += 1
+                return nil
+            }
             return anchor.id
         })
 
@@ -326,6 +354,53 @@ final class WorldCensusController {
         revision += 1
     }
 
+    func setSeenCount(classIndex: Int, desiredCount: Int, at time: TimeInterval) {
+        guard let tile = MahjongCore.Tile(classIndex: classIndex) else { return }
+        let target = max(0, min(4, desiredCount))
+        let eligibleZones: Set<SemanticZoneID> = [
+            .tablePond,
+            .tableRevealedLeft,
+            .tableRevealedFar,
+            .tableRevealedRight,
+        ]
+        let matching = census.snapshot(at: time).tracks.filter {
+            guard $0.lifecycle != .tentative,
+                  $0.lifecycle != .retired,
+                  eligibleZones.contains($0.semanticZone),
+                  case .tile(let face)? = $0.face else {
+                return false
+            }
+            return face.classIndex == classIndex
+        }.sorted { $0.id < $1.id }
+
+        if matching.count > target {
+            for track in matching.suffix(matching.count - target) {
+                census.removeTrack(id: track.id)
+            }
+        } else if matching.count < target {
+            let center = Self.polygonCenter(
+                calibration?.pondPolygon ?? zones[.tablePond] ?? []
+            )
+            for ordinal in matching.count..<target {
+                let point = Self.manualCorrectionPoint(
+                    center: center,
+                    classIndex: classIndex,
+                    ordinal: ordinal
+                )
+                let world4 = tableOrigin.tableToWorld
+                    * SIMD4<Float>(point.x, 0, point.y, 1)
+                census.insertConfirmedTrack(
+                    face: .tile(tile),
+                    semanticZone: .tablePond,
+                    tablePoint: point,
+                    worldPosition: SIMD3(world4.x, world4.y, world4.z),
+                    at: time
+                )
+            }
+        }
+        revision += 1
+    }
+
     func resetTiles() {
         census.resetTiles()
         revision += 1
@@ -335,6 +410,27 @@ final class WorldCensusController {
                                  rect: TileBoundingBox) -> Bool {
         point.x >= rect.x && point.x <= rect.x + rect.width
             && point.y >= rect.y && point.y <= rect.y + rect.height
+    }
+
+    private static func polygonCenter(
+        _ polygon: [SIMD2<Float>]
+    ) -> SIMD2<Float> {
+        guard !polygon.isEmpty else { return .zero }
+        return polygon.reduce(.zero, +) / Float(polygon.count)
+    }
+
+    private static func manualCorrectionPoint(
+        center: SIMD2<Float>,
+        classIndex: Int,
+        ordinal: Int
+    ) -> SIMD2<Float> {
+        // Stable 24 mm lattice: deterministic snapshots and no random UUID
+        // geometry. The correction remains a census track and can later be
+        // reconciled with an observed physical position.
+        let slot = classIndex * 4 + ordinal
+        let column = Float(slot % 9) - 4
+        let row = Float((slot / 9) % 5) - 2
+        return center + SIMD2(column * 0.024, row * 0.032)
     }
 
     /// Non-overlapping physical-metre zones centered on the fitted table

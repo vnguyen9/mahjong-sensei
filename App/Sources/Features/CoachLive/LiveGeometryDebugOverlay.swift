@@ -44,15 +44,11 @@ struct LiveGeometryDebugOverlay: View {
         let planeTransform = calibration?.tableToWorld
             ?? controller?.tableOrigin.tableToWorld
             ?? lockedPlaneTransform
-        let fittedExtent = controller.map {
-            Double(max($0.tableOrigin.extent.x, $0.tableOrigin.extent.y))
-        } ?? session.calibratedTableGeometry?.extent ?? 0.9
-        var geometry = session.calibratedTableGeometry
-            ?? TableCalibrationGeometry.autoPartition(
-                extentMetres: fittedExtent,
-                mySeatWind: session.seatWind
-            )
-        geometry.extent = fittedExtent
+        // Exact calibrated polygons are the only AR census geometry. The
+        // scalar geometry remains solely for the explicit legacy 2D debug
+        // path and is never reconstructed from a fitted square.
+        let geometry = session.calibratedTableGeometry
+            ?? TrackerConfig.TableGeometry()
         let extent = geometry.extent
         guard extent > 0 else { return }
 

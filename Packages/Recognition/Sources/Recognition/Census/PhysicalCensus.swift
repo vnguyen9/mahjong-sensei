@@ -153,6 +153,46 @@ public final class PhysicalCensus {
         tracks.removeAll { $0.id == id }
     }
 
+    /// Creates a deterministic, user-confirmed census correction. This is
+    /// used by the histogram editor while the census is authoritative; it
+    /// must not manufacture a parallel legacy-track count.
+    @discardableResult
+    public func insertConfirmedTrack(
+        face: TileFace,
+        semanticZone: SemanticZoneID,
+        tablePoint: SIMD2<Float>,
+        worldPosition: SIMD3<Float>? = nil,
+        at time: TimeInterval
+    ) -> CensusTrackID {
+        let id = CensusTrackID(nextTrackValue)
+        nextTrackValue += 1
+        var track = PhysicalTrack(
+            id: id,
+            anchorCenter: tablePoint,
+            worldPosition: worldPosition,
+            footprintRadius: 0.012,
+            imageBox: TileBoundingBox(
+                x: Double(tablePoint.x),
+                y: Double(tablePoint.y),
+                width: 0,
+                height: 0
+            ),
+            at: time
+        )
+        track.state = .confirmed
+        track.recentOpportunities = Array(
+            repeating: true,
+            count: config.tentativeConfirmHits
+        )
+        track.semanticZoneOverride = semanticZone
+        track.semanticZone = semanticZone
+        track.bucket = OwnershipResolver.bucket(for: semanticZone)
+        FaceFusion.pin(face, on: &track)
+        tracks.append(track)
+        diagnostics.births += 1
+        return id
+    }
+
     public func pinFace(_ face: TileFace, trackID: CensusTrackID) {
         guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { return }
         FaceFusion.pin(face, on: &tracks[index])

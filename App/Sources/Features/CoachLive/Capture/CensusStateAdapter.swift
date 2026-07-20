@@ -3,6 +3,32 @@ import MahjongCore
 import Recognition
 
 enum CensusStateAdapter {
+    static func makeBootstrapState(
+        preserving legacy: TrackedTableState
+    ) -> TrackedTableState {
+        TrackedTableState(
+            revision: legacy.revision,
+            phase: legacy.phase,
+            handIndex: legacy.handIndex,
+            mySeatWind: legacy.mySeatWind,
+            roundWind: legacy.roundWind,
+            currentTurn: legacy.currentTurn,
+            myHand: [],
+            myBonus: [],
+            myMelds: [],
+            pond: [],
+            opponentMelds: [:],
+            unresolved: [],
+            seenHistogram: Array(
+                repeating: 0,
+                count: Tile.baseClassCount
+            ),
+            unseenCount: 136,
+            handTileCount: 0,
+            isMyHandComplete: false
+        )
+    }
+
     static func makeState(
         snapshot: CensusSnapshot,
         preserving legacy: TrackedTableState,

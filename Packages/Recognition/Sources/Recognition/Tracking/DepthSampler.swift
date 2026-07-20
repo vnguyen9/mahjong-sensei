@@ -11,6 +11,7 @@ public enum DepthSampleRejection: String, Sendable, Equatable {
     case noTrustworthyValues
     case heightOutOfRange
     case orientationTransition
+    case occluded
 }
 
 public struct DepthSampleResult: Sendable, Equatable {

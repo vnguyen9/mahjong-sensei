@@ -87,6 +87,34 @@ final class PhysicalCensusTests: XCTestCase {
 
     // MARK: - Ownership is independent of the published face (§10.1)
 
+    func testConfirmedCorrectionIsImmediatelyAuthoritativeAndDeterministic() {
+        let census = PhysicalCensus()
+        let first = census.insertConfirmedTrack(
+            face: .tile(.m(1)),
+            semanticZone: .tablePond,
+            tablePoint: SIMD2(0.10, -0.05),
+            worldPosition: SIMD3(1, 2, 3),
+            at: 10
+        )
+        let second = census.insertConfirmedTrack(
+            face: .tile(.p(9)),
+            semanticZone: .mineHand,
+            tablePoint: SIMD2(-0.20, 0.30),
+            at: 11
+        )
+
+        XCTAssertEqual(first, CensusTrackID(0))
+        XCTAssertEqual(second, CensusTrackID(1))
+        XCTAssertEqual(census.diagnostics.births, 2)
+
+        let snapshot = census.snapshot(at: 12)
+        XCTAssertEqual(snapshot.table[.m(1)], 1)
+        XCTAssertEqual(snapshot.mine[.p(9)], 1)
+        XCTAssertEqual(snapshot.tracks.map(\.id), [first, second])
+        XCTAssertEqual(snapshot.tracks.map(\.lifecycle), [.confirmed, .confirmed])
+        XCTAssertEqual(snapshot.tracks.first?.worldPosition, SIMD3(1, 2, 3))
+    }
+
     func testBucketStaysPutWhenPublishedFaceChanges() {
         let census = PhysicalCensus()
         let zones: [SemanticZoneID: [SIMD2<Float>]] = [.mineHand: Self.mineHandStrip]

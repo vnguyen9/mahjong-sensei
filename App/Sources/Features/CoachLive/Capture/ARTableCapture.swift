@@ -161,7 +161,9 @@ final class ARTableCapture: NSObject {
             restoredTableOriginExtent = restored.extent
             lockedPlaneTransform = restored.tableToWorld
             lockedPlaneIdentifier = nil
-            lockedPlaneExtent = Double(max(restored.extent.x, restored.extent.y))
+            lockedPlaneExtent = Double(
+                (restored.extent.x + restored.extent.y) * 0.5
+            )
             tableOriginExtent = restored.extent
             tableOriginTransform = restored.tableToWorld
             tableOriginAnchorID = restored.worldMap.anchors.first {
