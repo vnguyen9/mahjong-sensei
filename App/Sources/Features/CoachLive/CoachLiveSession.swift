@@ -169,6 +169,13 @@ final class CoachLiveSession: Identifiable {
     private var depthMissingSince: TimeInterval?
     private var depthRestartAttempted = false
 
+    /// Continuity counters make the calibration → Live handoff observable in
+    /// DEBUG without changing any live behavior. A future continuous-flow
+    /// change must keep the session ID and pipeline generation stable while
+    /// only this revision changes for an accepted calibration edit.
+    private(set) var spatialPipelineGeneration = 0
+    private(set) var calibrationRevision = 0
+
     /// True once the loop's per-tick `MotionSample.meanLuma` has read
     /// "dark" for `DarkTableDetector`'s sustain window — drives
     /// `LiveFeedPane`'s "Dark table — turn on flash?" chip. Never set on the
@@ -245,6 +252,7 @@ final class CoachLiveSession: Identifiable {
     @MainActor
     func finishARCalibration(_ calibration: WorldTableCalibration?) {
         if let calibration {
+            calibrationRevision += 1
             arCapture?.invalidatePersistedCalibration()
             worldTableCalibration = calibration
             calibratedTableGeometry = Self.legacyGeometry(
@@ -258,6 +266,7 @@ final class CoachLiveSession: Identifiable {
             recountRequest = .fullTable
             countSource = .spatialBootstrapping
             spatialTrackingHealth = .calibrating
+            refreshSpatialContinuityDiagnostics()
         }
         showARCalibration = false
     }
@@ -671,6 +680,7 @@ final class CoachLiveSession: Identifiable {
     private func startARLoop(
         recognizerProvider: @escaping @Sendable () async -> any Recognizer
     ) {
+        spatialPipelineGeneration += 1
         let loopStart = CACurrentMediaTime()
         let arLockDeadline = loopStart + 25
 
@@ -692,6 +702,7 @@ final class CoachLiveSession: Identifiable {
                     continue
                 }
                 self.diagnostics.loopTicks += 1
+                self.refreshSpatialContinuityDiagnostics(capture: arCapture)
 
                 // Startup overlay: `.starting` → `.findingTable` the instant
                 // ARKit is delivering frames and hunting for the table.
@@ -1994,6 +2005,7 @@ final class CoachLiveSession: Identifiable {
         diagnostics.worldCensusCalibrationSource =
             controller.calibration?.source.rawValue ?? "unmarked"
         diagnostics.worldCensusMilliseconds = controller.diagnostics.lastIngestMilliseconds
+        refreshSpatialContinuityDiagnostics()
         if let calibration = controller.calibration {
             arCapture?.updateTableCalibration(calibration)
         } else {
@@ -2027,8 +2039,28 @@ final class CoachLiveSession: Identifiable {
             diagnostics.worldCensusDepthSummary = "—"
         }
         Self.logger.debug(
-            "census source=\(self.countSource.diagnosticName, privacy: .public) health=\(self.spatialTrackingHealth.diagnosticName, privacy: .public) tracks=\(snapshot.tracks.count, privacy: .public) tentative=\(self.diagnostics.worldCensusTentative, privacy: .public) confirmed=\(self.diagnostics.worldCensusConfirmed, privacy: .public) stale=\(self.diagnostics.worldCensusStale, privacy: .public) missing=\(self.diagnostics.worldCensusMissing, privacy: .public) depthAcceptance=\(self.diagnostics.worldCensusDepthAcceptance, privacy: .public) reprojectionPx=\(self.diagnostics.worldCensusAnchorErrorPixels, privacy: .public) ms=\(self.diagnostics.worldCensusMilliseconds, privacy: .public)"
+            "census source=\(self.countSource.diagnosticName, privacy: .public) health=\(self.spatialTrackingHealth.diagnosticName, privacy: .public) tracks=\(snapshot.tracks.count, privacy: .public) tentative=\(self.diagnostics.worldCensusTentative, privacy: .public) confirmed=\(self.diagnostics.worldCensusConfirmed, privacy: .public) stale=\(self.diagnostics.worldCensusStale, privacy: .public) missing=\(self.diagnostics.worldCensusMissing, privacy: .public) depthAcceptance=\(self.diagnostics.worldCensusDepthAcceptance, privacy: .public) reprojectionPx=\(self.diagnostics.worldCensusAnchorErrorPixels, privacy: .public) ms=\(self.diagnostics.worldCensusMilliseconds, privacy: .public) arSession=\(self.diagnostics.spatialSessionID, privacy: .public) pipeline=\(self.diagnostics.spatialPipelineGeneration, privacy: .public) calibration=\(self.diagnostics.calibrationRevision, privacy: .public) resets=\(self.diagnostics.resetTrackingRunCount, privacy: .public)"
         )
+    }
+
+    /// Mirrors ARKit configuration facts into the existing HUD/Console
+    /// diagnostics. It deliberately observes rather than drives the capture
+    /// owner, so adding this audit seam cannot reset or reconfigure ARKit.
+    @MainActor
+    private func refreshSpatialContinuityDiagnostics(
+        capture: ARTableCapture? = nil
+    ) {
+        guard let capture = capture ?? arCapture else { return }
+        let ar = capture.sessionDiagnostics
+        diagnostics.spatialSessionID = String(ar.sessionID.uuidString.prefix(8))
+        diagnostics.spatialPipelineGeneration = spatialPipelineGeneration
+        diagnostics.calibrationRevision = calibrationRevision
+        diagnostics.configurationRunCount = ar.configurationRunCount
+        diagnostics.resetTrackingRunCount = ar.resetTrackingRunCount
+        diagnostics.removeExistingAnchorsRunCount = ar.removeExistingAnchorsRunCount
+        diagnostics.lastConfigurationUsedReset = ar.lastRunUsedResetTracking
+            || ar.lastRunUsedRemoveExistingAnchors
+        diagnostics.lastConfigurationReason = ar.lastReason?.rawValue ?? "—"
     }
 
     private func resetSpatialTrackingState() {
@@ -2706,4 +2738,14 @@ struct LiveDiagnostics {
     var worldCensusMilliseconds: Double = 0
     var worldCensusZoneSummary = "—"
     var worldCensusDepthSummary = "—"
+    /// Calibration-to-Live continuity audit. These values come from
+    /// `ARTableCapture`'s run wrapper; they never control ARKit behavior.
+    var spatialSessionID = "—"
+    var spatialPipelineGeneration = 0
+    var calibrationRevision = 0
+    var configurationRunCount = 0
+    var resetTrackingRunCount = 0
+    var removeExistingAnchorsRunCount = 0
+    var lastConfigurationUsedReset = false
+    var lastConfigurationReason = "—"
 }

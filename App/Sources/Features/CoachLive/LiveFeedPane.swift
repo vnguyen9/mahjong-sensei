@@ -547,6 +547,8 @@ struct LiveFeedPane: View {
             Text("depth \(session.diagnostics.worldCensusDepthAcceptance * 100, specifier: "%.0f")% · reproj \(session.diagnostics.worldCensusAnchorErrorPixels, specifier: "%.1f")px · reject \(session.diagnostics.worldCensusDepthSummary)")
             Text("calibration \(session.diagnostics.worldCensusCalibrationSource)")
             Text("source \(session.countSource.diagnosticName) · health \(session.spatialTrackingHealth.diagnosticName)")
+            Text("AR \(session.diagnostics.spatialSessionID) · pipe \(session.diagnostics.spatialPipelineGeneration) · cal \(session.diagnostics.calibrationRevision)")
+            Text("config \(session.diagnostics.configurationRunCount) · reset \(session.diagnostics.resetTrackingRunCount)/\(session.diagnostics.removeExistingAnchorsRunCount) · \(session.diagnostics.lastConfigurationReason)\(session.diagnostics.lastConfigurationUsedReset ? " ⚠︎" : "")")
             Text("rec: \(session.diagnostics.recognizerType) · mode \(session.arCapture != nil && !session.usingFallbackCapture ? "AR" : "2D")")
             Text(session.diagnostics.roiPlan)
             Text("err(\(session.recognizerErrorCount)): \(session.lastPipelineError ?? "—")")

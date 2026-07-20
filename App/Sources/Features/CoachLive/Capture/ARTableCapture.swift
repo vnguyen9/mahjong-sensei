@@ -5,6 +5,38 @@ import Observation
 import Recognition
 import os
 
+/// A small, DEBUG-visible audit trail for the only code paths allowed to
+/// re-run ARKit configuration. The live calibration handoff must retain the
+/// same `sessionID`; a later behavior change can use these facts to prove it
+/// did not hide a tracking reset behind a UI transition.
+struct ARSessionRunDiagnostics: Equatable {
+    enum Reason: String, Equatable {
+        case initialStart
+        case restoreWorldMap
+        case resume
+        case retryDepthSemantics
+        case disablePlaneDetection
+        case freshTableLock
+    }
+
+    let sessionID = UUID()
+    private(set) var configurationRunCount = 0
+    private(set) var resetTrackingRunCount = 0
+    private(set) var removeExistingAnchorsRunCount = 0
+    private(set) var lastRunUsedResetTracking = false
+    private(set) var lastRunUsedRemoveExistingAnchors = false
+    private(set) var lastReason: Reason?
+
+    mutating func record(options: ARSession.RunOptions, reason: Reason) {
+        configurationRunCount += 1
+        lastReason = reason
+        lastRunUsedResetTracking = options.contains(.resetTracking)
+        lastRunUsedRemoveExistingAnchors = options.contains(.removeExistingAnchors)
+        if lastRunUsedResetTracking { resetTrackingRunCount += 1 }
+        if lastRunUsedRemoveExistingAnchors { removeExistingAnchorsRunCount += 1 }
+    }
+}
+
 /// Owns the ARKit world-tracking session for Coach Live's table capture:
 /// starts world tracking with horizontal-plane detection, drives
 /// `PlaneLockPolicy` frame-by-frame until a table plane locks, then turns
@@ -55,6 +87,11 @@ final class ARTableCapture: NSObject {
     /// Non-nil only while a saved world map has successfully supplied the
     /// named table-origin calibration for this launch.
     private(set) var restoredTableCalibration: WorldTableCalibration?
+
+    /// Configuration-run diagnostics for the calibration → Live continuity
+    /// audit. `sessionID` is allocated with this capture owner, rather than a
+    /// frame, so it remains stable across a normal plane-lock reconfiguration.
+    private(set) var sessionDiagnostics = ARSessionRunDiagnostics()
 
     // MARK: - Per-frame state (polled, not observed)
 
@@ -177,14 +214,18 @@ final class ARTableCapture: NSObject {
                 planeDetection: false,
                 initialWorldMap: restored.worldMap
             )
-            session.run(
+            runConfiguration(
                 configuration,
-                options: [.resetTracking, .removeExistingAnchors]
+                options: [.resetTracking, .removeExistingAnchors],
+                reason: .restoreWorldMap
             )
             scheduleRelocalizationTimeout()
         } else {
             restoringWorldMap = false
-            session.run(Self.makeConfiguration(planeDetection: true))
+            runConfiguration(
+                Self.makeConfiguration(planeDetection: true),
+                reason: .initialStart
+            )
         }
     }
 
@@ -202,7 +243,10 @@ final class ARTableCapture: NSObject {
     /// configuration (see `setTorch`'s doc).
     func resume() {
         guard Self.isSupported else { return }
-        session.run(Self.makeConfiguration(planeDetection: planeDetectionRequested))
+        runConfiguration(
+            Self.makeConfiguration(planeDetection: planeDetectionRequested),
+            reason: .resume
+        )
         if let pendingTorchState {
             setTorch(pendingTorchState)
         }
@@ -213,7 +257,10 @@ final class ARTableCapture: NSObject {
     /// supplying depth, before explicitly degrading to 2D counts.
     func retryDepthSemantics() {
         guard Self.isSupported, Self.supportsSceneDepth else { return }
-        session.run(Self.makeConfiguration(planeDetection: planeDetectionRequested))
+        runConfiguration(
+            Self.makeConfiguration(planeDetection: planeDetectionRequested),
+            reason: .retryDepthSemantics
+        )
         if let pendingTorchState {
             setTorch(pendingTorchState)
         }
@@ -341,6 +388,23 @@ final class ARTableCapture: NSObject {
         return configuration
     }
 
+    /// Centralizes `ARSession.run` so DEBUG diagnostics distinguish the two
+    /// legitimate recovery resets from ordinary configuration refreshes. The
+    /// empty-options form intentionally calls ARKit's no-options overload,
+    /// preserving the existing no-reset behavior exactly.
+    private func runConfiguration(
+        _ configuration: ARWorldTrackingConfiguration,
+        options: ARSession.RunOptions = [],
+        reason: ARSessionRunDiagnostics.Reason
+    ) {
+        sessionDiagnostics.record(options: options, reason: reason)
+        if options.isEmpty {
+            session.run(configuration)
+        } else {
+            session.run(configuration, options: options)
+        }
+    }
+
     // MARK: - Frame processing (main-actor only; delegate methods hop here)
 
     /// Caches the frame, transitions `.starting` → `.findingTable` on
@@ -403,7 +467,10 @@ final class ARTableCapture: NSObject {
 
         guard planeDetectionRequested else { return }
         planeDetectionRequested = false
-        session.run(Self.makeConfiguration(planeDetection: false))
+        runConfiguration(
+            Self.makeConfiguration(planeDetection: false),
+            reason: .disablePlaneDetection
+        )
         if let pendingTorchState {
             setTorch(pendingTorchState)
         }
@@ -440,9 +507,10 @@ final class ARTableCapture: NSObject {
         planeLockPolicy = nil
         planeDetectionRequested = true
         mappingIsSaveable = false
-        session.run(
+        runConfiguration(
             Self.makeConfiguration(planeDetection: true),
-            options: [.resetTracking, .removeExistingAnchors]
+            options: [.resetTracking, .removeExistingAnchors],
+            reason: .freshTableLock
         )
     }
 

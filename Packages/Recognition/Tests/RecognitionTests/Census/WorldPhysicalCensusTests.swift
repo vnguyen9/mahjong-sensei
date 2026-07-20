@@ -161,4 +161,45 @@ final class WorldPhysicalCensusTests: XCTestCase {
         census.removeTrack(id: CensusTrackID(0))
         XCTAssertTrue(census.snapshot(at: 2).tracks.isEmpty)
     }
+
+    /// `WorldCensusController.apply` is intentionally a thin app-side
+    /// wrapper over this operation. Keep this characterization here, where it
+    /// can run without ARKit: accepting a new calibration must re-zone the
+    /// same physical identity, never reset or duplicate the census.
+    func test_reassigningCalibrationZonesPreservesConfirmedWorldTrackIdentity() throws {
+        let census = PhysicalCensus()
+        for frame in 0..<3 {
+            ingest(
+                [observation(SIMD3(0, 0, 0), frame: frame)],
+                into: census,
+                frame: frame,
+                time: Double(frame) * 0.1
+            )
+        }
+
+        let before = census.snapshot(at: 1)
+        let beforeTrack = try XCTUnwrap(before.tracks.first)
+        XCTAssertEqual(beforeTrack.id, CensusTrackID(0))
+        XCTAssertEqual(beforeTrack.lifecycle, .confirmed)
+        XCTAssertEqual(beforeTrack.semanticZone, .tablePond)
+
+        census.reassignZones(
+            [.mineHand: [
+                SIMD2(-1, -1), SIMD2(1, -1), SIMD2(1, 1), SIMD2(-1, 1),
+            ]],
+            worldToTable: matrix_identity_float4x4
+        )
+
+        let after = census.snapshot(at: 1)
+        let afterTrack = try XCTUnwrap(after.tracks.first)
+        XCTAssertEqual(after.tracks.count, 1)
+        XCTAssertEqual(afterTrack.id, beforeTrack.id)
+        XCTAssertEqual(afterTrack.lifecycle, beforeTrack.lifecycle)
+        XCTAssertEqual(afterTrack.worldPosition, beforeTrack.worldPosition)
+        XCTAssertEqual(afterTrack.firstSeen, beforeTrack.firstSeen)
+        XCTAssertEqual(afterTrack.lastSeen, beforeTrack.lastSeen)
+        XCTAssertEqual(afterTrack.semanticZone, .mineHand)
+        XCTAssertEqual(census.diagnostics.births, 1)
+        XCTAssertEqual(census.diagnostics.retirements, 0)
+    }
 }
