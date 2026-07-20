@@ -2,6 +2,7 @@ import SwiftUI
 import DesignSystem
 import MahjongCore
 import Recognition
+import UIKit
 
 /// Four rounded L-corners framing a zone — the feed's "fixed chrome" bracket
 /// (UI plan §7): 20pt arms, 3pt stroke, 10pt corner radius, none configurable.
@@ -77,29 +78,30 @@ struct ZoneBracketsOverlay: View {
 
     private static let creamBracket = Color(hex: 0xF0E6D2, alpha: 0.85)
 
-    @State private var mineRect: CGRect?
-    @State private var tableRect: CGRect?
-
     /// While it reads as the player's turn, the MINE bracket brightens from
     /// its default faint/calm treatment to a fuller-opacity, thicker stroke —
     /// a cheap "your move" nicety, no new state needed.
     private var isMyTurn: Bool { session.phase == .thinking || session.phase == .action }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            if let r = mineRect {
-                bracket(r, color: MJColor.gold, label: mineLabel,
-                        chipBG: MJColor.gold, chipFG: MJColor.inkOnGold,
-                        strokeOpacity: isMyTurn ? 0.9 : 0.35,
-                        lineWidth: isMyTurn ? 2.5 : 1.5,
-                        onTapChip: { onTapZoneChip(.mine) })
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { _ in
+            let rects = currentRects()
+            ZStack(alignment: .topLeading) {
+                if let r = rects.mine {
+                    bracket(r, color: MJColor.gold, label: mineLabel,
+                            chipBG: MJColor.gold, chipFG: MJColor.inkOnGold,
+                            strokeOpacity: isMyTurn ? 0.9 : 0.35,
+                            lineWidth: isMyTurn ? 2.5 : 1.5,
+                            onTapChip: { onTapZoneChip(.mine) })
+                }
+                if let r = rects.pond {
+                    bracket(r, color: Self.creamBracket, label: tableLabel,
+                            chipBG: MJColor.cream, chipFG: MJColor.inkOnGold,
+                            strokeOpacity: 0.3, lineWidth: 1.5,
+                            onTapChip: { onTapZoneChip(.table) })
+                }
             }
-            if let r = tableRect {
-                bracket(r, color: Self.creamBracket, label: tableLabel,
-                        chipBG: MJColor.cream, chipFG: MJColor.inkOnGold,
-                        strokeOpacity: 0.3, lineWidth: 1.5,
-                        onTapChip: { onTapZoneChip(.table) })
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay(alignment: .topTrailing) {
@@ -115,14 +117,8 @@ struct ZoneBracketsOverlay: View {
                     .transition(.opacity)
             }
         }
-        .animation(.smooth(duration: 0.35), value: mineRect)
-        .animation(.smooth(duration: 0.35), value: tableRect)
         .animation(.easeInOut(duration: 0.2), value: isMyTurn)
         .animation(.easeInOut(duration: 0.2), value: session.unresolved.isEmpty)
-        .onAppear(perform: recompute)
-        .onChange(of: previewBounds) { _, _ in recompute() }
-        .onChange(of: session.orientedImageSize) { _, _ in recompute() }
-        .onChange(of: boxesKey) { _, _ in recompute() }
     }
 
     // MARK: - Labels
@@ -209,17 +205,34 @@ struct ZoneBracketsOverlay: View {
 
     // MARK: - Mapping + stabilizing
 
-    /// Combined key so any zone-box change (mock or real tracker) triggers a
-    /// remap; `[TileBoundingBox]` is `Equatable`. Includes `.unresolved` even
-    /// though only its *count* now renders (the consolidated chip) — the
-    /// array itself isn't otherwise observed by this view.
-    private var boxesKey: [TileBoundingBox] {
-        session.zoneBoxes.mine + session.zoneBoxes.table + session.zoneBoxes.unresolved
+    /// Spatial mode projects exact calibration polygons with ARKit's current
+    /// camera every display tick. Mock/non-AR scenes retain their existing
+    /// image-space mapping for deterministic previews.
+    private func currentRects() -> (mine: CGRect?, pond: CGRect?) {
+        if session.countSource == .worldCensus,
+           session.spatialTrackingHealth == .healthy,
+           previewBounds.width > 0,
+           previewBounds.height > 0 {
+            let projected = session.currentProjectedZoneRects(
+                viewportSize: previewBounds.size,
+                interfaceOrientation: interfaceOrientation
+            )
+            return (
+                projected.mine?.insetBy(dx: -6, dy: -6),
+                projected.pond?.insetBy(dx: -6, dy: -6)
+            )
+        }
+        return (
+            mappedRect(for: session.zoneBoxes.mine),
+            mappedRect(for: session.zoneBoxes.table)
+        )
     }
 
-    private func recompute() {
-        mineRect = stabilize(mineRect, mappedRect(for: session.zoneBoxes.mine))
-        tableRect = stabilize(tableRect, mappedRect(for: session.zoneBoxes.table))
+    private var interfaceOrientation: UIInterfaceOrientation {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }?
+            .effectiveGeometry.interfaceOrientation ?? .portrait
     }
 
     /// Fold `boxes` into their union, map to the preview, pad +6pt, and shift
@@ -242,12 +255,4 @@ struct ZoneBracketsOverlay: View {
         return TileBoundingBox(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
-    /// Only commit a new rect once an edge has moved past the 4pt jitter gate.
-    private func stabilize(_ old: CGRect?, _ new: CGRect?) -> CGRect? {
-        guard let new else { return nil }
-        guard let old else { return new }
-        let moved = abs(old.minX - new.minX) > 4 || abs(old.minY - new.minY) > 4 ||
-                    abs(old.maxX - new.maxX) > 4 || abs(old.maxY - new.maxY) > 4
-        return moved ? new : old
-    }
 }

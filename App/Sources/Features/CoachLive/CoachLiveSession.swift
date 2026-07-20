@@ -2593,6 +2593,56 @@ final class CoachLiveSession: Identifiable {
         )
     }
 
+    /// Current ARKit display-space rectangles for the only two production
+    /// brackets. This is intentionally a pull API: `TimelineView` asks for it
+    /// at display cadence, so camera motion cannot leave an inference-cadence
+    /// rectangle stuck to the screen.
+    @MainActor
+    func currentProjectedZoneRects(
+        viewportSize: CGSize,
+        interfaceOrientation: UIInterfaceOrientation
+    ) -> (mine: CGRect?, pond: CGRect?) {
+        guard countSource == .worldCensus,
+              spatialTrackingHealth == .healthy,
+              let capture = arCapture,
+              let calibration = worldCensusController?.calibration
+                ?? worldTableCalibration else {
+            return (nil, nil)
+        }
+
+        func projectedRect(for polygon: [SIMD2<Float>]) -> CGRect? {
+            let points = polygon.compactMap { local -> CGPoint? in
+                let world = calibration.tableToWorld
+                    * SIMD4<Float>(local.x, 0, local.y, 1)
+                return capture.projectWorldPoint(
+                    SIMD3<Float>(world.x, world.y, world.z),
+                    interfaceOrientation: interfaceOrientation,
+                    viewportSize: viewportSize
+                )
+            }
+            guard points.count == polygon.count,
+                  let first = points.first else { return nil }
+            return points.dropFirst().reduce(
+                CGRect(origin: first, size: .zero)
+            ) { partial, point in
+                partial.union(CGRect(origin: point, size: .zero))
+            }
+        }
+
+        var mineRects = [projectedRect(for: calibration.handPolygon)]
+        if let mineMeld = calibration.revealedZonePolygons[.mineMeld] {
+            mineRects.append(projectedRect(for: mineMeld))
+        }
+        let mine = mineRects.compactMap { $0 }.reduce(nil as CGRect?) {
+            accumulated, rect in
+            accumulated.map { existing in existing.union(rect) } ?? rect
+        }
+        return (
+            mine,
+            projectedRect(for: calibration.pondPolygon)
+        )
+    }
+
     /// Lane B chunk E: the table-space (normalized [0,1], plane anchor at
     /// (0.5, 0.5)) bounding box of an oriented-normalized image rect.
     /// `TableProjection.tablePoint` projects each corner onto the locked

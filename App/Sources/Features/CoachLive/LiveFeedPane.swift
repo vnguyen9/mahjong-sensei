@@ -496,7 +496,7 @@ struct LiveFeedPane: View {
         if session.detectorUnavailable { return "LIVE · detector unavailable" }
         if session.thermal == .throttled { return "LIVE · cooling" }
         if session.countSource == .spatialBootstrapping {
-            return "Locking spatial tracking · \(session.diagnostics.worldCensusTracks) candidates"
+            return "Tracking table · \(session.diagnostics.worldCensusTracks) tile candidates"
         }
         return "LIVE · \(session.liveTileCount) tiles seen"
     }

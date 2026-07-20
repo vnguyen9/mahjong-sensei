@@ -40,7 +40,8 @@ struct StartupStatusOverlay: View {
         case .startingCamera: return "Starting camera…"
         case .findingTable: return "Finding your table — point at it and move slightly"
         case .loadingDetector: return "Loading detector…"
-        case .lookingForTiles: return "Looking for tiles…"
+        case .lookingForTiles:
+            return "Tracking table · \(session.diagnostics.worldCensusTracks) tile candidates"
         }
     }
 

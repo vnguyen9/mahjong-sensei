@@ -3,6 +3,7 @@ import AVFoundation
 import ImageIO
 import Observation
 import Recognition
+import UIKit
 import os
 
 /// App-facing restore decision for the Coach Live flow. It deliberately
@@ -318,6 +319,28 @@ final class ARTableCapture: NSObject {
             result.worldTransform.columns.3.y,
             result.worldTransform.columns.3.z
         )
+    }
+
+    /// Projects a world-space anchor with ARKit's own camera/display model.
+    /// Production and DEBUG overlays call this at display cadence; recognizer
+    /// cadence never determines where calibrated geometry appears onscreen.
+    func projectWorldPoint(
+        _ point: SIMD3<Float>,
+        interfaceOrientation: UIInterfaceOrientation,
+        viewportSize: CGSize
+    ) -> CGPoint? {
+        guard viewportSize.width > 0, viewportSize.height > 0,
+              let frame = session.currentFrame else { return nil }
+        let cameraPoint = simd_inverse(frame.camera.transform)
+            * SIMD4<Float>(point.x, point.y, point.z, 1)
+        guard cameraPoint.z < -0.001 else { return nil }
+        let projected = frame.camera.projectPoint(
+            point,
+            orientation: interfaceOrientation,
+            viewportSize: viewportSize
+        )
+        guard projected.x.isFinite, projected.y.isFinite else { return nil }
+        return projected
     }
 
     /// Keeps exactly one named AR anchor for the fitted table origin. Tile

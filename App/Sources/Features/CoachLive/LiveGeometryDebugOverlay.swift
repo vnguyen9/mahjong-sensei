@@ -4,6 +4,7 @@ import DesignSystem
 import MahjongCore
 import Recognition
 import simd
+import UIKit
 
 /// DEV-ONLY overlay that draws the **calibrated table geometry** projected onto
 /// the live tracking feed — the hand band, the pond, each opponent's meld band,
@@ -36,8 +37,7 @@ struct LiveGeometryDebugOverlay: View {
     private func draw(_ context: inout GraphicsContext) {
         guard previewBounds.width > 0, previewBounds.height > 0,
               let capture = session.arCapture,
-              let lockedPlaneTransform = capture.lockedPlaneTransform,
-              let frame = capture.latestFrame else { return }
+              let lockedPlaneTransform = capture.lockedPlaneTransform else { return }
 
         let controller = session.worldCensusController
         let calibration = controller?.calibration ?? session.worldTableCalibration
@@ -52,36 +52,27 @@ struct LiveGeometryDebugOverlay: View {
         let extent = geometry.extent
         guard extent > 0 else { return }
 
-        let projection = TableProjection(
-            cameraTransform: frame.cameraTransform,
-            intrinsics: frame.intrinsics,
-            imageResolution: SIMD2<Float>(Float(frame.imageResolution.width),
-                                          Float(frame.imageResolution.height)),
-            planeTransform: planeTransform)
-        let orientedCG = frame.orientedImageSize
+        let orientation = interfaceOrientation
 
         /// Normalized table point → screen point (nil if behind camera).
         func screen(_ n: SIMD2<Double>) -> CGPoint? {
             let local = SIMD2<Double>((n.x - 0.5) * extent, (n.y - 0.5) * extent)
-            guard let uv = projection.normalizedOrientedPoint(
-                ofTablePoint: local,
-                imageTransform: frame.imageTransform
-            ) else { return nil }
-            return AspectFillMapping.previewRect(
-                ofNormalized: TileBoundingBox(x: uv.x, y: uv.y, width: 0, height: 0),
-                previewBounds: previewBounds, orientedImageSize: orientedCG).origin
+            let world = planeTransform
+                * SIMD4<Float>(Float(local.x), 0, Float(local.y), 1)
+            return capture.projectWorldPoint(
+                SIMD3<Float>(world.x, world.y, world.z),
+                interfaceOrientation: orientation,
+                viewportSize: previewBounds.size
+            )
         }
 
         func screenLocal(_ local: SIMD2<Float>) -> CGPoint? {
-            guard let uv = projection.normalizedOrientedPoint(
-                ofTablePoint: SIMD2(Double(local.x), Double(local.y)),
-                imageTransform: frame.imageTransform
-            ) else { return nil }
-            return AspectFillMapping.previewRect(
-                ofNormalized: TileBoundingBox(x: uv.x, y: uv.y, width: 0, height: 0),
-                previewBounds: previewBounds,
-                orientedImageSize: orientedCG
-            ).origin
+            let world = planeTransform * SIMD4<Float>(local.x, 0, local.y, 1)
+            return capture.projectWorldPoint(
+                SIMD3<Float>(world.x, world.y, world.z),
+                interfaceOrientation: orientation,
+                viewportSize: previewBounds.size
+            )
         }
 
         /// Fill + stroke a closed polygon; skips entirely if any corner is
@@ -138,19 +129,11 @@ struct LiveGeometryDebugOverlay: View {
         if let census = session.worldCensusController?.snapshot {
             for track in census.tracks where track.lifecycle == .confirmed {
                 guard let world = track.worldPosition,
-                      let uv = projection.normalizedOrientedPoint(
-                        ofWorldPoint: SIMD3<Double>(
-                            Double(world.x), Double(world.y), Double(world.z)
-                        ),
-                        imageTransform: frame.imageTransform
+                      let point = capture.projectWorldPoint(
+                        world,
+                        interfaceOrientation: orientation,
+                        viewportSize: previewBounds.size
                       ) else { continue }
-                let point = AspectFillMapping.previewRect(
-                    ofNormalized: TileBoundingBox(
-                        x: uv.x, y: uv.y, width: 0, height: 0
-                    ),
-                    previewBounds: previewBounds,
-                    orientedImageSize: orientedCG
-                ).origin
                 let anchor = Path(
                     ellipseIn: CGRect(
                         x: point.x - 4, y: point.y - 4, width: 8, height: 8
@@ -170,6 +153,13 @@ struct LiveGeometryDebugOverlay: View {
                 .foregroundStyle(MJColor.creamHeading),
                 at: CGPoint(x: p.x, y: p.y - 14))
         }
+    }
+
+    private var interfaceOrientation: UIInterfaceOrientation {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }?
+            .effectiveGeometry.interfaceOrientation ?? .portrait
     }
 
     /// Pond outline points: rect/quad use their 4 corners; a disk is sampled
