@@ -133,26 +133,10 @@ final class ARTableCapture: NSObject {
         }
     }
 
-    /// Advances to `.sweeping` — the guided post-lock sweep (Lane B chunk
-    /// H): `CoachLiveSession.startARLoop` calls this immediately on table
-    /// lock (instead of going straight to `.tracking`), inviting the user
-    /// to pan across the table once before propping the phone. Also the
-    /// entry point for the "Rescan table" affordance
-    /// (`CoachLiveSession.rescanTable()`), which calls this again from
-    /// `.tracking` mid-session — no tracker reset, the sweep card just
-    /// reappears. No-op unless the table is already locked (or already
-    /// mid-sweep/tracking).
-    func enterSweeping() {
-        guard captureStage == .tableLocked || captureStage == .tracking else { return }
-        captureStage = .sweeping
-    }
-
-    /// Advances to `.tracking` — `CoachLiveSession.startARLoop` calls this
-    /// once the guided sweep ends (Lane B chunk H: either the user's "Done"
-    /// tap or the elapsed+coverage exit condition) and steady-state
-    /// ingestion begins. No-op unless the table is already locked.
+    /// Advances to `.tracking` immediately after table lock. Recounts are
+    /// one-shot inference requests and never change the capture lifecycle.
     func enterTracking() {
-        guard captureStage == .tableLocked || captureStage == .sweeping else { return }
+        guard captureStage == .tableLocked else { return }
         captureStage = .tracking
     }
 

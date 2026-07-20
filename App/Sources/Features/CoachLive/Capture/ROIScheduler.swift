@@ -4,10 +4,8 @@ import Recognition
 import simd
 
 /// Stable identity for the five table-space regions
-/// `ROIScheduler.projectedZoneRects` reports — shared between the guided
-/// sweep's coverage tracker and the per-zone staleness/rescan-prompt
-/// tracker (Lane B chunk H, `CoachLiveSession`'s AR loop) so both agree on
-/// what "a zone" is.
+/// `ROIScheduler.projectedZoneRects` reports — shared by explicit recount
+/// requests and the per-zone staleness/rescan-prompt tracker.
 enum TableZoneID: CaseIterable, Hashable {
     case hand, pond, meldLeft, meldRight, meldFar
 
@@ -49,8 +47,7 @@ struct ROIScheduler {
     /// onto this frame at all — see `projectedZoneRects`). The three meld
     /// edges are kept as separate named fields (rather than the flat array
     /// this type shipped with pre-chunk-H) so callers that need to know
-    /// WHICH edge — the guided sweep's coverage tracker and the per-zone
-    /// staleness/rescan-prompt tracker (Lane B chunk H, items 1/2) — can
+    /// WHICH edge — explicit recounts and the per-zone staleness tracker — can
     /// address them individually; `melds` stays as a computed convenience
     /// for `decide`, which never cared which edge, only "is any meld zone
     /// dirty."
@@ -75,9 +72,7 @@ struct ROIScheduler {
         }
 
         /// Every zone that actually projected onto this frame, paired with
-        /// its stable identity (Lane B chunk H) — the guided sweep's
-        /// coverage tracker and the staleness tracker both iterate this so
-        /// they agree on what "a zone" is.
+        /// its stable identity for staleness and explicit recount requests.
         var identified: [(id: TableZoneID, rect: TileBoundingBox)] {
             var out: [(TableZoneID, TileBoundingBox)] = []
             if let hand { out.append((.hand, hand)) }
@@ -179,9 +174,7 @@ struct ROIScheduler {
     /// Fraction of `rect`'s own area that falls inside the visible
     /// `[0,1]x[0,1]` oriented-normalized frame — Lane B chunk H's shared
     /// "is this zone actually on screen enough to trust" bar (≥0.6), used
-    /// by both the guided sweep's coverage tracker (item 1) and the
-    /// per-zone staleness tracker (item 2) so "seen" means the same thing
-    /// in both places.
+    /// by the per-zone staleness tracker.
     static func fractionInsideFrame(_ rect: TileBoundingBox) -> Double {
         guard rect.width > 0, rect.height > 0 else { return 0 }
         let minX = max(0, rect.x), minY = max(0, rect.y)

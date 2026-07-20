@@ -8,10 +8,10 @@ import Foundation
 /// reviewed independently.
 ///
 /// Transition order in the common case:
-/// `.starting` → `.findingTable` → `.tableLocked` → (`.sweeping` →)
-/// `.tracking`, with `.relocalizing` a temporary detour from any of the
-/// post-lock stages and `.unavailable` a terminal state reached only from
-/// `.starting` (ARKit either is or isn't supported at start time).
+/// `.starting` → `.findingTable` → `.tableLocked` → `.tracking`, with
+/// `.relocalizing` a temporary detour from any of the post-lock stages and
+/// `.unavailable` a terminal state reached only from `.starting` (ARKit
+/// either is or isn't supported at start time).
 public enum CaptureStage: Equatable {
     /// The `ARSession` hasn't started yet (before `start()` is called), or
     /// has just been asked to start and hasn't delivered a first frame.
@@ -26,13 +26,6 @@ public enum CaptureStage: Equatable {
     /// and plane detection has been turned off to save power. The locked
     /// transform is stable; downstream projection can start using it.
     case tableLocked
-
-    /// The user is panning across the table for the guided initial sweep:
-    /// multi-pose detections accumulate into one table-space census before
-    /// the phone is propped. Driven externally via
-    /// `ARTableCapture.enterSweeping()` — this type never enters the stage
-    /// on its own.
-    case sweeping
 
     /// Normal steady-state operation: the phone is propped, the plane is
     /// locked, and the tracking loop is ingesting frames. Driven externally

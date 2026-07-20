@@ -8,7 +8,6 @@ import MahjongCore
 enum CoachLivePrefs {
     static let blurKey = "coachLiveBlursFeed"
     static let correctionHintKey = "coachLiveHasSeenCorrectionHint"
-    static let pluggedInHintKey = "coachLiveHasSeenPluggedInHint"
     static let arPrimerKey = "coachLiveHasSeenARPrimer"
 
     /// Unset → true (blur on) — privacy default.
@@ -28,13 +27,6 @@ enum CoachLivePrefs {
     static var hasSeenCorrectionHint: Bool {
         get { UserDefaults.standard.bool(forKey: correctionHintKey) }
         set { UserDefaults.standard.set(newValue, forKey: correctionHintKey) }
-    }
-    /// Unset → false (show the guided-sweep card's "keep it plugged in"
-    /// caption once, ever) — Lane B chunk H item 3. `StartupStatusOverlay`
-    /// marks this seen the instant it shows the caption.
-    static var hasSeenPluggedInHint: Bool {
-        get { UserDefaults.standard.bool(forKey: pluggedInHintKey) }
-        set { UserDefaults.standard.set(newValue, forKey: pluggedInHintKey) }
     }
 }
 

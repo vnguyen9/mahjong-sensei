@@ -191,9 +191,7 @@ struct CoachLiveView: View {
                 .frame(maxWidth: .infinity, minHeight: 84, maxHeight: .infinity)
             HandStrip { id in sheet = .pickHandTile(id) }
             AdviceLine { sheet = .adviceDetail }
-            // Lane B chunk H item 3: always-available rescan affordance,
-            // AR mode only (`arCapture.enterSweeping()` — a no-op on the
-            // mock/fallback paths, so this stays hidden there).
+            // Always-available one-shot recount affordance, AR mode only.
             if session.isARCaptureActive {
                 // Rescan (force a fresh read) + manual hand-end (the AR path's
                 // automatic table-clear detector is off, so ending a hand is a
