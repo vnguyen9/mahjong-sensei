@@ -221,8 +221,64 @@ public final class TableTracker {
         }
 
         zoneModel.ingestSettled(detections: detections, outcome: outcome, store: store, at: t)
+        return commitSettled(at: t, pondCentroid: zoneModel.pondCentroid)
+    }
+
+    /// Feeds the existing settle-diff event machinery from the authoritative
+    /// world census without invoking legacy association or zone inference.
+    /// Census track IDs remain the event-linked `TrackID`s, so face/zone
+    /// corrections address the same physical identity in UI and event state.
+    @discardableResult
+    public func ingestCensus(
+        _ snapshot: CensusSnapshot,
+        tableExtent: SIMD2<Float>,
+        at t: TimeInterval,
+        motion: MotionSample? = nil
+    ) -> IngestOutcome {
+        now = t
+        store.synchronize(
+            authoritative: CensusEventAdapter.tracks(
+                from: snapshot,
+                tableExtent: tableExtent
+            ),
+            at: t
+        )
+        if let level = motion?.level, level >= config.motionActive {
+            burstRegion = motion?.dominantRegion
+        }
+
+        guard isSettled(motion: motion, at: t) else {
+            diagnostics = currentDiagnostics(
+                lastSettleAt: diagnostics.lastSettleAt
+            )
+            return IngestOutcome(
+                newEvents: [],
+                stateChanged: false,
+                settled: false
+            )
+        }
+
+        let pondTracks = store.tracks.filter {
+            $0.zone == .pond
+                && ($0.state == .live || $0.state == .missing)
+        }
+        let pondCentroid: (x: Double, y: Double)? = pondTracks.isEmpty
+            ? nil
+            : (
+                pondTracks.map(\.box.centerX).reduce(0, +)
+                    / Double(pondTracks.count),
+                pondTracks.map(\.box.centerY).reduce(0, +)
+                    / Double(pondTracks.count)
+            )
+        return commitSettled(at: t, pondCentroid: pondCentroid)
+    }
+
+    private func commitSettled(
+        at t: TimeInterval,
+        pondCentroid: (x: Double, y: Double)?
+    ) -> IngestOutcome {
         var newEvents = turnEngine.commitSettled(store: store, handIndex: handIndex,
-                                                  motionRegion: burstRegion, pondCentroid: zoneModel.pondCentroid, at: t)
+                                                  motionRegion: burstRegion, pondCentroid: pondCentroid, at: t)
         updateHandCompleteLatch(from: newEvents)
 
         // The automatic table-clear heuristic is a master-switchable behaviour.

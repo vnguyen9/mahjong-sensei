@@ -54,8 +54,7 @@ final class ARTableCapture: NSObject {
 
     /// Non-nil only while a saved world map has successfully supplied the
     /// named table-origin calibration for this launch.
-    private(set) var restoredTableOriginTransform: simd_float4x4?
-    private(set) var restoredTableOriginExtent: SIMD2<Float>?
+    private(set) var restoredTableCalibration: WorldTableCalibration?
 
     // MARK: - Per-frame state (polled, not observed)
 
@@ -115,6 +114,7 @@ final class ARTableCapture: NSObject {
     private var tableOriginAnchorID: UUID?
     private var tableOriginTransform: simd_float4x4?
     private var tableOriginExtent: SIMD2<Float>?
+    private var tableCalibration: WorldTableCalibration?
     private var mappingIsSaveable = false
     private var restoringWorldMap = false
     private var relocalizationTimeoutTask: Task<Void, Never>?
@@ -149,23 +149,24 @@ final class ARTableCapture: NSObject {
         lockedPlaneTransform = nil
         lockedPlaneIdentifier = nil
         lockedPlaneExtent = nil
-        restoredTableOriginTransform = nil
-        restoredTableOriginExtent = nil
+        restoredTableCalibration = nil
+        tableCalibration = nil
         planeLockPolicy = nil
         planeDetectionRequested = true
         mappingIsSaveable = false
 
         if let restored = ARWorldMapStore.load() {
             restoringWorldMap = true
-            restoredTableOriginTransform = restored.tableToWorld
-            restoredTableOriginExtent = restored.extent
-            lockedPlaneTransform = restored.tableToWorld
+            restoredTableCalibration = restored.calibration
+            tableCalibration = restored.calibration
+            lockedPlaneTransform = restored.calibration.tableToWorld
             lockedPlaneIdentifier = nil
             lockedPlaneExtent = Double(
-                (restored.extent.x + restored.extent.y) * 0.5
+                (restored.calibration.extent.x
+                    + restored.calibration.extent.y) * 0.5
             )
-            tableOriginExtent = restored.extent
-            tableOriginTransform = restored.tableToWorld
+            tableOriginExtent = restored.calibration.extent
+            tableOriginTransform = restored.calibration.tableToWorld
             tableOriginAnchorID = restored.worldMap.anchors.first {
                 $0.name == ARWorldMapStore.tableOriginAnchorName
             }?.identifier
@@ -263,6 +264,23 @@ final class ARTableCapture: NSObject {
 
     /// Keeps exactly one named AR anchor for the fitted table origin. Tile
     /// tracks remain ordinary census data and are never promoted to ARAnchor.
+    func updateTableCalibration(_ calibration: WorldTableCalibration) {
+        let calibrationChanged = tableCalibration != calibration
+        let originAlreadyMatches = tableOriginTransform.map {
+            Self.transformsAreNear($0, calibration.tableToWorld)
+        } == true && tableOriginExtent.map {
+            simd_length($0 - calibration.extent) < 0.001
+        } == true
+        tableCalibration = calibration
+        updateTableOrigin(
+            transform: calibration.tableToWorld,
+            extent: calibration.extent
+        )
+        if calibrationChanged && originAlreadyMatches {
+            scheduleWorldMapSave()
+        }
+    }
+
     func updateTableOrigin(
         transform: simd_float4x4,
         extent: SIMD2<Float>
@@ -289,12 +307,15 @@ final class ARTableCapture: NSObject {
         tableOriginAnchorID = anchor.identifier
         tableOriginTransform = transform
         tableOriginExtent = extent
-        scheduleWorldMapSave()
+        if tableCalibration != nil {
+            scheduleWorldMapSave()
+        }
     }
 
     /// Recalibration supersedes any previously archived coordinate frame.
     func invalidatePersistedCalibration() {
         ARWorldMapStore.discard()
+        tableCalibration = nil
         worldMapSaveTask?.cancel()
         worldMapSaveTask = nil
     }
@@ -329,9 +350,37 @@ final class ARTableCapture: NSObject {
     /// locks.
     private func processFrame(cameraTransform: simd_float4x4,
                               candidates: [PlaneLockPolicy.Candidate],
+                              restoredOrigin: ARAnchor?,
+                              trackingIsNormal: Bool,
                               mappingIsSaveable: Bool,
                               timestamp: TimeInterval) {
         self.mappingIsSaveable = mappingIsSaveable
+        if restoringWorldMap {
+            guard trackingIsNormal, let restoredOrigin,
+                  var calibration = restoredTableCalibration else {
+                return
+            }
+            calibration.tableToWorld = restoredOrigin.transform
+            calibration.source = .restoredWorldMap
+            restoredTableCalibration = calibration
+            tableCalibration = calibration
+            tableOriginAnchorID = restoredOrigin.identifier
+            tableOriginTransform = restoredOrigin.transform
+            tableOriginExtent = calibration.extent
+            lockedPlaneTransform = restoredOrigin.transform
+            lockedPlaneExtent = Double(
+                (calibration.extent.x + calibration.extent.y) * 0.5
+            )
+            restoringWorldMap = false
+            relocalizationTimeoutTask?.cancel()
+            relocalizationTimeoutTask = nil
+            stageBeforeRelocalizing = nil
+            captureStage = .tableLocked
+            Self.logger.notice(
+                "world map relocalized with named table origin"
+            )
+            return
+        }
         if captureStage == .starting {
             captureStage = .findingTable
         }
@@ -383,11 +432,11 @@ final class ARTableCapture: NSObject {
         lockedPlaneTransform = nil
         lockedPlaneIdentifier = nil
         lockedPlaneExtent = nil
-        restoredTableOriginTransform = nil
-        restoredTableOriginExtent = nil
+        restoredTableCalibration = nil
         tableOriginAnchorID = nil
         tableOriginTransform = nil
         tableOriginExtent = nil
+        tableCalibration = nil
         planeLockPolicy = nil
         planeDetectionRequested = true
         mappingIsSaveable = false
@@ -407,14 +456,29 @@ final class ARTableCapture: NSObject {
     }
 
     private func saveWorldMapIfEligible() {
-        guard mappingIsSaveable, let extent = tableOriginExtent else { return }
+        guard mappingIsSaveable, let calibration = tableCalibration else {
+            return
+        }
         session.getCurrentWorldMap { worldMap, error in
             guard let worldMap, error == nil else {
                 Self.logger.error("unable to capture ARWorldMap")
                 return
             }
+            guard let origin = worldMap.anchors.first(where: {
+                $0.name == ARWorldMapStore.tableOriginAnchorName
+            }) else {
+                Self.logger.error(
+                    "refusing to save world map without named table origin"
+                )
+                return
+            }
+            var anchoredCalibration = calibration
+            anchoredCalibration.tableToWorld = origin.transform
             do {
-                try ARWorldMapStore.save(worldMap: worldMap, extent: extent)
+                try ARWorldMapStore.save(
+                    worldMap: worldMap,
+                    calibration: anchoredCalibration
+                )
             } catch {
                 Self.logger.error(
                     "unable to archive ARWorldMap: \(String(describing: error), privacy: .public)"
@@ -491,6 +555,15 @@ extension ARTableCapture: ARSessionDelegate {
         let timestamp = frame.timestamp
         let mappingIsSaveable = frame.worldMappingStatus == .extending
             || frame.worldMappingStatus == .mapped
+        let restoredOrigin = frame.anchors.first {
+            $0.name == ARWorldMapStore.tableOriginAnchorName
+        }
+        let trackingIsNormal: Bool
+        if case .normal = frame.camera.trackingState {
+            trackingIsNormal = true
+        } else {
+            trackingIsNormal = false
+        }
         let candidates = frame.anchors.compactMap { anchor -> PlaneLockPolicy.Candidate? in
             guard let plane = anchor as? ARPlaneAnchor, plane.alignment == .horizontal else { return nil }
             return Self.candidate(for: plane)
@@ -499,6 +572,8 @@ extension ARTableCapture: ARSessionDelegate {
             self?.processFrame(
                 cameraTransform: cameraTransform,
                 candidates: candidates,
+                restoredOrigin: restoredOrigin,
+                trackingIsNormal: trackingIsNormal,
                 mappingIsSaveable: mappingIsSaveable,
                 timestamp: timestamp
             )
@@ -511,12 +586,9 @@ extension ARTableCapture: ARSessionDelegate {
             guard let self else { return }
             switch trackingState {
             case .normal:
-                if self.restoringWorldMap {
-                    self.restoringWorldMap = false
-                    self.relocalizationTimeoutTask?.cancel()
-                    self.relocalizationTimeoutTask = nil
+                if !self.restoringWorldMap {
+                    self.setRelocalizing(false)
                 }
-                self.setRelocalizing(false)
             case .limited(.relocalizing):
                 self.setRelocalizing(true)
             default:

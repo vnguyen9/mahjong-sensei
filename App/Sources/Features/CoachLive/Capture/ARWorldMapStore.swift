@@ -5,8 +5,7 @@ import simd
 
 struct RestoredTableCalibration {
     var worldMap: ARWorldMap
-    var tableToWorld: simd_float4x4
-    var extent: SIMD2<Float>
+    var calibration: WorldTableCalibration
 }
 
 /// One atomic Application Support archive containing ARKit's secure world-map
@@ -26,21 +25,23 @@ enum ARWorldMapStore {
                 Envelope.self,
                 from: data
             )
-            guard let extent = envelope.metadata.validatedExtent,
-                  let map = try NSKeyedUnarchiver.unarchivedObject(
+            guard let map = try NSKeyedUnarchiver.unarchivedObject(
                     ofClass: ARWorldMap.self,
                     from: envelope.worldMapData
                   ),
                   let origin = map.anchors.first(where: {
                       $0.name == tableOriginAnchorName
-                  }) else {
+                  }),
+                  let calibration = envelope.metadata.validatedCalibration(
+                    tableToWorld: origin.transform,
+                    sourceOverride: .restoredWorldMap
+                  ) else {
                 discard()
                 return nil
             }
             return RestoredTableCalibration(
                 worldMap: map,
-                tableToWorld: origin.transform,
-                extent: extent
+                calibration: calibration
             )
         } catch {
             discard()
@@ -50,14 +51,16 @@ enum ARWorldMapStore {
 
     static func save(
         worldMap: ARWorldMap,
-        extent: SIMD2<Float>
+        calibration: WorldTableCalibration
     ) throws {
         let mapData = try NSKeyedArchiver.archivedData(
             withRootObject: worldMap,
             requiringSecureCoding: true
         )
         let envelope = Envelope(
-            metadata: WorldMapCalibrationMetadata(extent: extent),
+            metadata: WorldMapCalibrationMetadata(
+                calibration: calibration
+            ),
             worldMapData: mapData
         )
         let data = try PropertyListEncoder().encode(envelope)

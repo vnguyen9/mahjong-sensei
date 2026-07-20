@@ -410,8 +410,8 @@ public final class PhysicalCensus {
 
     /// Shoelace formula. An approximation of true zone coverage fraction
     /// (sums observed-crop area without clipping against the calibrated
-    /// zone polygon or de-duplicating overlaps across frames) — good enough
-    /// for a shadow-mode debug HUD signal, not a release-gate metric.
+    /// zone polygon or de-duplicating overlaps across frames). This is a
+    /// diagnostic signal only, never a count or retirement input.
     private static func polygonArea(_ vertices: [SIMD2<Float>]) -> Float {
         guard vertices.count >= 3 else { return 0 }
         var sum: Float = 0
