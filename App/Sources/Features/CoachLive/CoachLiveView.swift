@@ -133,20 +133,18 @@ struct CoachLiveView: View {
         .background(ScreenBackground(.live).ignoresSafeArea())
         .environment(session)
         .sheet(item: $sheet) { sheetContent($0) }
-        // ARKit-native table calibration (grey grid + coaching overlay +
-        // point/tap zone marks) — its own self-contained session; produces the
-        // TableGeometry the next tracker build uses. Was DEBUG-only (a debug-HUD
-        // affordance); hoisted into production for Workstream G's live-feed
-        // "Recalibrate" link (`LiveFeedPane`), which sets `session
-        // .showARCalibration` via `beginARCalibration()` — same mechanism, no
-        // new capture plumbing.
+        // Guided marking renders the same continuous ARSession as Live.
         .fullScreenCover(isPresented: Binding(
             get: { session.showARCalibration },
             set: { if !$0 { session.finishARCalibration(nil) } }
         )) {
-            ARCalibrationView(
-                onComplete: { session.finishARCalibration($0) },
-                onCancel: { session.finishARCalibration(nil) })
+            if let capture = session.arCapture {
+                ARCalibrationView(
+                    capture: capture,
+                    mySeatWind: session.seatWind,
+                    onComplete: { session.finishARCalibration($0) },
+                    onCancel: { session.finishARCalibration(nil) })
+            }
         }
         .confirmationDialog("End the live session?", isPresented: $showExitConfirm, titleVisibility: .visible) {
             Button("End session", role: .destructive, action: onExit)
@@ -191,15 +189,14 @@ struct CoachLiveView: View {
                 .frame(maxWidth: .infinity, minHeight: 84, maxHeight: .infinity)
             HandStrip { id in sheet = .pickHandTile(id) }
             AdviceLine { sheet = .adviceDetail }
-            // Lane B chunk H item 3: always-available rescan affordance,
-            // AR mode only (`arCapture.enterSweeping()` — a no-op on the
-            // mock/fallback paths, so this stays hidden there).
+            // Always-available one-shot recount affordance, AR mode only.
             if session.isARCaptureActive {
                 // Rescan (force a fresh read) + manual hand-end (the AR path's
                 // automatic table-clear detector is off, so ending a hand is a
                 // deliberate tap).
                 HStack(spacing: 18) {
                     Button("Rescan table") { session.rescanTable() }
+                    Button("Recenter pond") { session.beginPondRecenter() }
                     Button("End hand") { session.requestHandEnd() }
                 }
                 .font(MJFont.ui(11, weight: .semibold))

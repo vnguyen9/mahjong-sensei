@@ -35,6 +35,28 @@ public enum DetectionProjector {
                                            orientedImageSize: SIMD2<Double>,
                                            tableExtent: Double,
                                            tileSize: SIMD2<Double>) -> [DetectedTile] {
+        projectToTableSpace(
+            tiles,
+            projection: projection,
+            imageTransform: FrameImageTransform(
+                imageOrientation: .right,
+                imageResolution: CGSize(
+                    width: projection.imageResolution.x,
+                    height: projection.imageResolution.y
+                )
+            ),
+            tableExtent: tableExtent,
+            tileSize: tileSize
+        )
+    }
+
+    public static func projectToTableSpace(
+        _ tiles: [DetectedTile],
+        projection: TableProjection,
+        imageTransform: FrameImageTransform,
+        tableExtent: Double,
+        tileSize: SIMD2<Double>
+    ) -> [DetectedTile] {
         guard tableExtent > 0 else { return [] }
         let w = tileSize.x / tableExtent
         let h = tileSize.y / tableExtent
@@ -51,7 +73,7 @@ public enum DetectionProjector {
             // guessing anyway.
             let bottomCenter = SIMD2<Double>(tile.box.centerX, tile.box.y + tile.box.height)
             guard let local = projection.tablePoint(ofNormalizedOrientedPoint: bottomCenter,
-                                                     orientedImageSize: orientedImageSize) else {
+                                                     imageTransform: imageTransform) else {
                 return nil
             }
             // Anchor origin → table-space (0.5, 0.5); `local.y` holds the

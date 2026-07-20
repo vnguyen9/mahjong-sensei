@@ -159,13 +159,23 @@ public struct TableProjection: Sendable {
     /// camera is looking away from).
     public func tablePoint(ofNormalizedOrientedPoint p: SIMD2<Double>,
                            orientedImageSize: SIMD2<Double>) -> SIMD2<Double>? {
-        guard orientedImageSize.x > 0, orientedImageSize.y > 0,
-              imageResolution.x > 0, imageResolution.y > 0 else { return nil }
+        tablePoint(
+            ofNormalizedOrientedPoint: p,
+            imageTransform: legacyRightTransform
+        )
+    }
 
-        // 1. Oriented-normalized → captured-image pixel (invert the `.right`
-        //    rotation — see the type's doc comment for the derivation).
-        let xr = p.y * orientedImageSize.y
-        let yr = imageResolution.y - p.x * orientedImageSize.x
+    public func tablePoint(
+        ofNormalizedOrientedPoint p: SIMD2<Double>,
+        imageTransform: FrameImageTransform
+    ) -> SIMD2<Double>? {
+        guard let rawPixel = rawPixel(
+            fromOrientedNormalized: p,
+            imageTransform: imageTransform
+        ) else { return nil }
+
+        let xr = rawPixel.x
+        let yr = rawPixel.y
 
         // 2. Captured pixel → camera-space ray direction: pinhole
         //    unprojection, then the CV→ARKit axis flip (+y down/+z forward
@@ -204,6 +214,87 @@ public struct TableProjection: Sendable {
         return SIMD2<Double>(local4.x, local4.z)
     }
 
+    // MARK: - Oriented-normalized + depth → world
+
+    /// Unprojects a detector point using a measured camera-axis depth.
+    /// `depthMeters` is the positive `-Z` distance used by ARKit scene depth,
+    /// not Euclidean distance along the oblique ray.
+    public func worldPoint(ofNormalizedOrientedPoint p: SIMD2<Double>,
+                           orientedImageSize: SIMD2<Double>,
+                           depthMeters: Double) -> SIMD3<Double>? {
+        worldPoint(
+            ofNormalizedOrientedPoint: p,
+            imageTransform: legacyRightTransform,
+            depthMeters: depthMeters
+        )
+    }
+
+    public func worldPoint(
+        ofNormalizedOrientedPoint p: SIMD2<Double>,
+        imageTransform: FrameImageTransform,
+        depthMeters: Double
+    ) -> SIMD3<Double>? {
+        guard depthMeters.isFinite, depthMeters > 0,
+              let rawPixel = rawPixel(
+                fromOrientedNormalized: p,
+                imageTransform: imageTransform
+              ) else { return nil }
+
+        let xr = rawPixel.x
+        let yr = rawPixel.y
+        let fx = intrinsics[0][0], fy = intrinsics[1][1]
+        let cx = intrinsics[2][0], cy = intrinsics[2][1]
+        guard fx != 0, fy != 0 else { return nil }
+
+        let cameraPoint = SIMD4<Double>(
+            (xr - cx) / fx * depthMeters,
+            -(yr - cy) / fy * depthMeters,
+            -depthMeters,
+            1
+        )
+        let world = cameraTransform * cameraPoint
+        guard world.x.isFinite, world.y.isFinite, world.z.isFinite else { return nil }
+        return SIMD3<Double>(world.x, world.y, world.z)
+    }
+
+    /// Projects an arbitrary world point into detector coordinates.
+    public func normalizedOrientedPoint(ofWorldPoint worldPoint: SIMD3<Double>,
+                                        orientedImageSize: SIMD2<Double>) -> SIMD2<Double>? {
+        normalizedOrientedPoint(
+            ofWorldPoint: worldPoint,
+            imageTransform: legacyRightTransform
+        )
+    }
+
+    public func normalizedOrientedPoint(
+        ofWorldPoint worldPoint: SIMD3<Double>,
+        imageTransform: FrameImageTransform
+    ) -> SIMD2<Double>? {
+        guard imageResolution.x > 0, imageResolution.y > 0 else { return nil }
+        let cameraLocal = simd_inverse(cameraTransform)
+            * SIMD4<Double>(worldPoint.x, worldPoint.y, worldPoint.z, 1)
+        guard cameraLocal.z < -1e-9 else { return nil }
+        let fx = intrinsics[0][0], fy = intrinsics[1][1]
+        let cx = intrinsics[2][0], cy = intrinsics[2][1]
+        let depth = -cameraLocal.z
+        let xr = fx * (cameraLocal.x / depth) + cx
+        let yr = fy * (-cameraLocal.y / depth) + cy
+        return imageTransform.orientedNormalized(
+            fromRaw: SIMD2(
+                xr / imageResolution.x,
+                yr / imageResolution.y
+            )
+        )
+    }
+
+    /// Positive scene-depth value expected for a world point in this frame.
+    public func cameraAxisDepth(ofWorldPoint worldPoint: SIMD3<Double>) -> Double? {
+        let cameraLocal = simd_inverse(cameraTransform)
+            * SIMD4<Double>(worldPoint.x, worldPoint.y, worldPoint.z, 1)
+        let depth = -cameraLocal.z
+        return depth.isFinite && depth > 1e-9 ? depth : nil
+    }
+
     // MARK: - Table (anchor-local x, z) → oriented-normalized
 
     /// The exact inverse of `tablePoint(ofNormalizedOrientedPoint:orientedImageSize:)`:
@@ -214,28 +305,45 @@ public struct TableProjection: Sendable {
     /// projectable into this frame at all).
     public func normalizedOrientedPoint(ofTablePoint t: SIMD2<Double>,
                                         orientedImageSize: SIMD2<Double>) -> SIMD2<Double>? {
-        guard orientedImageSize.x > 0, orientedImageSize.y > 0 else { return nil }
+        normalizedOrientedPoint(
+            ofTablePoint: t,
+            imageTransform: legacyRightTransform
+        )
+    }
 
-        // 1. Anchor-local → world.
+    public func normalizedOrientedPoint(
+        ofTablePoint t: SIMD2<Double>,
+        imageTransform: FrameImageTransform
+    ) -> SIMD2<Double>? {
         let worldPoint4 = planeTransform * SIMD4<Double>(t.x, 0, t.y, 1)
+        return normalizedOrientedPoint(
+            ofWorldPoint: SIMD3<Double>(worldPoint4.x, worldPoint4.y, worldPoint4.z),
+            imageTransform: imageTransform
+        )
+    }
 
-        // 2. World → camera space.
-        let cameraLocal4 = simd_inverse(cameraTransform) * worldPoint4
-        guard cameraLocal4.z < -1e-9 else { return nil }   // must be in front of the camera (-Z forward)
+    private var legacyRightTransform: FrameImageTransform {
+        FrameImageTransform(
+            imageOrientation: .right,
+            imageResolution: CGSize(
+                width: imageResolution.x,
+                height: imageResolution.y
+            )
+        )
+    }
 
-        // 3. Camera space (ARKit: +y up, -z forward) → CV convention
-        //    (+y down, +z forward) → pinhole projection.
-        let xCv = cameraLocal4.x
-        let yCv = -cameraLocal4.y
-        let zCv = -cameraLocal4.z   // > 0, guaranteed by the guard above
-        let fx = intrinsics[0][0], fy = intrinsics[1][1]
-        let cx = intrinsics[2][0], cy = intrinsics[2][1]
-        let xr = fx * (xCv / zCv) + cx
-        let yr = fy * (yCv / zCv) + cy
-
-        // 4. Captured pixel → oriented-normalized (the `.right` rotation).
-        let uo = (imageResolution.y - yr) / orientedImageSize.x
-        let vo = xr / orientedImageSize.y
-        return SIMD2<Double>(uo, vo)
+    private func rawPixel(
+        fromOrientedNormalized point: SIMD2<Double>,
+        imageTransform: FrameImageTransform
+    ) -> SIMD2<Double>? {
+        guard imageResolution.x > 0, imageResolution.y > 0,
+              imageTransform.orientedImageSize.width > 0,
+              imageTransform.orientedImageSize.height > 0,
+              point.x.isFinite, point.y.isFinite else { return nil }
+        let raw = imageTransform.rawNormalized(fromOriented: point)
+        return SIMD2(
+            raw.x * imageResolution.x,
+            raw.y * imageResolution.y
+        )
     }
 }

@@ -16,6 +16,13 @@ public struct TileObservation: Sendable, Hashable {
     public var footprintCenter: SIMD2<Float>?
     /// Footprint uncertainty radius in metres, paired with `footprintCenter`.
     public var footprintRadius: Float?
+    /// LiDAR-derived world position for this sighting. `nil` is deliberate:
+    /// callers must not manufacture a guessed depth when the frame has no
+    /// trustworthy medium/high-confidence sample.
+    public var worldPosition: SIMD3<Float>?
+    /// Median camera-axis depth at the detected tile surface. Identity uses
+    /// `worldPosition`, which is projected onto the table plane.
+    public var measuredSurfaceDepth: Float?
 
     public init(frameID: FrameID,
                 box: TileBoundingBox,
@@ -23,7 +30,9 @@ public struct TileObservation: Sendable, Hashable {
                 poseHint: TilePoseHint = .unknown,
                 faceHypothesis: TileFaceHypothesis? = nil,
                 footprintCenter: SIMD2<Float>? = nil,
-                footprintRadius: Float? = nil) {
+                footprintRadius: Float? = nil,
+                worldPosition: SIMD3<Float>? = nil,
+                measuredSurfaceDepth: Float? = nil) {
         self.frameID = frameID
         self.box = box
         self.confidence = confidence
@@ -31,5 +40,7 @@ public struct TileObservation: Sendable, Hashable {
         self.faceHypothesis = faceHypothesis
         self.footprintCenter = footprintCenter
         self.footprintRadius = footprintRadius
+        self.worldPosition = worldPosition
+        self.measuredSurfaceDepth = measuredSurfaceDepth
     }
 }

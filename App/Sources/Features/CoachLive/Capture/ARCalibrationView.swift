@@ -8,9 +8,9 @@ import UIKit
 import simd
 
 /// The multi-stage ARKit calibration screen shown BEFORE the Coach Live play
-/// loop starts (spec screens 2–7). It runs its OWN `ARSession` (a plain
-/// `ARWorldTrackingConfiguration` with horizontal plane detection), independent
-/// of `ARTableCapture`/`CoachLiveSession`'s longer-lived play-loop session.
+/// loop starts (spec screens 2–7). It renders and raycasts through the exact
+/// `ARSession` owned by `ARTableCapture`; it never runs, pauses, resets, or
+/// replaces that session.
 ///
 /// The user sees ARKit's default plane grid + Apple's `ARCoachingOverlayView`
 /// onboarding, then:
@@ -19,21 +19,17 @@ import simd
 ///   2. **marks the pond** with one point,
 ///   3. **confirms the auto-placed seats** (derived from the plane edges + the
 ///      user's seat wind),
-/// which are converted into a `TrackerConfig.TableGeometry` (oriented hand band
-/// + seats + meld bands) and handed back via `onComplete`.
-///
-/// The produced geometry carries orientation-normalized fractions, so it
-/// transfers into the play loop's own separately-locked plane. (True world-
-/// anchored raycast precision is device-QA; ARSCNView does not render in the
-/// Simulator, where this shows chrome over a black scene.)
+/// which are converted into the canonical `WorldTableCalibration` shared by
+/// census ownership, ROI planning, and overlays.
 struct ARCalibrationView: UIViewControllerRepresentable {
+    let capture: ARTableCapture
     /// The user's seat wind (from the setup card), used to label the seats.
     var mySeatWind: Wind = .east
-    var onComplete: (TrackerConfig.TableGeometry) -> Void
+    var onComplete: (WorldTableCalibration) -> Void
     var onCancel: () -> Void
 
     func makeUIViewController(context: Context) -> ARCalibrationViewController {
-        let controller = ARCalibrationViewController()
+        let controller = ARCalibrationViewController(capture: capture)
         controller.mySeatWind = mySeatWind
         controller.onComplete = onComplete
         controller.onCancel = onCancel
@@ -48,10 +44,11 @@ struct ARCalibrationView: UIViewControllerRepresentable {
 /// The real logic behind `ARCalibrationView`. A `UIViewController` (rather than
 /// a SwiftUI `View`) because it owns an `ARSCNView` + `ARCoachingOverlayView` +
 /// tap gesture + `ARSCNViewDelegate`/`ARSessionDelegate`.
-final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
+final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
     var mySeatWind: Wind = .east
-    var onComplete: ((TrackerConfig.TableGeometry) -> Void)?
+    var onComplete: ((WorldTableCalibration) -> Void)?
     var onCancel: (() -> Void)?
+    private let capture: ARTableCapture
 
     /// What the next tap/pinch places, and the review/confirm tail.
     enum MarkStage: Int {
@@ -138,6 +135,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate, AR
     private var hoverStyleKey: String?
     private var lastPinchSampleAt: TimeInterval = 0
     private var pinchInferenceInFlight = false
+    private var pinchDisplayLink: CADisplayLink?
     /// Hysteresis so a loose/near hand never counts as a pinch: engage only
     /// below `pinchEnterGap`, release only above `pinchReleaseGap` (oriented-
     /// normalized units). Tunable on device.
@@ -157,11 +155,22 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate, AR
     private let markerTile: Tile = .p(5)
     private static var tileTextureCache: [String: UIImage] = [:]
 
+    init(capture: ARTableCapture) {
+        self.capture = capture
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is unavailable")
+    }
+
     // MARK: - Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        sceneView.session = capture.sharedSession
         setupSceneView()
         setupCoachingOverlay()
         setupControls()
@@ -170,20 +179,29 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate, AR
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        let configuration = ARWorldTrackingConfiguration()
-        configuration.planeDetection = [.horizontal]
-        configuration.worldAlignment = .gravity
-        configuration.environmentTexturing = .none
-        sceneView.session.run(configuration)
+        publishInterfaceOrientation()
+        seedCalibrationPlaneFromCurrentFrame()
+        let link = CADisplayLink(target: self, selector: #selector(samplePinchFrame))
+        link.add(to: .main, forMode: .common)
+        pinchDisplayLink = link
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        // Drop the torch on the way out; the live capture re-asserts its own
-        // `pendingTorchState` when it resumes, so we don't leak this session's
-        // flash state into tracking.
         if torchOn { CameraTorch.set(false); torchOn = false }
-        sceneView.session.pause()
+        pinchDisplayLink?.invalidate()
+        pinchDisplayLink = nil
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        publishInterfaceOrientation()
+    }
+
+    private func publishInterfaceOrientation() {
+        let orientation =
+            view.window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
+        capture.updateImageOrientation(orientation.cameraImageOrientation)
     }
 
     // MARK: - Setup
@@ -192,7 +210,6 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate, AR
         sceneView.frame = view.bounds
         sceneView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         sceneView.delegate = self
-        sceneView.session.delegate = self
         sceneView.automaticallyUpdatesLighting = true
         view.addSubview(sceneView)
 
@@ -424,6 +441,10 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate, AR
     }
 
     private func considerCalibrationPlane(_ anchor: ARPlaneAnchor) {
+        if let lockedID = capture.lockedPlaneIdentifier,
+           anchor.identifier != lockedID {
+            return
+        }
         let area = Double(anchor.planeExtent.width) * Double(anchor.planeExtent.height)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -436,6 +457,19 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate, AR
                 self.calibrationPlaneAnchor = anchor
             }
             self.refreshUI()
+        }
+    }
+
+    private func seedCalibrationPlaneFromCurrentFrame() {
+        let planes = sceneView.session.currentFrame?.anchors.compactMap { $0 as? ARPlaneAnchor } ?? []
+        if let lockedID = capture.lockedPlaneIdentifier,
+           let locked = planes.first(where: { $0.identifier == lockedID }) {
+            considerCalibrationPlane(locked)
+        } else if let largest = planes.max(by: {
+            $0.planeExtent.width * $0.planeExtent.height
+                < $1.planeExtent.width * $1.planeExtent.height
+        }) {
+            considerCalibrationPlane(largest)
         }
     }
 
@@ -468,14 +502,15 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate, AR
         return dx * dx + dy * dy
     }
 
-    // MARK: - Live pinch (ARSessionDelegate)
+    // MARK: - Live pinch
 
     /// Continuous hand-pose sampling (~10 Hz, off-main) while placing marks: a
     /// ghost tile follows the fingertip and a pinch places/moves the current
     /// post. This is the iOS equivalent of visionOS hand tracking — Vision's
     /// `VNDetectHumanHandPoseRequest`, run only during calibration (bounded
     /// cost). No "Pinch" button.
-    func session(_ session: ARSession, didUpdate frame: ARFrame) {
+    @objc private func samplePinchFrame() {
+        guard let frame = sceneView.session.currentFrame else { return }
         // Sampling stays live through the seats/done review too, so a pinch can
         // still GRAB a placed tile to nudge it — new tiles are only created in
         // the marking stages (`postForCurrentStage`), so review can't add posts.
@@ -489,9 +524,15 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate, AR
         let intrinsics = frame.camera.intrinsics
         let resolution = frame.camera.imageResolution
         let planeTransform = planeAnchor.transform
+        let imageOrientation = (
+            view.window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
+        ).cameraImageOrientation
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let sample = HandPoseFingertip.pinch(in: pixelBuffer)
+            let sample = HandPoseFingertip.pinch(
+                in: pixelBuffer,
+                orientation: imageOrientation
+            )
             var tablePoint: SIMD2<Double>?
             if let point = sample?.point {
                 let projection = TableProjection(
@@ -499,8 +540,14 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate, AR
                     intrinsics: intrinsics,
                     imageResolution: SIMD2<Float>(Float(resolution.width), Float(resolution.height)),
                     planeTransform: planeTransform)
-                let orientedImageSize = SIMD2<Double>(Double(resolution.height), Double(resolution.width))
-                tablePoint = projection.tablePoint(ofNormalizedOrientedPoint: point, orientedImageSize: orientedImageSize)
+                let transform = FrameImageTransform(
+                    imageOrientation: imageOrientation,
+                    imageResolution: resolution
+                )
+                tablePoint = projection.tablePoint(
+                    ofNormalizedOrientedPoint: point,
+                    imageTransform: transform
+                )
             }
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -1026,19 +1073,40 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate, AR
     }
 
     private func complete() {
-        guard let planeAnchor = calibrationPlaneAnchor else { return }
-        let extentMetres = Double(max(planeAnchor.planeExtent.width, planeAnchor.planeExtent.height))
-        // Emit the frame-invariant whole-table AUTO-PARTITION (central pond +
-        // nearest-edge fill), generated purely from the plane extent + seat
-        // wind. Because it carries no positional corners, it lands correctly in
-        // the LIVE tracking frame — sidestepping the calibration-session ↔
-        // live-session coordinate mismatch that previously threw the
-        // pinch-marked pond off the table (raw `planeAnchor.transform` vs the
-        // live centered + yaw-aligned lock). The pinch marks still drive the
-        // on-screen preview; positional editing that survives the session
-        // transfer is a fast follow.
-        let geometry = TableCalibrationGeometry.autoPartition(extentMetres: extentMetres,
-                                                              mySeatWind: mySeatWind)
-        onComplete?(geometry)
+        guard let planeAnchor = calibrationPlaneAnchor,
+              let handPostA,
+              let handPostB,
+              let pondCornerA,
+              let pondCornerB else { return }
+        let markedPond = pondQuad.count == 4 ? pondQuad : [
+            SIMD2(pondCornerA.x, pondCornerA.y),
+            SIMD2(pondCornerB.x, pondCornerA.y),
+            SIMD2(pondCornerB.x, pondCornerB.y),
+            SIMD2(pondCornerA.x, pondCornerB.y),
+        ]
+        let seatZones = Dictionary(uniqueKeysWithValues: seatMidpoints.compactMap {
+            seat, point -> (SemanticZoneID, SIMD2<Float>)? in
+            let zone: SemanticZoneID
+            switch seat {
+            case .left: zone = .tableRevealedLeft
+            case .across: zone = .tableRevealedFar
+            case .right: zone = .tableRevealedRight
+            case .me: return nil
+            }
+            return (zone, SIMD2(Float(point.x), Float(point.y)))
+        })
+        guard let calibration = WorldTableCalibration.guided(
+            planeTransform: planeAnchor.transform,
+            handEndpoints: (
+                SIMD2(Float(handPostA.x), Float(handPostA.y)),
+                SIMD2(Float(handPostB.x), Float(handPostB.y))
+            ),
+            pondPolygon: markedPond.map { SIMD2(Float($0.x), Float($0.y)) },
+            revealedZoneCenters: seatZones
+        ) else {
+            subtitleLabel.text = "Move the hand row at least 15 cm from the pond, then try again."
+            return
+        }
+        onComplete?(calibration)
     }
 }

@@ -104,6 +104,71 @@ public final class TrackStore {
         public init() {}
     }
 
+    // MARK: - Authoritative census synchronization
+
+    /// Replaces the event engine's read model with the census's exact
+    /// identities, lifecycle, faces, and semantic zones. This deliberately
+    /// bypasses image-space association and `ZoneModel`: the physical census
+    /// already owns those decisions on a healthy LiDAR session.
+    ///
+    /// Tracks absent from `authoritative` have already retired (or are
+    /// tentative/ignored) in the census and are removed without entering the
+    /// legacy rebirth ring. No recognition or matching work happens here.
+    public func synchronize(
+        authoritative: [CensusEventTrack],
+        at t: TimeInterval
+    ) {
+        now = max(now, t)
+        let incomingIDs = Set(authoritative.map(\.id))
+        tracksByID = tracksByID.filter { incomingIDs.contains($0.key) }
+        retiredRing.removeAll()
+
+        for incoming in authoritative {
+            let track: Track
+            let isNew: Bool
+            if let existing = tracksByID[incoming.id] {
+                track = existing
+                isNew = false
+            } else {
+                track = Track(
+                    id: incoming.id,
+                    face: incoming.face,
+                    box: incoming.box,
+                    zone: incoming.zone,
+                    seat: incoming.seat,
+                    state: incoming.life,
+                    at: incoming.firstSeen
+                )
+                tracksByID[incoming.id] = track
+                isNew = true
+            }
+
+            let observedAgain = !isNew
+                && incoming.life == .live
+                && incoming.lastSeen > track.lastSeen
+            track.publishedFace = incoming.face
+            track.isPinned = true
+            track.pinnedFace = incoming.face
+            track.box = incoming.box
+            track.zone = incoming.zone
+            track.seat = incoming.seat
+            track.zoneLocked = true
+            track.state = incoming.life
+            track.firstSeen = incoming.firstSeen
+            track.lastSeen = incoming.lastSeen
+            track.missingSince = incoming.life == .missing
+                ? incoming.lastSeen
+                : nil
+            track.retiredAt = nil
+            if observedAgain { track.observationCount += 1 }
+            track.isManual = false
+            track.confirmedOnce = true
+            if incoming.id.raw >= nextRawID {
+                nextRawID = incoming.id.raw + 1
+            }
+        }
+    }
+
     // MARK: - The one association step
 
     /// Ingest one frame of detections. Runs every tick — including *during*

@@ -1,4 +1,5 @@
 import CoreGraphics
+import ImageIO
 import Recognition
 
 /// Pure coordinate math between two spaces the AR ROI pipeline (Lane B
@@ -50,6 +51,7 @@ enum ROICropMapper {
     static func cropRect(forZoneImageRect zoneRect: TileBoundingBox,
                           orientedImageSize: CGSize,
                           imageResolution: CGSize,
+                          imageOrientation: CGImagePropertyOrientation = .right,
                           padding: Double = 0.12) -> CGRect {
         guard imageResolution.width > 0, imageResolution.height > 0,
               orientedImageSize.width > 0, orientedImageSize.height > 0 else { return .zero }
@@ -64,10 +66,26 @@ enum ROICropMapper {
         let y1 = min(1, zy + zh + padY)
         guard x1 > x0, y1 > y0 else { return .zero }
 
-        let corner0 = orientedNormalizedToRaw(CGPoint(x: x0, y: y0), rawSize: imageResolution, orientedSize: orientedImageSize)
-        let corner1 = orientedNormalizedToRaw(CGPoint(x: x1, y: y1), rawSize: imageResolution, orientedSize: orientedImageSize)
-        let rawMinX = min(corner0.x, corner1.x), rawMaxX = max(corner0.x, corner1.x)
-        let rawMinY = min(corner0.y, corner1.y), rawMaxY = max(corner0.y, corner1.y)
+        let transform = FrameImageTransform(
+            imageOrientation: imageOrientation,
+            imageResolution: imageResolution
+        )
+        let corners = [
+            SIMD2<Double>(Double(x0), Double(y0)),
+            SIMD2<Double>(Double(x1), Double(y0)),
+            SIMD2<Double>(Double(x1), Double(y1)),
+            SIMD2<Double>(Double(x0), Double(y1)),
+        ].map { point -> CGPoint in
+            let raw = transform.rawNormalized(fromOriented: point)
+            return CGPoint(
+                x: raw.x * imageResolution.width,
+                y: raw.y * imageResolution.height
+            )
+        }
+        let rawMinX = corners.map(\.x).min()!
+        let rawMaxX = corners.map(\.x).max()!
+        let rawMinY = corners.map(\.y).min()!
+        let rawMaxY = corners.map(\.y).max()!
 
         let clampedMinX = max(0, min(rawMinX, imageResolution.width))
         let clampedMinY = max(0, min(rawMinY, imageResolution.height))
@@ -106,7 +124,8 @@ enum ROICropMapper {
     static func fullImageBox(fromCropNormalized cropNormalized: TileBoundingBox,
                               cropRect: CGRect,
                               imageResolution: CGSize,
-                              orientedImageSize: CGSize) -> TileBoundingBox {
+                              orientedImageSize: CGSize,
+                              imageOrientation: CGImagePropertyOrientation = .right) -> TileBoundingBox {
         guard cropRect.width > 0, cropRect.height > 0,
               imageResolution.width > 0, imageResolution.height > 0,
               orientedImageSize.width > 0, orientedImageSize.height > 0 else {
@@ -114,21 +133,30 @@ enum ROICropMapper {
         }
 
         let cropRawSize = CGSize(width: cropRect.width, height: cropRect.height)
-        let cropOrientedSize = CGSize(width: cropRect.height, height: cropRect.width)   // Vision's guaranteed swap
-
-        let cx = CGFloat(cropNormalized.x), cy = CGFloat(cropNormalized.y)
-        let cw = CGFloat(cropNormalized.width), ch = CGFloat(cropNormalized.height)
-        let localTL = orientedNormalizedToRaw(CGPoint(x: cx, y: cy), rawSize: cropRawSize, orientedSize: cropOrientedSize)
-        let localBR = orientedNormalizedToRaw(CGPoint(x: cx + cw, y: cy + ch), rawSize: cropRawSize, orientedSize: cropOrientedSize)
-
-        let fullTL = CGPoint(x: cropRect.minX + localTL.x, y: cropRect.minY + localTL.y)
-        let fullBR = CGPoint(x: cropRect.minX + localBR.x, y: cropRect.minY + localBR.y)
-
-        let orientedTL = rawToOrientedNormalized(fullTL, rawSize: imageResolution, orientedSize: orientedImageSize)
-        let orientedBR = rawToOrientedNormalized(fullBR, rawSize: imageResolution, orientedSize: orientedImageSize)
-
-        let minX = min(orientedTL.x, orientedBR.x), maxX = max(orientedTL.x, orientedBR.x)
-        let minY = min(orientedTL.y, orientedBR.y), maxY = max(orientedTL.y, orientedBR.y)
+        let cropTransform = FrameImageTransform(
+            imageOrientation: imageOrientation,
+            imageResolution: cropRawSize
+        )
+        let fullTransform = FrameImageTransform(
+            imageOrientation: imageOrientation,
+            imageResolution: imageResolution
+        )
+        let x0 = cropNormalized.x
+        let y0 = cropNormalized.y
+        let x1 = cropNormalized.x + cropNormalized.width
+        let y1 = cropNormalized.y + cropNormalized.height
+        let corners = [
+            SIMD2(x0, y0), SIMD2(x1, y0), SIMD2(x1, y1), SIMD2(x0, y1),
+        ].map { oriented -> SIMD2<Double> in
+            let localRaw = cropTransform.rawNormalized(fromOriented: oriented)
+            let fullRaw = SIMD2<Double>(
+                (cropRect.minX + localRaw.x * cropRect.width) / imageResolution.width,
+                (cropRect.minY + localRaw.y * cropRect.height) / imageResolution.height
+            )
+            return fullTransform.orientedNormalized(fromRaw: fullRaw)
+        }
+        let minX = corners.map(\.x).min()!, maxX = corners.map(\.x).max()!
+        let minY = corners.map(\.y).min()!, maxY = corners.map(\.y).max()!
         return TileBoundingBox(x: Double(minX), y: Double(minY), width: Double(maxX - minX), height: Double(maxY - minY))
     }
 
@@ -138,31 +166,27 @@ enum ROICropMapper {
     /// of the same relationship `cropRect` inverts; used by `ROIScheduler`
     /// to place `MotionField` grid cells (native/raw space, same buffer as
     /// the full frame) against zone rects (oriented space).
-    static func orientedNormalizedRect(fromRawRect rawRect: CGRect, rawSize: CGSize, orientedSize: CGSize) -> TileBoundingBox {
-        let corner0 = rawToOrientedNormalized(CGPoint(x: rawRect.minX, y: rawRect.minY), rawSize: rawSize, orientedSize: orientedSize)
-        let corner1 = rawToOrientedNormalized(CGPoint(x: rawRect.maxX, y: rawRect.maxY), rawSize: rawSize, orientedSize: orientedSize)
-        let minX = min(corner0.x, corner1.x), maxX = max(corner0.x, corner1.x)
-        let minY = min(corner0.y, corner1.y), maxY = max(corner0.y, corner1.y)
+    static func orientedNormalizedRect(fromRawRect rawRect: CGRect, rawSize: CGSize,
+                                       orientedSize: CGSize,
+                                       imageOrientation: CGImagePropertyOrientation = .right) -> TileBoundingBox {
+        let transform = FrameImageTransform(
+            imageOrientation: imageOrientation,
+            imageResolution: rawSize
+        )
+        let corners = [
+            CGPoint(x: rawRect.minX, y: rawRect.minY),
+            CGPoint(x: rawRect.maxX, y: rawRect.minY),
+            CGPoint(x: rawRect.maxX, y: rawRect.maxY),
+            CGPoint(x: rawRect.minX, y: rawRect.maxY),
+        ].map {
+            transform.orientedNormalized(fromRaw: SIMD2<Double>(
+                Double($0.x / rawSize.width),
+                Double($0.y / rawSize.height)
+            ))
+        }
+        let minX = corners.map(\.x).min()!, maxX = corners.map(\.x).max()!
+        let minY = corners.map(\.y).min()!, maxY = corners.map(\.y).max()!
         return TileBoundingBox(x: Double(minX), y: Double(minY), width: Double(maxX - minX), height: Double(maxY - minY))
-    }
-
-    // MARK: - Shared point math (TableProjection's `.right`-rotation derivation, as plain 2D)
-
-    /// Oriented-normalized point → native pixel point. Mirrors
-    /// `TableProjection.tablePoint`'s step 1 exactly: `xr = vo·Ho`,
-    /// `yr = Hr - uo·Wo` (`Hr` = `rawSize.height`; `Wo`/`Ho` =
-    /// `orientedSize.width`/`.height` — `rawSize.width` never enters either
-    /// formula, matching that type's own formulas, which is why both sizes
-    /// are taken independently rather than one being derived from the other).
-    private static func orientedNormalizedToRaw(_ p: CGPoint, rawSize: CGSize, orientedSize: CGSize) -> CGPoint {
-        CGPoint(x: p.y * orientedSize.height, y: rawSize.height - p.x * orientedSize.width)
-    }
-
-    /// The inverse: native pixel point → oriented-normalized point. Mirrors
-    /// `TableProjection.normalizedOrientedPoint`'s pixel-space steps:
-    /// `uo = (Hr - yr)/Wo`, `vo = xr/Ho`.
-    private static func rawToOrientedNormalized(_ p: CGPoint, rawSize: CGSize, orientedSize: CGSize) -> CGPoint {
-        CGPoint(x: (rawSize.height - p.y) / orientedSize.width, y: p.x / orientedSize.height)
     }
 
     private static func floorEven(_ v: CGFloat) -> CGFloat { (v / 2).rounded(.down) * 2 }

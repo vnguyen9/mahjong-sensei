@@ -82,13 +82,38 @@ struct LiveFeedPane: View {
                 .frame(width: fullSize.width, height: fullSize.height)
                 .animation(.easeInOut(duration: 0.25), value: session.startupStage)
 
-            ZoneBracketsOverlay(previewBounds: previewFrame, onTapUnresolved: onTapUnresolved,
-                                onTapZoneChip: onTapZoneChip)
-                .frame(width: fullSize.width, height: fullSize.height)
+            if session.countSource != .spatialBootstrapping {
+                ZoneBracketsOverlay(previewBounds: previewFrame, onTapUnresolved: onTapUnresolved,
+                                    onTapZoneChip: onTapZoneChip)
+                    .frame(width: fullSize.width, height: fullSize.height)
+            }
+
+            if session.isRecenterPondActive {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .frame(width: fullSize.width, height: fullSize.height)
+                    .onTapGesture { location in
+                        session.applyPondRecenter(
+                            tapInFeed: location,
+                            previewBounds: previewFrame
+                        )
+                    }
+                    .overlay(alignment: .top) {
+                        Text("Tap the center of the pond")
+                            .font(MJFont.ui(12, weight: .semibold))
+                            .foregroundStyle(MJColor.creamHeading)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.black.opacity(0.7), in: Capsule())
+                            .padding(.top, safeTop + 54)
+                            .allowsHitTesting(false)
+                    }
+                    .zIndex(20)
+            }
 
             #if DEBUG
             // Dev-only: the calibrated geometry projected onto the feed.
-            if showGeometryDebug {
+            if showGeometryDebug, session.spatialTrackingHealth == .healthy {
                 LiveGeometryDebugOverlay(previewBounds: previewFrame)
                     .frame(width: fullSize.width, height: fullSize.height)
             }
@@ -250,7 +275,7 @@ struct LiveFeedPane: View {
             } else if session.isDark && !torchOn && !session.torchSuggestionDismissed {
                 darkTableChip
                     .transition(.opacity)
-            } else if session.usingFallbackCapture {
+            } else if case .legacy2D = session.countSource {
                 fallbackCaptureChip
                     .transition(.opacity)
             }
@@ -272,7 +297,7 @@ struct LiveFeedPane: View {
         .animation(.easeInOut(duration: 0.2), value: session.isDark)
         .animation(.easeInOut(duration: 0.2), value: session.cameraMoving)
         .animation(.easeInOut(duration: 0.2), value: session.rescanPrompt)
-        .animation(.easeInOut(duration: 0.2), value: session.usingFallbackCapture)
+        .animation(.easeInOut(duration: 0.2), value: session.countSource)
     }
 
     /// Lane B chunk D's "hold steady" chip — same capsule styling family as
@@ -379,14 +404,18 @@ struct LiveFeedPane: View {
             HStack(spacing: 6) {
                 Image(systemName: "square.on.square")
                     .font(.system(size: 11, weight: .semibold))
-                Text("Switched to 2D mode — still tracking, just without depth")
+                Text(fallbackMessage)
                     .font(MJFont.ui(12, weight: .semibold))
                     .fixedSize(horizontal: false, vertical: true)
             }
             .foregroundStyle(MJColor.cream)
 
             Button {
-                session.retryARSetup()
+                if session.arCapture != nil {
+                    session.retrySpatialTracking()
+                } else {
+                    session.retryARSetup()
+                }
             } label: {
                 Text("Retry AR setup")
                     .font(MJFont.ui(11, weight: .bold))
@@ -400,6 +429,13 @@ struct LiveFeedPane: View {
             Capsule().fill(Color(hex: 0x0A241D, alpha: 0.6))
         }
         .overlay { Capsule().strokeBorder(MJColor.gold(0.3), lineWidth: 1) }
+    }
+
+    private var fallbackMessage: String {
+        guard case .legacy2D(let reason) = session.countSource else {
+            return "2D tracking"
+        }
+        return "\(reason.message) — using explicit 2D tracking"
     }
 
     /// Workstream G's "Recalibrate" affordance (spec screens 14/15) — reuses
@@ -459,6 +495,9 @@ struct LiveFeedPane: View {
         if session.isWarmingUp { return "Starting…" }
         if session.detectorUnavailable { return "LIVE · detector unavailable" }
         if session.thermal == .throttled { return "LIVE · cooling" }
+        if session.countSource == .spatialBootstrapping {
+            return "Locking spatial tracking · \(session.diagnostics.worldCensusTracks) candidates"
+        }
         return "LIVE · \(session.liveTileCount) tiles seen"
     }
 
@@ -503,6 +542,11 @@ struct LiveFeedPane: View {
             Text("ran \(session.diagnostics.inferencesRun) · raw \(session.diagnostics.lastRawDetectionCount)")
             Text("top: \(session.diagnostics.lastTopDetections.isEmpty ? "—" : session.diagnostics.lastTopDetections.joined(separator: ", "))")
             Text("tracker live \(session.trackerDiagnostics.live) · tent \(session.trackerDiagnostics.tentative) · missing \(session.trackerDiagnostics.missing)")
+            Text("census t\(session.diagnostics.worldCensusTentative) c\(session.diagnostics.worldCensusConfirmed) s\(session.diagnostics.worldCensusStale) m\(session.diagnostics.worldCensusMissing) · \(session.diagnostics.worldCensusZoneSummary)")
+            Text("census +\(session.diagnostics.worldCensus.births) =\(session.diagnostics.worldCensus.matches) miss \(session.diagnostics.worldCensus.qualifiedMisses) −\(session.diagnostics.worldCensus.retirements) · \(session.diagnostics.worldCensusMilliseconds, specifier: "%.1f")ms")
+            Text("depth \(session.diagnostics.worldCensusDepthAcceptance * 100, specifier: "%.0f")% · reproj \(session.diagnostics.worldCensusAnchorErrorPixels, specifier: "%.1f")px · reject \(session.diagnostics.worldCensusDepthSummary)")
+            Text("calibration \(session.diagnostics.worldCensusCalibrationSource)")
+            Text("source \(session.countSource.diagnosticName) · health \(session.spatialTrackingHealth.diagnosticName)")
             Text("rec: \(session.diagnostics.recognizerType) · mode \(session.arCapture != nil && !session.usingFallbackCapture ? "AR" : "2D")")
             Text(session.diagnostics.roiPlan)
             Text("err(\(session.recognizerErrorCount)): \(session.lastPipelineError ?? "—")")

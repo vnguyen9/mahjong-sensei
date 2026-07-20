@@ -1,6 +1,8 @@
 import ARKit
 import AVFoundation
+import ImageIO
 import Observation
+import Recognition
 import os
 
 /// Owns the ARKit world-tracking session for Coach Live's table capture:
@@ -42,12 +44,17 @@ final class ARTableCapture: NSObject {
     /// exactly what `Recognition.TableProjection.planeTransform` expects.
     /// `nil` until `captureStage` first reaches `.tableLocked`.
     private(set) var lockedPlaneTransform: simd_float4x4?
+    private(set) var lockedPlaneIdentifier: UUID?
 
     /// The locked plane's larger horizontal side in metres — the physical size
     /// the normalized [0,1] table space spans. Used to build the auto-partition
     /// `TableGeometry` at tracker-lock time so its central pond fraction maps to
     /// the real table. `nil` until `.tableLocked`.
     private(set) var lockedPlaneExtent: Double?
+
+    /// Non-nil only while a saved world map has successfully supplied the
+    /// named table-origin calibration for this launch.
+    private(set) var restoredTableCalibration: WorldTableCalibration?
 
     // MARK: - Per-frame state (polled, not observed)
 
@@ -58,6 +65,9 @@ final class ARTableCapture: NSObject {
     // callback, so it needs the explicit `nonisolated(unsafe)` opt-out.
     @ObservationIgnored private let frameLock = NSLock()
     @ObservationIgnored nonisolated(unsafe) private var _latestFrame: ARTableFrame?
+    @ObservationIgnored private let orientationLock = NSLock()
+    @ObservationIgnored nonisolated(unsafe) private var imageOrientationRaw: UInt32 =
+        CGImagePropertyOrientation.right.rawValue
     /// The most recent frame ARKit has delivered, cached behind a lock so
     /// it can be polled from any thread — mirrors
     /// `CameraCapture.latestBuffer`'s contract exactly. Written from
@@ -69,9 +79,26 @@ final class ARTableCapture: NSObject {
         return _latestFrame
     }
 
+    nonisolated func updateImageOrientation(
+        _ orientation: CGImagePropertyOrientation
+    ) {
+        orientationLock.lock()
+        imageOrientationRaw = orientation.rawValue
+        orientationLock.unlock()
+    }
+
+    nonisolated private var currentImageOrientation: CGImagePropertyOrientation {
+        orientationLock.lock()
+        defer { orientationLock.unlock() }
+        return CGImagePropertyOrientation(rawValue: imageOrientationRaw) ?? .right
+    }
+
     // MARK: - Internal (main-actor-only) bookkeeping
 
     private let session = ARSession()
+    /// Calibration renders and raycasts through this session. ARTableCapture
+    /// remains the only owner allowed to run, pause, reset, or delegate it.
+    var sharedSession: ARSession { session }
     private var planeLockPolicy: PlaneLockPolicy?
     /// Whether the running configuration currently requests horizontal
     /// plane detection — tracked locally because `ARWorldTrackingConfiguration`
@@ -84,11 +111,23 @@ final class ARTableCapture: NSObject {
     /// any `session.run(_:)` re-configuration (see that method's doc — a
     /// config re-run can silently reset the torch to off).
     private var pendingTorchState: Bool?
+    private var tableOriginAnchorID: UUID?
+    private var tableOriginTransform: simd_float4x4?
+    private var tableOriginExtent: SIMD2<Float>?
+    private var tableCalibration: WorldTableCalibration?
+    private var mappingIsSaveable = false
+    private var restoringWorldMap = false
+    private var relocalizationTimeoutTask: Task<Void, Never>?
+    private var worldMapSaveTask: Task<Void, Never>?
 
     /// True once `ARWorldTrackingConfiguration` reports support — false on
     /// the Simulator (and any device lacking the needed sensors), which is
     /// exactly the case `start()` maps to `captureStage = .unavailable`.
     static var isSupported: Bool { ARWorldTrackingConfiguration.isSupported }
+    nonisolated static var supportsSceneDepth: Bool {
+        ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth)
+            || ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
+    }
 
     override init() {
         super.init()
@@ -108,16 +147,52 @@ final class ARTableCapture: NSObject {
         }
         captureStage = .starting
         lockedPlaneTransform = nil
+        lockedPlaneIdentifier = nil
         lockedPlaneExtent = nil
+        restoredTableCalibration = nil
+        tableCalibration = nil
         planeLockPolicy = nil
         planeDetectionRequested = true
-        session.run(Self.makeConfiguration(planeDetection: true))
+        mappingIsSaveable = false
+
+        if let restored = ARWorldMapStore.load() {
+            restoringWorldMap = true
+            restoredTableCalibration = restored.calibration
+            tableCalibration = restored.calibration
+            lockedPlaneTransform = restored.calibration.tableToWorld
+            lockedPlaneIdentifier = nil
+            lockedPlaneExtent = Double(
+                (restored.calibration.extent.x
+                    + restored.calibration.extent.y) * 0.5
+            )
+            tableOriginExtent = restored.calibration.extent
+            tableOriginTransform = restored.calibration.tableToWorld
+            tableOriginAnchorID = restored.worldMap.anchors.first {
+                $0.name == ARWorldMapStore.tableOriginAnchorName
+            }?.identifier
+            planeDetectionRequested = false
+            stageBeforeRelocalizing = .tableLocked
+            captureStage = .relocalizing
+            let configuration = Self.makeConfiguration(
+                planeDetection: false,
+                initialWorldMap: restored.worldMap
+            )
+            session.run(
+                configuration,
+                options: [.resetTracking, .removeExistingAnchors]
+            )
+            scheduleRelocalizationTimeout()
+        } else {
+            restoringWorldMap = false
+            session.run(Self.makeConfiguration(planeDetection: true))
+        }
     }
 
     /// Pauses the underlying `ARSession` (e.g. app backgrounding). Cheap
     /// and reversible — `resume()` continues the same world-tracking
     /// session rather than re-finding the table from scratch.
     func pause() {
+        saveWorldMapIfEligible()
         session.pause()
     }
 
@@ -133,26 +208,21 @@ final class ARTableCapture: NSObject {
         }
     }
 
-    /// Advances to `.sweeping` — the guided post-lock sweep (Lane B chunk
-    /// H): `CoachLiveSession.startARLoop` calls this immediately on table
-    /// lock (instead of going straight to `.tracking`), inviting the user
-    /// to pan across the table once before propping the phone. Also the
-    /// entry point for the "Rescan table" affordance
-    /// (`CoachLiveSession.rescanTable()`), which calls this again from
-    /// `.tracking` mid-session — no tracker reset, the sweep card just
-    /// reappears. No-op unless the table is already locked (or already
-    /// mid-sweep/tracking).
-    func enterSweeping() {
-        guard captureStage == .tableLocked || captureStage == .tracking else { return }
-        captureStage = .sweeping
+    /// Re-applies the current world-tracking configuration without resetting
+    /// its map. Coach Live calls this once when a LiDAR-capable device stops
+    /// supplying depth, before explicitly degrading to 2D counts.
+    func retryDepthSemantics() {
+        guard Self.isSupported, Self.supportsSceneDepth else { return }
+        session.run(Self.makeConfiguration(planeDetection: planeDetectionRequested))
+        if let pendingTorchState {
+            setTorch(pendingTorchState)
+        }
     }
 
-    /// Advances to `.tracking` — `CoachLiveSession.startARLoop` calls this
-    /// once the guided sweep ends (Lane B chunk H: either the user's "Done"
-    /// tap or the elapsed+coverage exit condition) and steady-state
-    /// ingestion begins. No-op unless the table is already locked.
+    /// Advances to `.tracking` immediately after table lock. Recounts are
+    /// one-shot inference requests and never change the capture lifecycle.
     func enterTracking() {
-        guard captureStage == .tableLocked || captureStage == .sweeping else { return }
+        guard captureStage == .tableLocked else { return }
         captureStage = .tracking
     }
 
@@ -173,14 +243,101 @@ final class ARTableCapture: NSObject {
         CameraTorch.set(on)
     }
 
-    private static func makeConfiguration(planeDetection: Bool) -> ARWorldTrackingConfiguration {
+    /// One production AR raycast for manual pond-center correction. The
+    /// point uses ARFrame's normalized image coordinates.
+    func raycastWorldPoint(
+        atNormalizedImagePoint point: CGPoint
+    ) -> SIMD3<Float>? {
+        guard let query = session.currentFrame?.raycastQuery(
+            from: point,
+            allowing: .existingPlaneGeometry,
+            alignment: .horizontal
+        ), let result = session.raycast(query).first else {
+            return nil
+        }
+        return SIMD3<Float>(
+            result.worldTransform.columns.3.x,
+            result.worldTransform.columns.3.y,
+            result.worldTransform.columns.3.z
+        )
+    }
+
+    /// Keeps exactly one named AR anchor for the fitted table origin. Tile
+    /// tracks remain ordinary census data and are never promoted to ARAnchor.
+    func updateTableCalibration(_ calibration: WorldTableCalibration) {
+        let calibrationChanged = tableCalibration != calibration
+        let originAlreadyMatches = tableOriginTransform.map {
+            Self.transformsAreNear($0, calibration.tableToWorld)
+        } == true && tableOriginExtent.map {
+            simd_length($0 - calibration.extent) < 0.001
+        } == true
+        tableCalibration = calibration
+        updateTableOrigin(
+            transform: calibration.tableToWorld,
+            extent: calibration.extent
+        )
+        if calibrationChanged && originAlreadyMatches {
+            scheduleWorldMapSave()
+        }
+    }
+
+    func updateTableOrigin(
+        transform: simd_float4x4,
+        extent: SIMD2<Float>
+    ) {
+        if let current = tableOriginTransform,
+           Self.transformsAreNear(current, transform),
+           simd_length(
+               tableOriginExtent.map { $0 - extent }
+                   ?? SIMD2<Float>(repeating: 1)
+           ) < 0.001 {
+            return
+        }
+        if let tableOriginAnchorID,
+           let existing = session.currentFrame?.anchors.first(where: {
+               $0.identifier == tableOriginAnchorID
+           }) {
+            session.remove(anchor: existing)
+        }
+        let anchor = ARAnchor(
+            name: ARWorldMapStore.tableOriginAnchorName,
+            transform: transform
+        )
+        session.add(anchor: anchor)
+        tableOriginAnchorID = anchor.identifier
+        tableOriginTransform = transform
+        tableOriginExtent = extent
+        if tableCalibration != nil {
+            scheduleWorldMapSave()
+        }
+    }
+
+    /// Recalibration supersedes any previously archived coordinate frame.
+    func invalidatePersistedCalibration() {
+        ARWorldMapStore.discard()
+        tableCalibration = nil
+        worldMapSaveTask?.cancel()
+        worldMapSaveTask = nil
+    }
+
+    private static func makeConfiguration(
+        planeDetection: Bool,
+        initialWorldMap: ARWorldMap? = nil
+    ) -> ARWorldTrackingConfiguration {
         let configuration = ARWorldTrackingConfiguration()
         configuration.planeDetection = planeDetection ? [.horizontal] : []
         configuration.worldAlignment = .gravity
         configuration.environmentTexturing = .none
-        // No `frameSemantics` opt-in (default `[]`) — this capture path
-        // needs neither scene depth nor person segmentation, and both cost
-        // real GPU/thermal budget.
+        configuration.initialWorldMap = initialWorldMap
+        // Depth is opt-in and LiDAR-only. Prefer ARKit's temporally smoothed
+        // estimate, then fall back to per-frame scene depth. This helper is
+        // reused for start, post-lock reconfiguration, and resume so the
+        // selected semantic cannot be accidentally dropped.
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            configuration.frameSemantics.insert(.smoothedSceneDepth)
+        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics.insert(.sceneDepth)
+        }
         return configuration
     }
 
@@ -193,7 +350,37 @@ final class ARTableCapture: NSObject {
     /// locks.
     private func processFrame(cameraTransform: simd_float4x4,
                               candidates: [PlaneLockPolicy.Candidate],
+                              restoredOrigin: ARAnchor?,
+                              trackingIsNormal: Bool,
+                              mappingIsSaveable: Bool,
                               timestamp: TimeInterval) {
+        self.mappingIsSaveable = mappingIsSaveable
+        if restoringWorldMap {
+            guard trackingIsNormal, let restoredOrigin,
+                  var calibration = restoredTableCalibration else {
+                return
+            }
+            calibration.tableToWorld = restoredOrigin.transform
+            calibration.source = .restoredWorldMap
+            restoredTableCalibration = calibration
+            tableCalibration = calibration
+            tableOriginAnchorID = restoredOrigin.identifier
+            tableOriginTransform = restoredOrigin.transform
+            tableOriginExtent = calibration.extent
+            lockedPlaneTransform = restoredOrigin.transform
+            lockedPlaneExtent = Double(
+                (calibration.extent.x + calibration.extent.y) * 0.5
+            )
+            restoringWorldMap = false
+            relocalizationTimeoutTask?.cancel()
+            relocalizationTimeoutTask = nil
+            stageBeforeRelocalizing = nil
+            captureStage = .tableLocked
+            Self.logger.notice(
+                "world map relocalized with named table origin"
+            )
+            return
+        }
         if captureStage == .starting {
             captureStage = .findingTable
         }
@@ -209,6 +396,7 @@ final class ARTableCapture: NSObject {
 
         guard let locked = planeLockPolicy?.lockedPlane else { return }
         lockedPlaneTransform = locked.transform
+        lockedPlaneIdentifier = locked.id
         lockedPlaneExtent = locked.extent
         captureStage = .tableLocked
         Self.logger.notice("table plane locked (id: \(locked.id.uuidString, privacy: .public))")
@@ -218,6 +406,93 @@ final class ARTableCapture: NSObject {
         session.run(Self.makeConfiguration(planeDetection: false))
         if let pendingTorchState {
             setTorch(pendingTorchState)
+        }
+    }
+
+    private func scheduleRelocalizationTimeout() {
+        relocalizationTimeoutTask?.cancel()
+        relocalizationTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard !Task.isCancelled,
+                  let self,
+                  self.restoringWorldMap,
+                  self.captureStage == .relocalizing else { return }
+            Self.logger.notice("saved world map did not relocalize in 8s; starting fresh")
+            ARWorldMapStore.discard()
+            self.beginFreshTableLock()
+        }
+    }
+
+    private func beginFreshTableLock() {
+        restoringWorldMap = false
+        relocalizationTimeoutTask?.cancel()
+        relocalizationTimeoutTask = nil
+        captureStage = .starting
+        stageBeforeRelocalizing = nil
+        lockedPlaneTransform = nil
+        lockedPlaneIdentifier = nil
+        lockedPlaneExtent = nil
+        restoredTableCalibration = nil
+        tableOriginAnchorID = nil
+        tableOriginTransform = nil
+        tableOriginExtent = nil
+        tableCalibration = nil
+        planeLockPolicy = nil
+        planeDetectionRequested = true
+        mappingIsSaveable = false
+        session.run(
+            Self.makeConfiguration(planeDetection: true),
+            options: [.resetTracking, .removeExistingAnchors]
+        )
+    }
+
+    private func scheduleWorldMapSave() {
+        worldMapSaveTask?.cancel()
+        worldMapSaveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            self?.saveWorldMapIfEligible()
+        }
+    }
+
+    private func saveWorldMapIfEligible() {
+        guard mappingIsSaveable, let calibration = tableCalibration else {
+            return
+        }
+        session.getCurrentWorldMap { worldMap, error in
+            guard let worldMap, error == nil else {
+                Self.logger.error("unable to capture ARWorldMap")
+                return
+            }
+            guard let origin = worldMap.anchors.first(where: {
+                $0.name == ARWorldMapStore.tableOriginAnchorName
+            }) else {
+                Self.logger.error(
+                    "refusing to save world map without named table origin"
+                )
+                return
+            }
+            var anchoredCalibration = calibration
+            anchoredCalibration.tableToWorld = origin.transform
+            do {
+                try ARWorldMapStore.save(
+                    worldMap: worldMap,
+                    calibration: anchoredCalibration
+                )
+            } catch {
+                Self.logger.error(
+                    "unable to archive ARWorldMap: \(String(describing: error), privacy: .public)"
+                )
+            }
+        }
+    }
+
+    private static func transformsAreNear(
+        _ lhs: simd_float4x4,
+        _ rhs: simd_float4x4
+    ) -> Bool {
+        (0 ..< 4).allSatisfy {
+            simd_length(lhs[$0] - rhs[$0]) < 0.001
         }
     }
 
@@ -262,11 +537,15 @@ extension ARTableCapture: ARSessionDelegate {
     /// bookkeeping over to the main actor as plain `Sendable` values.
     nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
         let camera = frame.camera
+        let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth
         let tableFrame = ARTableFrame(pixelBuffer: frame.capturedImage,
                                       cameraTransform: camera.transform,
                                       intrinsics: camera.intrinsics,
                                       imageResolution: camera.imageResolution,
+                                      imageOrientation: currentImageOrientation,
                                       lightLux: frame.lightEstimate.map { Double($0.ambientIntensity) },
+                                      depthMap: sceneDepth?.depthMap,
+                                      depthConfidence: sceneDepth?.confidenceMap,
                                       timestamp: frame.timestamp)
         frameLock.lock()
         _latestFrame = tableFrame
@@ -274,24 +553,47 @@ extension ARTableCapture: ARSessionDelegate {
 
         let cameraTransform = camera.transform
         let timestamp = frame.timestamp
+        let mappingIsSaveable = frame.worldMappingStatus == .extending
+            || frame.worldMappingStatus == .mapped
+        let restoredOrigin = frame.anchors.first {
+            $0.name == ARWorldMapStore.tableOriginAnchorName
+        }
+        let trackingIsNormal: Bool
+        if case .normal = frame.camera.trackingState {
+            trackingIsNormal = true
+        } else {
+            trackingIsNormal = false
+        }
         let candidates = frame.anchors.compactMap { anchor -> PlaneLockPolicy.Candidate? in
             guard let plane = anchor as? ARPlaneAnchor, plane.alignment == .horizontal else { return nil }
             return Self.candidate(for: plane)
         }
         Task { @MainActor [weak self] in
-            self?.processFrame(cameraTransform: cameraTransform, candidates: candidates, timestamp: timestamp)
+            self?.processFrame(
+                cameraTransform: cameraTransform,
+                candidates: candidates,
+                restoredOrigin: restoredOrigin,
+                trackingIsNormal: trackingIsNormal,
+                mappingIsSaveable: mappingIsSaveable,
+                timestamp: timestamp
+            )
         }
     }
 
     nonisolated func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
-        let isRelocalizing: Bool
-        if case .limited(.relocalizing) = camera.trackingState {
-            isRelocalizing = true
-        } else {
-            isRelocalizing = false
-        }
+        let trackingState = camera.trackingState
         Task { @MainActor [weak self] in
-            self?.setRelocalizing(isRelocalizing)
+            guard let self else { return }
+            switch trackingState {
+            case .normal:
+                if !self.restoringWorldMap {
+                    self.setRelocalizing(false)
+                }
+            case .limited(.relocalizing):
+                self.setRelocalizing(true)
+            default:
+                break
+            }
         }
     }
 
@@ -302,9 +604,8 @@ extension ARTableCapture: ARSessionDelegate {
     }
 
     nonisolated func sessionInterruptionEnded(_ session: ARSession) {
-        Task { @MainActor [weak self] in
-            self?.setRelocalizing(false)
-        }
+        // Wait for cameraDidChangeTrackingState(.normal); leaving the detour
+        // before ARKit trusts the pose would make visibility misses unsafe.
     }
 
     nonisolated func session(_ session: ARSession, didFailWithError error: Error) {

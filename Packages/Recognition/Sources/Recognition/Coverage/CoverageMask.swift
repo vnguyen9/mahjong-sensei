@@ -4,7 +4,7 @@ import simd
 /// A semantic region of the calibrated table (§4.3). Ownership decisions only
 /// ever consult which zone(s) covered a track's footprint — never a tile's
 /// classified face (§10.1: "ownership is geometric").
-public enum SemanticZoneID: Sendable, Hashable, CaseIterable {
+public enum SemanticZoneID: String, Sendable, Hashable, CaseIterable, Codable {
     case mineHand
     case mineMeld
     case tablePond

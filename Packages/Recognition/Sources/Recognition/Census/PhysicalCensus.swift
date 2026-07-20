@@ -16,7 +16,7 @@ public struct CensusConfig: Sendable {
     public var tentativeWindow: Int = 5
 
     // MARK: temporarilyMissing → retired (§9.2)
-    public var retireMissCount: Int = 3
+    public var retireMissCount: Int = 5
     public var retireMinDuration: TimeInterval = 0.8
 
     // MARK: Association gate + cost weights (§9.1)
@@ -27,6 +27,10 @@ public struct CensusConfig: Sendable {
     public var footprintCostWeight: Float = 0.2
     public var imageCostWeight: Float = 0.2
     public var faceCostWeight: Float = 0.2
+
+    // MARK: LiDAR world-space association
+    public var worldMatchRadius: Float = 0.018
+    public var worldPositionEMAContribution: Float = 0.25
 
     // MARK: Face fusion (§9.3)
     public var minFaceEvidence: Int = 2
@@ -42,6 +46,15 @@ public struct CensusConfig: Sendable {
     public init() {}
 }
 
+public struct CensusDiagnostics: Sendable, Equatable {
+    public var births: Int = 0
+    public var matches: Int = 0
+    public var qualifiedMisses: Int = 0
+    public var retirements: Int = 0
+
+    public init() {}
+}
+
 /// The facade over the whole physical census pipeline: association (§9.1) →
 /// lifecycle (§9.2) → face fusion (§9.3) → ownership (§10.1) → conservation
 /// (§10.3) → snapshot (§10.2). Platform-pure: consumes only
@@ -51,6 +64,7 @@ public struct CensusConfig: Sendable {
 /// serially.
 public final class PhysicalCensus {
     public var config: CensusConfig
+    public private(set) var diagnostics = CensusDiagnostics()
 
     private(set) var tracks: [PhysicalTrack] = []
     private var nextTrackValue = 0
@@ -61,38 +75,151 @@ public final class PhysicalCensus {
         self.config = config
     }
 
+    public var anchors: [CensusAnchor] {
+        tracks.compactMap { track in
+            track.worldPosition.map { CensusAnchor(id: track.id, worldPosition: $0) }
+        }.sorted { $0.id < $1.id }
+    }
+
     /// Feeds one frame's outcome into the census. Per §8's outcome table,
     /// only `.success` may add hits or (inside its own exact coverage)
     /// misses; `.skipped`/`.failed` touch nothing at all — not even a track's
     /// staleness — because they mean "we didn't look," never "we looked and
     /// it was gone."
-    public func ingest(_ outcome: ObservationOutcome, zones: [SemanticZoneID: [SIMD2<Float>]],
+    public func ingest(_ outcome: ObservationOutcome,
+                       zones: [SemanticZoneID: [SIMD2<Float>]],
+                       context: CensusFrameContext? = nil,
                        at time: TimeInterval) {
         guard case .success(let batch) = outcome else { return }
 
         let association = TrackAssociator.associate(tracks: tracks, observations: batch.observations, config: config)
+        diagnostics.matches += association.matches.count
 
         for match in association.matches {
             applyHit(trackIndex: match.trackIndex, observation: batch.observations[match.observationIndex], at: time)
         }
         for trackIndex in association.unmatchedTrackIndices {
-            applyMiss(trackIndex: trackIndex, coverage: batch.coverage, at: time)
+            let before = tracks[trackIndex].state
+            if applyMiss(trackIndex: trackIndex, coverage: batch.coverage, context: context, at: time) {
+                diagnostics.qualifiedMisses += 1
+            }
+            if before != .retired, tracks[trackIndex].state == .retired {
+                diagnostics.retirements += 1
+            }
         }
         for observationIndex in association.unmatchedObservationIndices {
-            birth(from: batch.observations[observationIndex], at: time)
+            if birth(from: batch.observations[observationIndex], at: time) {
+                diagnostics.births += 1
+            }
+        }
+
+        if let context {
+            for i in tracks.indices {
+                guard let world = tracks[i].worldPosition else { continue }
+                tracks[i].anchorCenter = Self.tablePoint(
+                    for: world,
+                    worldToTable: context.worldToTable
+                )
+            }
         }
 
         // Ownership is re-derived for every live track, every ingest — purely
         // geometric, never touched by face fusion (§10.1).
         for i in tracks.indices {
-            tracks[i].bucket = OwnershipResolver.resolve(center: tracks[i].anchorCenter,
-                                                          footprintRadius: tracks[i].footprintRadius,
-                                                          zones: zones)
+            let zone = tracks[i].semanticZoneOverride
+                ?? OwnershipResolver.semanticZone(
+                    center: tracks[i].anchorCenter,
+                    footprintRadius: tracks[i].footprintRadius,
+                    zones: zones
+                )
+            tracks[i].semanticZone = zone
+            tracks[i].bucket = OwnershipResolver.bucket(for: zone)
         }
 
         recordCoverage(batch.coverage, at: time)
 
         tracks.removeAll { $0.state == .retired || TrackLifecycle.tentativeWindowExpired($0, config: config) }
+    }
+
+    public func resetTiles() {
+        tracks.removeAll()
+        nextTrackValue = 0
+        zoneLastObservedAt.removeAll()
+        zoneObservedArea.removeAll()
+        diagnostics = CensusDiagnostics()
+    }
+
+    public func removeTrack(id: CensusTrackID) {
+        tracks.removeAll { $0.id == id }
+    }
+
+    /// Creates a deterministic, user-confirmed census correction. This is
+    /// used by the histogram editor while the census is authoritative; it
+    /// must not manufacture a parallel legacy-track count.
+    @discardableResult
+    public func insertConfirmedTrack(
+        face: TileFace,
+        semanticZone: SemanticZoneID,
+        tablePoint: SIMD2<Float>,
+        worldPosition: SIMD3<Float>? = nil,
+        at time: TimeInterval
+    ) -> CensusTrackID {
+        let id = CensusTrackID(nextTrackValue)
+        nextTrackValue += 1
+        var track = PhysicalTrack(
+            id: id,
+            anchorCenter: tablePoint,
+            worldPosition: worldPosition,
+            footprintRadius: 0.012,
+            imageBox: TileBoundingBox(
+                x: Double(tablePoint.x),
+                y: Double(tablePoint.y),
+                width: 0,
+                height: 0
+            ),
+            at: time
+        )
+        track.state = .confirmed
+        track.recentOpportunities = Array(
+            repeating: true,
+            count: config.tentativeConfirmHits
+        )
+        track.semanticZoneOverride = semanticZone
+        track.semanticZone = semanticZone
+        track.bucket = OwnershipResolver.bucket(for: semanticZone)
+        FaceFusion.pin(face, on: &track)
+        tracks.append(track)
+        diagnostics.births += 1
+        return id
+    }
+
+    public func pinFace(_ face: TileFace, trackID: CensusTrackID) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { return }
+        FaceFusion.pin(face, on: &tracks[index])
+    }
+
+    public func overrideSemanticZone(_ zone: SemanticZoneID, trackID: CensusTrackID) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { return }
+        tracks[index].semanticZoneOverride = zone
+        tracks[index].semanticZone = zone
+        tracks[index].bucket = OwnershipResolver.bucket(for: zone)
+    }
+
+    public func reassignZones(_ zones: [SemanticZoneID: [SIMD2<Float>]],
+                              worldToTable: simd_float4x4) {
+        for i in tracks.indices {
+            if let world = tracks[i].worldPosition {
+                tracks[i].anchorCenter = Self.tablePoint(for: world, worldToTable: worldToTable)
+            }
+            let zone = tracks[i].semanticZoneOverride
+                ?? OwnershipResolver.semanticZone(
+                    center: tracks[i].anchorCenter,
+                    footprintRadius: tracks[i].footprintRadius,
+                    zones: zones
+                )
+            tracks[i].semanticZone = zone
+            tracks[i].bucket = OwnershipResolver.bucket(for: zone)
+        }
     }
 
     /// Pins a user-corrected face onto the live track nearest
@@ -114,7 +241,12 @@ public final class PhysicalCensus {
     /// stays purely geometric (§10.1) even while conservation downgrades what
     /// a given snapshot reports.
     public func snapshot(at time: TimeInterval) -> CensusSnapshot {
-        let confirmed = tracks.filter { $0.state == .confirmed }
+        // Once confirmed, a tile remains counted while stale or temporarily
+        // missing. Counts change only at confirmed birth or qualified
+        // visible-empty retirement—not merely because the camera looked away.
+        let confirmed = tracks.filter {
+            $0.state == .confirmed || $0.state == .temporarilyMissing || $0.state == .stale
+        }
 
         struct Placed { var track: PhysicalTrack; var tile: Tile }
         var placedMine: [Placed] = []
@@ -181,15 +313,40 @@ public final class PhysicalCensus {
 
         unresolved.sort { $0.trackID < $1.trackID } // deterministic output order
 
+        let trackSnapshots = tracks.sorted { $0.id < $1.id }.map {
+            CensusTrackSnapshot(
+                id: $0.id,
+                worldPosition: $0.worldPosition,
+                tablePoint: $0.anchorCenter,
+                face: $0.publishedFace,
+                faceConfidence: $0.publishedFaceMargin,
+                semanticZone: $0.semanticZone,
+                lifecycle: $0.state,
+                firstSeen: $0.createdAt,
+                lastSeen: $0.lastHitAt
+            )
+        }
+
         return CensusSnapshot(mine: mine, table: table, unresolved: unresolved,
                               zoneFreshness: zoneFreshness, coverage: coverage,
                               confidence: Self.confidence(resolved: mine.total + table.total, unresolved: unresolved.count),
-                              generatedAt: time)
+                              generatedAt: time, tracks: trackSnapshots)
     }
 
     // MARK: - Ingest helpers
 
     private func applyHit(trackIndex: Int, observation: TileObservation, at time: TimeInterval) {
+        if let observedWorld = observation.worldPosition {
+            if let oldWorld = tracks[trackIndex].worldPosition {
+                let contribution = max(0, min(1, config.worldPositionEMAContribution))
+                tracks[trackIndex].worldPosition = oldWorld * (1 - contribution) + observedWorld * contribution
+            } else {
+                tracks[trackIndex].worldPosition = observedWorld
+            }
+        }
+        if let measuredDepth = observation.measuredSurfaceDepth {
+            tracks[trackIndex].measuredSurfaceDepth = measuredDepth
+        }
         if let center = observation.footprintCenter {
             tracks[trackIndex].anchorCenter = center
             if let radius = observation.footprintRadius { tracks[trackIndex].footprintRadius = radius }
@@ -200,20 +357,28 @@ public final class PhysicalCensus {
                           into: &tracks[trackIndex], config: config)
     }
 
-    private func applyMiss(trackIndex: Int, coverage: CoverageMask, at time: TimeInterval) {
+    @discardableResult
+    private func applyMiss(trackIndex: Int, coverage: CoverageMask,
+                           context: CensusFrameContext?, at time: TimeInterval) -> Bool {
         // §9.2/§5.2: only a *qualified* miss — the track's own footprint
         // actually inside this batch's observed coverage — is an
         // opportunity. `CoverageMask.covers` already tests each polygon
         // independently; no AABB union can bridge a gap here.
-        if coverage.covers(tracks[trackIndex].anchorCenter) {
+        let isQualified = context.map {
+            $0.visibleTrackIDs.contains(tracks[trackIndex].id)
+        } ?? coverage.covers(tracks[trackIndex].anchorCenter)
+        if isQualified {
             TrackLifecycle.recordQualifiedMiss(on: &tracks[trackIndex], at: time, config: config)
+            return true
         } else {
             TrackLifecycle.recordCoverageLoss(on: &tracks[trackIndex])
+            return false
         }
     }
 
-    private func birth(from observation: TileObservation, at time: TimeInterval) {
-        guard observation.confidence >= config.birthConfidenceThreshold else { return }
+    @discardableResult
+    private func birth(from observation: TileObservation, at time: TimeInterval) -> Bool {
+        guard observation.confidence >= config.birthConfidenceThreshold else { return false }
         // Degenerate fallback for a not-yet-projected observation: use the
         // image-box center so a track still exists to accumulate evidence.
         // Real callers project `footprintCenter` before `ingest` (§5.1);
@@ -224,12 +389,16 @@ public final class PhysicalCensus {
 
         let id = CensusTrackID(nextTrackValue)
         nextTrackValue += 1
-        var track = PhysicalTrack(id: id, anchorCenter: center, footprintRadius: radius,
+        var track = PhysicalTrack(id: id, anchorCenter: center,
+                                  worldPosition: observation.worldPosition,
+                                  measuredSurfaceDepth: observation.measuredSurfaceDepth,
+                                  footprintRadius: radius,
                                   imageBox: observation.box, at: time)
         FaceFusion.absorb(hypothesis: observation.faceHypothesis, observationConfidence: observation.confidence,
                           into: &track, config: config)
         TrackLifecycle.recordHit(on: &track, at: time, config: config) // first sighting = first opportunity
         tracks.append(track)
+        return true
     }
 
     private func recordCoverage(_ coverage: CoverageMask, at time: TimeInterval) {
@@ -241,8 +410,8 @@ public final class PhysicalCensus {
 
     /// Shoelace formula. An approximation of true zone coverage fraction
     /// (sums observed-crop area without clipping against the calibrated
-    /// zone polygon or de-duplicating overlaps across frames) — good enough
-    /// for a shadow-mode debug HUD signal, not a release-gate metric.
+    /// zone polygon or de-duplicating overlaps across frames). This is a
+    /// diagnostic signal only, never a count or retirement input.
     private static func polygonArea(_ vertices: [SIMD2<Float>]) -> Float {
         guard vertices.count >= 3 else { return 0 }
         var sum: Float = 0
@@ -261,5 +430,11 @@ public final class PhysicalCensus {
         if ratio >= 0.9 { return .high }
         if ratio >= 0.6 { return .medium }
         return .low
+    }
+
+    private static func tablePoint(for world: SIMD3<Float>,
+                                   worldToTable: simd_float4x4) -> SIMD2<Float> {
+        let local = worldToTable * SIMD4<Float>(world, 1)
+        return SIMD2<Float>(local.x, local.z)
     }
 }

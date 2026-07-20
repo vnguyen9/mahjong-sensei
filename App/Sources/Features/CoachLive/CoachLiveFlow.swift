@@ -8,7 +8,6 @@ import MahjongCore
 enum CoachLivePrefs {
     static let blurKey = "coachLiveBlursFeed"
     static let correctionHintKey = "coachLiveHasSeenCorrectionHint"
-    static let pluggedInHintKey = "coachLiveHasSeenPluggedInHint"
     static let arPrimerKey = "coachLiveHasSeenARPrimer"
 
     /// Unset → true (blur on) — privacy default.
@@ -28,13 +27,6 @@ enum CoachLivePrefs {
     static var hasSeenCorrectionHint: Bool {
         get { UserDefaults.standard.bool(forKey: correctionHintKey) }
         set { UserDefaults.standard.set(newValue, forKey: correctionHintKey) }
-    }
-    /// Unset → false (show the guided-sweep card's "keep it plugged in"
-    /// caption once, ever) — Lane B chunk H item 3. `StartupStatusOverlay`
-    /// marks this seen the instant it shows the caption.
-    static var hasSeenPluggedInHint: Bool {
-        get { UserDefaults.standard.bool(forKey: pluggedInHintKey) }
-        set { UserDefaults.standard.set(newValue, forKey: pluggedInHintKey) }
     }
 }
 
@@ -105,19 +97,28 @@ struct CoachLiveFlowView: View {
                     onCancel: onExit)
                 .transition(.opacity)
             case .calibration:
-                ARCalibrationView(
-                    mySeatWind: session.seatWind,
-                    onComplete: { geometry in
-                        session.calibratedTableGeometry = geometry
-                        session.begin(roundWind: session.roundWind, seatWind: session.seatWind)
-                        withAnimation(.easeInOut(duration: 0.3)) { flowState = .live }
-                    },
-                    onCancel: {
-                        // Back from the first mark → return to the setup card.
-                        withAnimation(.easeInOut(duration: 0.3)) { flowState = .setup }
-                    })
-                .ignoresSafeArea()
-                .transition(.opacity)
+                if let capture = session.arCapture {
+                    ARCalibrationView(
+                        capture: capture,
+                        mySeatWind: session.seatWind,
+                        onComplete: { calibration in
+                            session.finishARCalibration(calibration)
+                            session.begin(roundWind: session.roundWind, seatWind: session.seatWind)
+                            withAnimation(.easeInOut(duration: 0.3)) { flowState = .live }
+                        },
+                        onCancel: {
+                            // Back from the first mark → return to the setup card.
+                            withAnimation(.easeInOut(duration: 0.3)) { flowState = .setup }
+                        })
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+                } else {
+                    ContentUnavailableView(
+                        "AR calibration unavailable",
+                        systemImage: "arkit",
+                        description: Text("Coach Live needs an ARKit-capable device.")
+                    )
+                }
             case .live:
                 CoachLiveView(session: session, initialTab: debugInitialTab, initialSheet: debugSheet,
                              onExit: onExit, onScoreHandoff: onScoreHandoff)

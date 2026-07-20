@@ -35,11 +35,20 @@ struct LiveGeometryDebugOverlay: View {
 
     private func draw(_ context: inout GraphicsContext) {
         guard previewBounds.width > 0, previewBounds.height > 0,
-              let geometry = session.calibratedTableGeometry,
               let capture = session.arCapture,
-              let planeTransform = capture.lockedPlaneTransform,
+              let lockedPlaneTransform = capture.lockedPlaneTransform,
               let frame = capture.latestFrame else { return }
 
+        let controller = session.worldCensusController
+        let calibration = controller?.calibration ?? session.worldTableCalibration
+        let planeTransform = calibration?.tableToWorld
+            ?? controller?.tableOrigin.tableToWorld
+            ?? lockedPlaneTransform
+        // Exact calibrated polygons are the only AR census geometry. The
+        // scalar geometry remains solely for the explicit legacy 2D debug
+        // path and is never reconstructed from a fitted square.
+        let geometry = session.calibratedTableGeometry
+            ?? TrackerConfig.TableGeometry()
         let extent = geometry.extent
         guard extent > 0 else { return }
 
@@ -49,18 +58,30 @@ struct LiveGeometryDebugOverlay: View {
             imageResolution: SIMD2<Float>(Float(frame.imageResolution.width),
                                           Float(frame.imageResolution.height)),
             planeTransform: planeTransform)
-        let orientedSIMD = SIMD2<Double>(Double(frame.orientedImageSize.width),
-                                         Double(frame.orientedImageSize.height))
         let orientedCG = frame.orientedImageSize
 
         /// Normalized table point → screen point (nil if behind camera).
         func screen(_ n: SIMD2<Double>) -> CGPoint? {
             let local = SIMD2<Double>((n.x - 0.5) * extent, (n.y - 0.5) * extent)
-            guard let uv = projection.normalizedOrientedPoint(ofTablePoint: local,
-                                                              orientedImageSize: orientedSIMD) else { return nil }
+            guard let uv = projection.normalizedOrientedPoint(
+                ofTablePoint: local,
+                imageTransform: frame.imageTransform
+            ) else { return nil }
             return AspectFillMapping.previewRect(
                 ofNormalized: TileBoundingBox(x: uv.x, y: uv.y, width: 0, height: 0),
                 previewBounds: previewBounds, orientedImageSize: orientedCG).origin
+        }
+
+        func screenLocal(_ local: SIMD2<Float>) -> CGPoint? {
+            guard let uv = projection.normalizedOrientedPoint(
+                ofTablePoint: SIMD2(Double(local.x), Double(local.y)),
+                imageTransform: frame.imageTransform
+            ) else { return nil }
+            return AspectFillMapping.previewRect(
+                ofNormalized: TileBoundingBox(x: uv.x, y: uv.y, width: 0, height: 0),
+                previewBounds: previewBounds,
+                orientedImageSize: orientedCG
+            ).origin
         }
 
         /// Fill + stroke a closed polygon; skips entirely if any corner is
@@ -76,12 +97,68 @@ struct LiveGeometryDebugOverlay: View {
             context.stroke(path, with: .color(stroke), lineWidth: 2)
         }
 
-        // Hand band (gold), opponent meld bands (amber), pond (jade).
-        for (_, band) in geometry.meldBands {
-            polygon(band.corners, fill: MJColor.amberZone.opacity(0.10), stroke: MJColor.amberZone.opacity(0.8))
+        func localPolygon(_ corners: [SIMD2<Float>], fill: Color, stroke: Color) {
+            let pts = corners.compactMap(screenLocal)
+            guard pts.count == corners.count, pts.count >= 3 else { return }
+            var path = Path()
+            path.move(to: pts[0])
+            for p in pts.dropFirst() { path.addLine(to: p) }
+            path.closeSubpath()
+            context.fill(path, with: .color(fill))
+            context.stroke(path, with: .color(stroke), lineWidth: 2)
         }
-        polygon(pondCorners(geometry.pond), fill: MJColor.jadeAccent.opacity(0.16), stroke: MJColor.jadeAccent.opacity(0.9))
-        polygon(geometry.handBand.corners, fill: MJColor.gold.opacity(0.14), stroke: MJColor.gold.opacity(0.9))
+
+        // Hand band (gold), opponent meld bands (amber), pond (jade).
+        if let calibration {
+            for (zone, corners) in calibration.revealedZonePolygons {
+                let color = zone == .mineMeld ? MJColor.gold : MJColor.amberZone
+                localPolygon(corners, fill: color.opacity(0.10), stroke: color.opacity(0.8))
+            }
+            localPolygon(
+                calibration.pondPolygon,
+                fill: MJColor.jadeAccent.opacity(0.16),
+                stroke: MJColor.jadeAccent.opacity(0.9)
+            )
+            localPolygon(
+                calibration.handPolygon,
+                fill: MJColor.gold.opacity(0.14),
+                stroke: MJColor.gold.opacity(0.9)
+            )
+        } else {
+            for (_, band) in geometry.meldBands {
+                polygon(band.corners, fill: MJColor.amberZone.opacity(0.10), stroke: MJColor.amberZone.opacity(0.8))
+            }
+            polygon(pondCorners(geometry.pond), fill: MJColor.jadeAccent.opacity(0.16), stroke: MJColor.jadeAccent.opacity(0.9))
+            polygon(geometry.handBand.corners, fill: MJColor.gold.opacity(0.14), stroke: MJColor.gold.opacity(0.9))
+        }
+
+        // LiDAR census anchors (cyan): world points are projected fresh from
+        // the current camera pose, so on-device drift is immediately visible
+        // while panning or changing angle.
+        if let census = session.worldCensusController?.snapshot {
+            for track in census.tracks where track.lifecycle == .confirmed {
+                guard let world = track.worldPosition,
+                      let uv = projection.normalizedOrientedPoint(
+                        ofWorldPoint: SIMD3<Double>(
+                            Double(world.x), Double(world.y), Double(world.z)
+                        ),
+                        imageTransform: frame.imageTransform
+                      ) else { continue }
+                let point = AspectFillMapping.previewRect(
+                    ofNormalized: TileBoundingBox(
+                        x: uv.x, y: uv.y, width: 0, height: 0
+                    ),
+                    previewBounds: previewBounds,
+                    orientedImageSize: orientedCG
+                ).origin
+                let anchor = Path(
+                    ellipseIn: CGRect(
+                        x: point.x - 4, y: point.y - 4, width: 8, height: 8
+                    )
+                )
+                context.fill(anchor, with: .color(.cyan.opacity(0.9)))
+            }
+        }
 
         // Seat + wind markers.
         for seat in geometry.seats {

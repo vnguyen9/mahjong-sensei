@@ -1,13 +1,12 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import Recognition
 import simd
 
 /// Stable identity for the five table-space regions
-/// `ROIScheduler.projectedZoneRects` reports — shared between the guided
-/// sweep's coverage tracker and the per-zone staleness/rescan-prompt
-/// tracker (Lane B chunk H, `CoachLiveSession`'s AR loop) so both agree on
-/// what "a zone" is.
+/// `ROIScheduler.projectedZoneRects` reports — shared by explicit recount
+/// requests and the per-zone staleness/rescan-prompt tracker.
 enum TableZoneID: CaseIterable, Hashable {
     case hand, pond, meldLeft, meldRight, meldFar
 
@@ -49,8 +48,7 @@ struct ROIScheduler {
     /// onto this frame at all — see `projectedZoneRects`). The three meld
     /// edges are kept as separate named fields (rather than the flat array
     /// this type shipped with pre-chunk-H) so callers that need to know
-    /// WHICH edge — the guided sweep's coverage tracker and the per-zone
-    /// staleness/rescan-prompt tracker (Lane B chunk H, items 1/2) — can
+    /// WHICH edge — explicit recounts and the per-zone staleness tracker — can
     /// address them individually; `melds` stays as a computed convenience
     /// for `decide`, which never cared which edge, only "is any meld zone
     /// dirty."
@@ -75,9 +73,7 @@ struct ROIScheduler {
         }
 
         /// Every zone that actually projected onto this frame, paired with
-        /// its stable identity (Lane B chunk H) — the guided sweep's
-        /// coverage tracker and the staleness tracker both iterate this so
-        /// they agree on what "a zone" is.
+        /// its stable identity for staleness and explicit recount requests.
         var identified: [(id: TableZoneID, rect: TileBoundingBox)] {
             var out: [(TableZoneID, TileBoundingBox)] = []
             if let hand { out.append((.hand, hand)) }
@@ -122,7 +118,8 @@ struct ROIScheduler {
     /// contract.
     static func projectedZoneRects(geometry: TrackerConfig.TableGeometry,
                                     projection: TableProjection,
-                                    orientedImageSize: CGSize) -> ZoneRects {
+                                    orientedImageSize: CGSize,
+                                    imageTransform: FrameImageTransform? = nil) -> ZoneRects {
         guard geometry.extent > 0 else { return ZoneRects() }
         let extent = geometry.extent
         let orientedSize = SIMD2<Double>(Double(orientedImageSize.width), Double(orientedImageSize.height))
@@ -131,7 +128,16 @@ struct ROIScheduler {
         func rect(_ corners: [SIMD2<Double>]) -> TileBoundingBox? {
             let localCorners = corners.map { SIMD2<Double>(local($0.x), local($0.y)) }
             let projected = localCorners.compactMap {
-                projection.normalizedOrientedPoint(ofTablePoint: $0, orientedImageSize: orientedSize)
+                if let imageTransform {
+                    return projection.normalizedOrientedPoint(
+                        ofTablePoint: $0,
+                        imageTransform: imageTransform
+                    )
+                }
+                return projection.normalizedOrientedPoint(
+                    ofTablePoint: $0,
+                    orientedImageSize: orientedSize
+                )
             }
             guard !projected.isEmpty else { return nil }
             let xs = projected.map(\.x), ys = projected.map(\.y)
@@ -150,6 +156,46 @@ struct ROIScheduler {
         let far = geometry.meldBands[.across].flatMap { rect($0.corners) }
 
         return ZoneRects(hand: hand, pond: pond, meldLeft: left, meldRight: right, meldFar: far)
+    }
+
+    /// Projects the exact polygons captured by guided calibration. This is
+    /// the authoritative AR-mode geometry path; it deliberately does not
+    /// reconstruct square bands from a scalar extent.
+    static func projectedZoneRects(
+        calibration: WorldTableCalibration,
+        projection: TableProjection,
+        imageTransform: FrameImageTransform
+    ) -> ZoneRects {
+        func rect(_ corners: [SIMD2<Float>]) -> TileBoundingBox? {
+            let projected = corners.compactMap {
+                projection.normalizedOrientedPoint(
+                    ofTablePoint: SIMD2(Double($0.x), Double($0.y)),
+                    imageTransform: imageTransform
+                )
+            }
+            guard !projected.isEmpty else { return nil }
+            let xs = projected.map(\.x)
+            let ys = projected.map(\.y)
+            guard let minX = xs.min(), let maxX = xs.max(),
+                  let minY = ys.min(), let maxY = ys.max() else {
+                return nil
+            }
+            return TileBoundingBox(
+                x: minX, y: minY,
+                width: maxX - minX, height: maxY - minY
+            )
+        }
+
+        return ZoneRects(
+            hand: rect(calibration.handPolygon),
+            pond: rect(calibration.pondPolygon),
+            meldLeft: calibration.revealedZonePolygons[.tableRevealedLeft]
+                .flatMap(rect),
+            meldRight: calibration.revealedZonePolygons[.tableRevealedRight]
+                .flatMap(rect),
+            meldFar: calibration.revealedZonePolygons[.tableRevealedFar]
+                .flatMap(rect)
+        )
     }
 
     /// The five zones' TABLE-space centers — fixed, camera-pose-independent
@@ -176,12 +222,35 @@ struct ROIScheduler {
         return out
     }
 
+    static func zoneCenters(
+        calibration: WorldTableCalibration
+    ) -> [TableZoneID: SIMD2<Double>] {
+        func center(_ polygon: [SIMD2<Float>]) -> SIMD2<Double>? {
+            guard !polygon.isEmpty else { return nil }
+            let sum = polygon.reduce(SIMD2<Float>.zero, +)
+            let value = sum / Float(polygon.count)
+            return SIMD2(Double(value.x), Double(value.y))
+        }
+
+        var result: [TableZoneID: SIMD2<Double>] = [:]
+        result[.hand] = center(calibration.handPolygon)
+        result[.pond] = center(calibration.pondPolygon)
+        result[.meldLeft] = calibration.revealedZonePolygons[
+            .tableRevealedLeft
+        ].flatMap(center)
+        result[.meldRight] = calibration.revealedZonePolygons[
+            .tableRevealedRight
+        ].flatMap(center)
+        result[.meldFar] = calibration.revealedZonePolygons[
+            .tableRevealedFar
+        ].flatMap(center)
+        return result
+    }
+
     /// Fraction of `rect`'s own area that falls inside the visible
     /// `[0,1]x[0,1]` oriented-normalized frame — Lane B chunk H's shared
     /// "is this zone actually on screen enough to trust" bar (≥0.6), used
-    /// by both the guided sweep's coverage tracker (item 1) and the
-    /// per-zone staleness tracker (item 2) so "seen" means the same thing
-    /// in both places.
+    /// by the per-zone staleness tracker.
     static func fractionInsideFrame(_ rect: TileBoundingBox) -> Double {
         guard rect.width > 0, rect.height > 0 else { return 0 }
         let minX = max(0, rect.x), minY = max(0, rect.y)
@@ -203,6 +272,7 @@ struct ROIScheduler {
                           justSettled: Bool,
                           orientedImageSize: CGSize,
                           imageResolution: CGSize,
+                          imageOrientation: CGImagePropertyOrientation = .right,
                           at t: TimeInterval) -> InferencePlan {
         let dueForFullFrame = justSettled || lastFullFrameAt == nil || t - lastFullFrameAt! >= fullFrameInterval
         if dueForFullFrame {
@@ -217,7 +287,13 @@ struct ROIScheduler {
         }
 
         func dirty(_ rect: TileBoundingBox) -> Bool {
-            isDirty(rect, motionField: motionField, imageResolution: imageResolution, orientedImageSize: orientedImageSize)
+            isDirty(
+                rect,
+                motionField: motionField,
+                imageResolution: imageResolution,
+                orientedImageSize: orientedImageSize,
+                imageOrientation: imageOrientation
+            )
         }
 
         let handEntry: (String, TileBoundingBox)? = zones.hand.flatMap { dirty($0) ? ("hand", $0) : nil }
@@ -237,7 +313,8 @@ struct ROIScheduler {
 
         let crops = ordered.compactMap { _, rect -> CGRect? in
             let cropRect = ROICropMapper.cropRect(forZoneImageRect: rect, orientedImageSize: orientedImageSize,
-                                                  imageResolution: imageResolution)
+                                                  imageResolution: imageResolution,
+                                                  imageOrientation: imageOrientation)
             return cropRect.width >= 2 && cropRect.height >= 2 ? cropRect : nil
         }
         guard !crops.isEmpty else {
@@ -254,7 +331,8 @@ struct ROIScheduler {
     /// mapped forward via `ROICropMapper.orientedNormalizedRect` before the
     /// AABB test, so the comparison always happens in the same space.
     private func isDirty(_ zoneRect: TileBoundingBox, motionField: MotionField,
-                          imageResolution: CGSize, orientedImageSize: CGSize) -> Bool {
+                          imageResolution: CGSize, orientedImageSize: CGSize,
+                          imageOrientation: CGImagePropertyOrientation) -> Bool {
         guard imageResolution.width > 0, imageResolution.height > 0 else { return false }
         let cols = MotionField.gridWidth, rows = MotionField.gridHeight
         let cellW = imageResolution.width / CGFloat(cols)
@@ -265,7 +343,8 @@ struct ROIScheduler {
                 guard motionField.changed[idx] else { continue }
                 let rawRect = CGRect(x: CGFloat(col) * cellW, y: CGFloat(row) * cellH, width: cellW, height: cellH)
                 let orientedRect = ROICropMapper.orientedNormalizedRect(fromRawRect: rawRect, rawSize: imageResolution,
-                                                                        orientedSize: orientedImageSize)
+                                                                        orientedSize: orientedImageSize,
+                                                                        imageOrientation: imageOrientation)
                 if boxesIntersect(orientedRect, zoneRect) { return true }
             }
         }
