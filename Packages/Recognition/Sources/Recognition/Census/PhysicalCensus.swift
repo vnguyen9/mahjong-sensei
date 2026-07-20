@@ -201,7 +201,12 @@ public final class PhysicalCensus {
     /// stays purely geometric (§10.1) even while conservation downgrades what
     /// a given snapshot reports.
     public func snapshot(at time: TimeInterval) -> CensusSnapshot {
-        let confirmed = tracks.filter { $0.state == .confirmed }
+        // Once confirmed, a tile remains counted while stale or temporarily
+        // missing. Counts change only at confirmed birth or qualified
+        // visible-empty retirement—not merely because the camera looked away.
+        let confirmed = tracks.filter {
+            $0.state == .confirmed || $0.state == .temporarilyMissing || $0.state == .stale
+        }
 
         struct Placed { var track: PhysicalTrack; var tile: Tile }
         var placedMine: [Placed] = []

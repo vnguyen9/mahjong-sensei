@@ -198,6 +198,7 @@ struct CoachLiveView: View {
                 // deliberate tap).
                 HStack(spacing: 18) {
                     Button("Rescan table") { session.rescanTable() }
+                    Button("Recenter pond") { session.beginPondRecenter() }
                     Button("End hand") { session.requestHandEnd() }
                 }
                 .font(MJFont.ui(11, weight: .semibold))

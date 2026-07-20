@@ -1,5 +1,6 @@
 import Foundation
 import QuartzCore
+import MahjongCore
 import Recognition
 import simd
 
@@ -20,10 +21,21 @@ final class WorldCensusController {
     private(set) var revision = 0
     private(set) var worldToTable: simd_float4x4
     private(set) var zones: [SemanticZoneID: [SIMD2<Float>]]
+    private(set) var tableOrigin: TableOriginState
 
-    init(worldToTable: simd_float4x4, tableExtent: SIMD2<Float>) {
-        self.worldToTable = worldToTable
-        self.zones = Self.semanticZones(extent: tableExtent)
+    init(lockedPlaneTransform: simd_float4x4,
+         lockedExtent: Float,
+         cameraPosition: SIMD3<Float>,
+         at time: TimeInterval) {
+        let origin = TableOriginState(
+            lockedPlaneTransform: lockedPlaneTransform,
+            lockedExtent: lockedExtent,
+            cameraPosition: cameraPosition,
+            at: time
+        )
+        self.tableOrigin = origin
+        self.worldToTable = origin.worldToTable
+        self.zones = Self.semanticZones(extent: origin.extent)
     }
 
     var snapshot: CensusSnapshot {
@@ -187,6 +199,48 @@ final class WorldCensusController {
             ),
             at: time
         )
+        let confirmedWorld = census.snapshot(at: time).tracks.compactMap {
+            track -> SIMD3<Float>? in
+            guard track.lifecycle == .confirmed else { return nil }
+            return track.worldPosition
+        }
+        if tableOrigin.updateAutoFit(
+            confirmedWorldPositions: confirmedWorld,
+            at: time
+        ) {
+            updateTableSpace(
+                worldToTable: tableOrigin.worldToTable,
+                extent: tableOrigin.extent
+            )
+        }
+        revision += 1
+    }
+
+    func recenterPond(at worldPosition: SIMD3<Float>) {
+        tableOrigin.recenterPond(at: worldPosition)
+        updateTableSpace(
+            worldToTable: tableOrigin.worldToTable,
+            extent: tableOrigin.extent
+        )
+    }
+
+    func pinFace(_ tile: MahjongCore.Tile, trackID: TrackID) {
+        census.pinFace(.tile(tile), trackID: CensusTrackID(trackID.raw))
+        revision += 1
+    }
+
+    func overrideZone(_ zone: SemanticZoneID, trackID: TrackID) {
+        census.overrideSemanticZone(zone, trackID: CensusTrackID(trackID.raw))
+        revision += 1
+    }
+
+    func remove(trackID: TrackID) {
+        census.removeTrack(id: CensusTrackID(trackID.raw))
+        revision += 1
+    }
+
+    func resetTiles() {
+        census.resetTiles()
         revision += 1
     }
 

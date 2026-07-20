@@ -161,6 +161,12 @@ final class CoachLiveSession: Identifiable {
     /// regression to the ROI path specifically. Never read by
     /// `startLoop`/the mock path.
     var useROIScheduler = true
+    /// Guarded source switch. Keep false through shadow validation; once the
+    /// device gate is approved, setting `coachLive.useWorldCensus` enables
+    /// census-driven AR counts after eight confirmed world tracks exist.
+    var useWorldCensus = UserDefaults.standard.bool(
+        forKey: "coachLive.useWorldCensus"
+    )
 
     /// True once the loop's per-tick `MotionSample.meanLuma` has read
     /// "dark" for `DarkTableDetector`'s sustain window — drives
@@ -243,6 +249,7 @@ final class CoachLiveSession: Identifiable {
     /// geometry change post-lock (re-derive zone rects / force a recount),
     /// which is out of scope here.
     var showARCalibration = false
+    var isRecenterPondActive = false
 
     @MainActor
     func beginARCalibration() {
@@ -742,11 +749,18 @@ final class CoachLiveSession: Identifiable {
                     forceNextInference = true
 
                     let sessionStart = CACurrentMediaTime()
-                    self.worldCensusController = WorldCensusController(
-                        worldToTable: simd_inverse(lockedPlaneTransform),
-                        tableExtent: SIMD2<Float>(repeating: Float(planeExtent))
-                    )
                     self.zoneTrackingStartedAt = sessionStart
+                    let cameraPosition = SIMD3<Float>(
+                        frame.cameraTransform.columns.3.x,
+                        frame.cameraTransform.columns.3.y,
+                        frame.cameraTransform.columns.3.z
+                    )
+                    self.worldCensusController = WorldCensusController(
+                        lockedPlaneTransform: lockedPlaneTransform,
+                        lockedExtent: Float(planeExtent),
+                        cameraPosition: cameraPosition,
+                        at: sessionStart
+                    )
                     if let persisted {
                         newTracker.restore(persisted.remapped(toNowMono: sessionStart), at: sessionStart)
                         let state = newTracker.state
@@ -851,7 +865,9 @@ final class CoachLiveSession: Identifiable {
                     }
                     if self.isEnded { break pollLoop }
                     guard let rec = recognizer else { break }
-                    guard let planeTransform = arCapture.lockedPlaneTransform else { break }
+                    guard let lockedPlaneTransform = arCapture.lockedPlaneTransform else { break }
+                    let tableOrigin = self.worldCensusController?.tableOrigin
+                    let planeTransform = tableOrigin?.tableToWorld ?? lockedPlaneTransform
 
                     // Pixel-space ↔ table-space projection for this tick —
                     // built once, shared by the ROI zone projection, the
@@ -863,7 +879,10 @@ final class CoachLiveSession: Identifiable {
                                                      planeTransform: planeTransform)
                     let orientedSize = SIMD2<Double>(Double(frame.orientedImageSize.width),
                                                      Double(frame.orientedImageSize.height))
-                    let geometry = self.trackerConfig.tableGeometry ?? TrackerConfig.TableGeometry()
+                    var geometry = self.trackerConfig.tableGeometry ?? TrackerConfig.TableGeometry()
+                    if let tableOrigin {
+                        geometry.extent = Double(max(tableOrigin.extent.x, tableOrigin.extent.y))
+                    }
                     let extent = geometry.extent
 
                     // Lane B chunk H item 2: zone rects are needed for
@@ -1203,7 +1222,7 @@ final class CoachLiveSession: Identifiable {
     @MainActor
     private func publishIfDue(now: TimeInterval) async {
         guard let tracker else { return }
-        let state = tracker.state
+        let state = presentationState(preserving: tracker.state)
         guard state.revision != lastPublishedRevision, now - lastPublishTime >= Self.publishInterval else { return }
         applyState(state, pending: tracker.pendingHandEnd, log: tracker.events)
         await refreshAdvice(for: state)
@@ -1260,6 +1279,22 @@ final class CoachLiveSession: Identifiable {
     /// scenes with no tracker behind it.
     func assignUnresolved(_ id: UUID, to zone: ZoneKind) {
         if let tracker, let trackID = unresolvedTrackByUUID[id] {
+            let handledByCensus = MainActor.assumeIsolated { () -> Bool in
+                guard worldCensusIsActive, let controller = worldCensusController else {
+                    return false
+                }
+                let target: SemanticZoneID
+                switch zone {
+                case .mine: target = .mineHand
+                case .table: target = .tablePond
+                }
+                controller.overrideZone(target, trackID: trackID)
+                return true
+            }
+            if handledByCensus {
+                publishAfterCorrection()
+                return
+            }
             switch zone {
             case .mine:  tracker.overrideZone(track: trackID, to: .myHand)
             case .table: tracker.overrideZone(track: trackID, to: .pond)
@@ -1304,6 +1339,33 @@ final class CoachLiveSession: Identifiable {
     /// advice — same dual-path convention as `assignUnresolved`.
     func reassignZoneBracket(_ zone: ZoneKind) {
         if let tracker {
+            let handledByCensus = MainActor.assumeIsolated { () -> Bool in
+                guard worldCensusIsActive, let controller = worldCensusController else {
+                    return false
+                }
+                let source: Set<SemanticZoneID>
+                let target: SemanticZoneID
+                switch zone {
+                case .table:
+                    source = [.tablePond]
+                    target = .mineHand
+                case .mine:
+                    source = [.mineHand, .mineMeld]
+                    target = .tablePond
+                }
+                for track in controller.snapshot.tracks
+                    where source.contains(track.semanticZone) {
+                    controller.overrideZone(
+                        target,
+                        trackID: TrackID(raw: track.id.value)
+                    )
+                }
+                return true
+            }
+            if handledByCensus {
+                publishAfterCorrection()
+                return
+            }
             let ids: [TrackID]
             let target: TileZone
             switch zone {
@@ -1346,6 +1408,17 @@ final class CoachLiveSession: Identifiable {
 
     func dismissUnresolved(_ id: UUID) {
         if let tracker, let trackID = unresolvedTrackByUUID[id] {
+            let handledByCensus = MainActor.assumeIsolated { () -> Bool in
+                guard worldCensusIsActive, let controller = worldCensusController else {
+                    return false
+                }
+                controller.remove(trackID: trackID)
+                return true
+            }
+            if handledByCensus {
+                publishAfterCorrection()
+                return
+            }
             tracker.removeTrack(trackID)
             publishAfterCorrection()
             return
@@ -1355,6 +1428,17 @@ final class CoachLiveSession: Identifiable {
 
     func overrideHandTile(_ id: TrackID, as tile: Tile) {
         if let tracker {
+            let handledByCensus = MainActor.assumeIsolated { () -> Bool in
+                guard worldCensusIsActive, let controller = worldCensusController else {
+                    return false
+                }
+                controller.pinFace(tile, trackID: id)
+                return true
+            }
+            if handledByCensus {
+                publishAfterCorrection()
+                return
+            }
             tracker.pin(track: id, as: tile)     // `handTiles`/`drawnTile` carry real TrackIDs
             publishAfterCorrection()
             return
@@ -1443,6 +1527,9 @@ final class CoachLiveSession: Identifiable {
             let seat: RelativeSeat? = isDraw ? nil
                 : winner.map { relativeSeat(forAbsolute: $0, mySeatWind: tracker.state.mySeatWind) }
             tracker.confirmHandEnd(winner: seat)
+            MainActor.assumeIsolated {
+                worldCensusController?.resetTiles()
+            }
             winDetected = nil
             wasHandComplete = false
             phase = .rest
@@ -1599,6 +1686,34 @@ final class CoachLiveSession: Identifiable {
         recountRequest = .fullTable
     }
 
+    func beginPondRecenter() {
+        guard isARCaptureActive, worldCensusController != nil else { return }
+        isRecenterPondActive = true
+    }
+
+    @MainActor
+    func applyPondRecenter(
+        tapInFeed point: CGPoint,
+        previewBounds: CGRect
+    ) {
+        guard isRecenterPondActive,
+              let arCapture,
+              let controller = worldCensusController,
+              let frame = arCapture.latestFrame else { return }
+        let normalized = AspectFillMapping.normalizedImageRect(
+            of: CGRect(origin: point, size: .zero),
+            previewBounds: previewBounds,
+            orientedImageSize: frame.orientedImageSize
+        )
+        guard let world = arCapture.raycastWorldPoint(
+            atNormalizedImagePoint: CGPoint(x: normalized.x, y: normalized.y)
+        ) else { return }
+        controller.recenterPond(at: world)
+        isRecenterPondActive = false
+        let state = presentationState(preserving: tracker?.state ?? .empty)
+        applyState(state, pending: tracker?.pendingHandEnd, log: tracker?.events ?? [])
+    }
+
     /// The force-recount FAB. A nil zone requests one tiled full-frame pass;
     /// a non-nil zone requests one crop, falling back to full-frame when the
     /// requested zone is offscreen. Both are AR-path-only;
@@ -1643,9 +1758,36 @@ final class CoachLiveSession: Identifiable {
     /// coalescing so edits feel instant), then refreshes advice off-main.
     private func publishAfterCorrection() {
         guard let tracker else { return }
-        let state = tracker.state
+        let state = MainActor.assumeIsolated {
+            presentationState(preserving: tracker.state)
+        }
         applyState(state, pending: tracker.pendingHandEnd, log: tracker.events)
         Task { @MainActor [weak self] in await self?.refreshAdvice(for: state) }
+    }
+
+    @MainActor
+    private var worldCensusIsActive: Bool {
+        guard useWorldCensus, let controller = worldCensusController else {
+            return false
+        }
+        return controller.snapshot.tracks.filter {
+            $0.lifecycle == .confirmed
+        }.count >= 8
+    }
+
+    @MainActor
+    private func presentationState(
+        preserving legacy: TrackedTableState
+    ) -> TrackedTableState {
+        guard worldCensusIsActive, let controller = worldCensusController else {
+            return legacy
+        }
+        return CensusStateAdapter.makeState(
+            snapshot: controller.snapshot,
+            preserving: legacy,
+            tableExtent: controller.tableOrigin.extent,
+            censusRevision: controller.revision
+        )
     }
 
     @MainActor
@@ -1659,6 +1801,30 @@ final class CoachLiveSession: Identifiable {
         diagnostics.worldCensus = controller.census.diagnostics
         diagnostics.worldCensusDepthRejections = controller.diagnostics.depthRejections
         diagnostics.worldCensusMilliseconds = controller.diagnostics.lastIngestMilliseconds
+        let liveTracks = snapshot.tracks.filter {
+            $0.lifecycle == .confirmed
+                || $0.lifecycle == .stale
+                || $0.lifecycle == .temporarilyMissing
+        }
+        let opponentCount = liveTracks.count {
+            $0.semanticZone == .tableRevealedLeft
+                || $0.semanticZone == .tableRevealedFar
+                || $0.semanticZone == .tableRevealedRight
+        }
+        diagnostics.worldCensusZoneSummary = [
+            "hand \(liveTracks.count { $0.semanticZone == .mineHand })",
+            "meld \(liveTracks.count { $0.semanticZone == .mineMeld })",
+            "pond \(liveTracks.count { $0.semanticZone == .tablePond })",
+            "opp \(opponentCount)",
+            "unres \(liveTracks.count { $0.semanticZone == .boundaryUnresolved })"
+        ].joined(separator: " · ")
+        diagnostics.worldCensusDepthSummary = controller.diagnostics.depthRejections
+            .sorted { String(describing: $0.key) < String(describing: $1.key) }
+            .map { "\(String(describing: $0.key))=\($0.value)" }
+            .joined(separator: ", ")
+        if diagnostics.worldCensusDepthSummary.isEmpty {
+            diagnostics.worldCensusDepthSummary = "—"
+        }
     }
 
     /// Projects a fresh `TrackedTableState` (+ pending boundary + event log)
@@ -1794,14 +1960,19 @@ final class CoachLiveSession: Identifiable {
     /// become `@MainActor`/`async` too.
     private func updateARZoneBoxes(from state: TrackedTableState) {
         MainActor.assumeIsolated {
-            guard let arCapture, let planeTransform = arCapture.lockedPlaneTransform,
+            guard let arCapture, let lockedPlaneTransform = arCapture.lockedPlaneTransform,
                   let frame = arCapture.latestFrame else { return }
+            let tableOrigin = worldCensusController?.tableOrigin
+            let planeTransform = tableOrigin?.tableToWorld ?? lockedPlaneTransform
             let projection = TableProjection(cameraTransform: frame.cameraTransform, intrinsics: frame.intrinsics,
                                              imageResolution: SIMD2<Float>(Float(frame.imageResolution.width),
                                                                            Float(frame.imageResolution.height)),
                                              planeTransform: planeTransform)
             let orientedSize = SIMD2<Double>(Double(frame.orientedImageSize.width), Double(frame.orientedImageSize.height))
-            let extent = trackerConfig.tableGeometry?.extent ?? TrackerConfig.TableGeometry().extent
+            let extent = tableOrigin.map {
+                Double(max($0.extent.x, $0.extent.y))
+            } ?? trackerConfig.tableGeometry?.extent
+                ?? TrackerConfig.TableGeometry().extent
 
             let mineBoxes = (state.myHand + state.myBonus + state.myMelds.flatMap { $0 }).map(\.box)
             let tableBoxes = state.pond.map(\.box) + state.opponentMelds.values.flatMap { $0.flatMap { $0 } }.map(\.box)
@@ -2196,4 +2367,6 @@ struct LiveDiagnostics {
     var worldCensus = CensusDiagnostics()
     var worldCensusDepthRejections: [DepthSampleRejection: Int] = [:]
     var worldCensusMilliseconds: Double = 0
+    var worldCensusZoneSummary = "—"
+    var worldCensusDepthSummary = "—"
 }

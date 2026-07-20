@@ -157,6 +157,25 @@ final class ARTableCapture: NSObject {
         CameraTorch.set(on)
     }
 
+    /// One production AR raycast for manual pond-center correction. The
+    /// point uses ARFrame's normalized image coordinates.
+    func raycastWorldPoint(
+        atNormalizedImagePoint point: CGPoint
+    ) -> SIMD3<Float>? {
+        guard let query = session.currentFrame?.raycastQuery(
+            from: point,
+            allowing: .existingPlaneGeometry,
+            alignment: .horizontal
+        ), let result = session.raycast(query).first else {
+            return nil
+        }
+        return SIMD3<Float>(
+            result.worldTransform.columns.3.x,
+            result.worldTransform.columns.3.y,
+            result.worldTransform.columns.3.z
+        )
+    }
+
     private static func makeConfiguration(planeDetection: Bool) -> ARWorldTrackingConfiguration {
         let configuration = ARWorldTrackingConfiguration()
         configuration.planeDetection = planeDetection ? [.horizontal] : []

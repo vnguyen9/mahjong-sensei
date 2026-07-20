@@ -35,11 +35,22 @@ struct LiveGeometryDebugOverlay: View {
 
     private func draw(_ context: inout GraphicsContext) {
         guard previewBounds.width > 0, previewBounds.height > 0,
-              let geometry = session.calibratedTableGeometry,
               let capture = session.arCapture,
-              let planeTransform = capture.lockedPlaneTransform,
+              let lockedPlaneTransform = capture.lockedPlaneTransform,
               let frame = capture.latestFrame else { return }
 
+        let controller = session.worldCensusController
+        let planeTransform = controller?.tableOrigin.tableToWorld
+            ?? lockedPlaneTransform
+        let fittedExtent = controller.map {
+            Double(max($0.tableOrigin.extent.x, $0.tableOrigin.extent.y))
+        } ?? session.calibratedTableGeometry?.extent ?? 0.9
+        var geometry = session.calibratedTableGeometry
+            ?? TableCalibrationGeometry.autoPartition(
+                extentMetres: fittedExtent,
+                mySeatWind: session.seatWind
+            )
+        geometry.extent = fittedExtent
         let extent = geometry.extent
         guard extent > 0 else { return }
 

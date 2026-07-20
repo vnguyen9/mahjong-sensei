@@ -86,6 +86,29 @@ struct LiveFeedPane: View {
                                 onTapZoneChip: onTapZoneChip)
                 .frame(width: fullSize.width, height: fullSize.height)
 
+            if session.isRecenterPondActive {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .frame(width: fullSize.width, height: fullSize.height)
+                    .onTapGesture { location in
+                        session.applyPondRecenter(
+                            tapInFeed: location,
+                            previewBounds: previewFrame
+                        )
+                    }
+                    .overlay(alignment: .top) {
+                        Text("Tap the center of the pond")
+                            .font(MJFont.ui(12, weight: .semibold))
+                            .foregroundStyle(MJColor.creamHeading)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.black.opacity(0.7), in: Capsule())
+                            .padding(.top, safeTop + 54)
+                            .allowsHitTesting(false)
+                    }
+                    .zIndex(20)
+            }
+
             #if DEBUG
             // Dev-only: the calibrated geometry projected onto the feed.
             if showGeometryDebug {
@@ -503,6 +526,9 @@ struct LiveFeedPane: View {
             Text("ran \(session.diagnostics.inferencesRun) · raw \(session.diagnostics.lastRawDetectionCount)")
             Text("top: \(session.diagnostics.lastTopDetections.isEmpty ? "—" : session.diagnostics.lastTopDetections.joined(separator: ", "))")
             Text("tracker live \(session.trackerDiagnostics.live) · tent \(session.trackerDiagnostics.tentative) · missing \(session.trackerDiagnostics.missing)")
+            Text("census \(session.diagnostics.worldCensusConfirmed)/\(session.diagnostics.worldCensusTracks) · \(session.diagnostics.worldCensusZoneSummary)")
+            Text("census +\(session.diagnostics.worldCensus.births) =\(session.diagnostics.worldCensus.matches) miss \(session.diagnostics.worldCensus.qualifiedMisses) −\(session.diagnostics.worldCensus.retirements) · \(session.diagnostics.worldCensusMilliseconds, specifier: "%.1f")ms")
+            Text("depth reject: \(session.diagnostics.worldCensusDepthSummary)")
             Text("rec: \(session.diagnostics.recognizerType) · mode \(session.arCapture != nil && !session.usingFallbackCapture ? "AR" : "2D")")
             Text(session.diagnostics.roiPlan)
             Text("err(\(session.recognizerErrorCount)): \(session.lastPipelineError ?? "—")")
