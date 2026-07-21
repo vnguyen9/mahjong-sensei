@@ -82,10 +82,10 @@ public final class PhysicalCensus {
     }
 
     /// Feeds one frame's outcome into the census. Per §8's outcome table,
-    /// only `.success` may add hits or (inside its own exact coverage)
-    /// misses; `.skipped`/`.failed` touch nothing at all — not even a track's
+    /// only `.success` may add hits or explicitly depth-proven empty misses;
+    /// `.skipped`/`.failed` touch nothing at all — not even a track's
     /// staleness — because they mean "we didn't look," never "we looked and
-    /// it was gone."
+    /// it was gone." Image coverage alone is never retirement evidence.
     public func ingest(_ outcome: ObservationOutcome,
                        zones: [SemanticZoneID: [SIMD2<Float>]],
                        context: CensusFrameContext? = nil,
@@ -100,7 +100,7 @@ public final class PhysicalCensus {
         }
         for trackIndex in association.unmatchedTrackIndices {
             let before = tracks[trackIndex].state
-            if applyMiss(trackIndex: trackIndex, coverage: batch.coverage, context: context, at: time) {
+            if applyMiss(trackIndex: trackIndex, context: context, at: time) {
                 diagnostics.qualifiedMisses += 1
             }
             if before != .retired, tracks[trackIndex].state == .retired {
@@ -358,15 +358,13 @@ public final class PhysicalCensus {
     }
 
     @discardableResult
-    private func applyMiss(trackIndex: Int, coverage: CoverageMask,
+    private func applyMiss(trackIndex: Int,
                            context: CensusFrameContext?, at time: TimeInterval) -> Bool {
-        // §9.2/§5.2: only a *qualified* miss — the track's own footprint
-        // actually inside this batch's observed coverage — is an
-        // opportunity. `CoverageMask.covers` already tests each polygon
-        // independently; no AABB union can bridge a gap here.
-        let isQualified = context.map {
-            $0.visibleTrackIDs.contains(tracks[trackIndex].id)
-        } ?? coverage.covers(tracks[trackIndex].anchorCenter)
+        // A qualified miss is explicitly supplied by the AR/depth layer.
+        // Coverage alone cannot prove a tile was removed: it may be hidden by
+        // a hand, another tile, poor depth, a frame transition, or a failed
+        // recognizer. Absence of a context is therefore deliberately safe.
+        let isQualified = context?.qualifiedEmptyTrackIDs.contains(tracks[trackIndex].id) ?? false
         if isQualified {
             TrackLifecycle.recordQualifiedMiss(on: &tracks[trackIndex], at: time, config: config)
             return true

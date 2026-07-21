@@ -11,6 +11,13 @@ struct WorldCensusDiagnostics {
     var recognizerFailures = 0
     var lastIngestMilliseconds: Double = 0
     var anchorReprojectionErrorPixels: Double = 0
+    var emptyPlaneProofs = 0
+    var occupiedHolds = 0
+    var occlusionHolds = 0
+    var missingDepthHolds = 0
+    var offscreenHolds = 0
+    var qualifiedMissesSuppressedFrames = 0
+    var depthProvenRetirements = 0
 
     var depthAcceptanceRate: Double {
         guard depthSamplesAttempted > 0 else { return 0 }
@@ -223,43 +230,17 @@ final class WorldCensusController {
             )
         }
 
-        let visibleIDs = Set(census.anchors.compactMap { anchor -> CensusTrackID? in
-            guard let point = projection.normalizedOrientedPoint(
-                ofWorldPoint: SIMD3<Double>(
-                    Double(anchor.worldPosition.x),
-                    Double(anchor.worldPosition.y),
-                    Double(anchor.worldPosition.z)
-                ),
-                imageTransform: frame.imageTransform
-            ), coverageRects.contains(where: { Self.contains(point, rect: $0) }),
-            let expectedDepth = projection.cameraAxisDepth(
-                ofWorldPoint: SIMD3<Double>(
-                    Double(anchor.worldPosition.x),
-                    Double(anchor.worldPosition.y),
-                    Double(anchor.worldPosition.z)
-                )
-            ) else { return nil }
-
-            let sample = DepthSampler.inspect(
-                atOrientedNormalized: point,
-                imageTransform: frame.imageTransform,
-                depthMap: frame.depthMap,
-                confidenceMap: frame.depthConfidence
+        let qualifiedEmptyIDs: Set<CensusTrackID>
+        if allowsQualifiedMisses {
+            qualifiedEmptyIDs = qualifiedEmptyTrackIDs(
+                frame: frame,
+                projection: projection,
+                coverageRects: coverageRects
             )
-            guard let sampledDepth = sample.depthMeters else {
-                if let rejection = sample.rejection {
-                    diagnostics.depthRejections[rejection, default: 0] += 1
-                }
-                return nil
-            }
-            // Geometry >40 mm closer than the expected tile point is an
-            // occluder (typically a hand), never visible-empty evidence.
-            guard Double(sampledDepth) >= expectedDepth - 0.040 else {
-                diagnostics.depthRejections[.occluded, default: 0] += 1
-                return nil
-            }
-            return anchor.id
-        })
+        } else {
+            diagnostics.qualifiedMissesSuppressedFrames += 1
+            qualifiedEmptyIDs = []
+        }
 
         let quality = FrameQuality(
             trackingIsNormal: true,
@@ -276,17 +257,19 @@ final class WorldCensusController {
             coverage: CoverageMask(),
             quality: quality
         )
+        let retirementsBefore = census.diagnostics.retirements
         census.ingest(
             .success(batch),
             zones: zones,
             context: CensusFrameContext(
                 worldToTable: worldToTable,
-                // During guided calibration the recognizer may warm and add
-                // or match candidates, but a moving mark/review must never
-                // turn a temporarily uncovered location into a retirement.
-                visibleTrackIDs: allowsQualifiedMisses ? visibleIDs : []
+                qualifiedEmptyTrackIDs: qualifiedEmptyIDs
             ),
             at: time
+        )
+        diagnostics.depthProvenRetirements += max(
+            0,
+            census.diagnostics.retirements - retirementsBefore
         )
         let confirmedWorld = census.snapshot(at: time).tracks.compactMap {
             track -> SIMD3<Float>? in
@@ -319,6 +302,111 @@ final class WorldCensusController {
         ].map {
             SIMD2(min(1, max(0, $0.x)), min(1, max(0, $0.y)))
         }
+    }
+
+    /// Proves bare table over a real tile footprint. Absence from recognition
+    /// is not consulted here: every returned ID is backed by medium/high
+    /// confidence scene depth inside the exact ROI that actually ran.
+    private func qualifiedEmptyTrackIDs(
+        frame: ARTableFrame,
+        projection: TableProjection,
+        coverageRects: [TileBoundingBox]
+    ) -> Set<CensusTrackID> {
+        let tableToWorld = simd_inverse(worldToTable)
+        let footprintOffsets: [SIMD2<Float>] = [
+            .zero,
+            SIMD2(-0.008, -0.011),
+            SIMD2(0.008, -0.011),
+            SIMD2(-0.008, 0.011),
+            SIMD2(0.008, 0.011),
+        ]
+        var provenEmpty: Set<CensusTrackID> = []
+
+        for anchor in census.anchors {
+            let anchorLocal4 = worldToTable * SIMD4(
+                anchor.worldPosition.x,
+                anchor.worldPosition.y,
+                anchor.worldPosition.z,
+                1
+            )
+            var heights: [Float] = []
+            var cameraDepthDeltas: [Float] = []
+            var projectedInsideCoverage = 0
+
+            for offset in footprintOffsets {
+                let local = SIMD4<Float>(
+                    anchorLocal4.x + offset.x,
+                    0,
+                    anchorLocal4.z + offset.y,
+                    1
+                )
+                let planeWorld4 = tableToWorld * local
+                let planeWorld = SIMD3<Double>(
+                    Double(planeWorld4.x),
+                    Double(planeWorld4.y),
+                    Double(planeWorld4.z)
+                )
+                guard let point = projection.normalizedOrientedPoint(
+                    ofWorldPoint: planeWorld,
+                    imageTransform: frame.imageTransform
+                ), coverageRects.contains(where: { Self.contains(point, rect: $0) }),
+                let expectedDepth = projection.cameraAxisDepth(
+                    ofWorldPoint: planeWorld
+                ) else { continue }
+                projectedInsideCoverage += 1
+
+                let sample = DepthSampler.inspect(
+                    atOrientedNormalized: point,
+                    imageTransform: frame.imageTransform,
+                    depthMap: frame.depthMap,
+                    confidenceMap: frame.depthConfidence
+                )
+                guard let sampledDepth = sample.depthMeters else {
+                    if let rejection = sample.rejection {
+                        diagnostics.depthRejections[rejection, default: 0] += 1
+                    }
+                    continue
+                }
+                guard let measuredWorld = projection.worldPoint(
+                    ofNormalizedOrientedPoint: point,
+                    imageTransform: frame.imageTransform,
+                    depthMeters: Double(sampledDepth)
+                ) else {
+                    diagnostics.depthRejections[.invalidGeometry, default: 0] += 1
+                    continue
+                }
+                let measuredLocal = worldToTable * SIMD4<Float>(
+                    Float(measuredWorld.x),
+                    Float(measuredWorld.y),
+                    Float(measuredWorld.z),
+                    1
+                )
+                heights.append(measuredLocal.y)
+                cameraDepthDeltas.append(sampledDepth - Float(expectedDepth))
+            }
+
+            guard projectedInsideCoverage >= TileFootprintDepthClassifier.minimumSampleCount else {
+                diagnostics.offscreenHolds += 1
+                continue
+            }
+            let evidence = TileFootprintDepthClassifier.classify(
+                tableHeights: heights,
+                cameraDepthDeltas: cameraDepthDeltas
+            )
+            switch evidence {
+            case .barePlane:
+                diagnostics.emptyPlaneProofs += 1
+                provenEmpty.insert(anchor.id)
+            case .occupied:
+                diagnostics.occupiedHolds += 1
+            case .occluded:
+                diagnostics.occlusionHolds += 1
+                diagnostics.depthRejections[.occluded, default: 0] += 1
+            case .unknown:
+                diagnostics.missingDepthHolds += 1
+            }
+        }
+        return provenEmpty
     }
 
     private static func median(_ values: [Float]) -> Float {

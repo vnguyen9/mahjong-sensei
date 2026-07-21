@@ -175,9 +175,9 @@ final class PhysicalCensusTests: XCTestCase {
                        "sustained strong conflicting evidence should eventually flip the face")
     }
 
-    // MARK: - Coverage-aware misses (§9.2, §5.2)
+    // MARK: - Depth-proven empty misses (§9.2, §5.2)
 
-    func testEmptyCoveredSuccessOnlyMissesInsideCoverage() {
+    func testCoverageAloneNeverQualifiesAMiss() {
         let census = PhysicalCensus()
         let covered = SIMD2<Float>(1, 0.5)   // inside the polygon in the empty batch below
         let uncovered = SIMD2<Float>(4, 0.5) // outside it
@@ -188,19 +188,56 @@ final class PhysicalCensusTests: XCTestCase {
                                  zones: [:], startFrame: 0, startTime: 0)
         XCTAssertEqual(census.tracks.filter { $0.state == .confirmed }.count, 2)
 
-        // A real, honest zero-detection frame whose coverage only reaches `covered`.
+        // A zero-detection frame whose coverage reaches `covered` is still
+        // not retirement evidence without app-side depth proof.
         let coverage = CoverageMask(regions: [Self.polygon(.mineHand, [
             SIMD2(0, 0), SIMD2(2, 0), SIMD2(2, 1), SIMD2(0, 1),
         ])])
         let batch = ObservationBatch(frameID: FrameID(99), observations: [], coverage: coverage, quality: Self.acceptedQuality())
-        census.ingest(.success(batch), zones: [:], at: time)
+        for offset in 0..<20 {
+            census.ingest(.success(batch), zones: [:], at: time + Double(offset) * 0.2)
+        }
 
         let coveredTrack = census.tracks.first { simd_distance($0.anchorCenter, covered) < 0.01 }
         let uncoveredTrack = census.tracks.first { simd_distance($0.anchorCenter, uncovered) < 0.01 }
-        XCTAssertEqual(coveredTrack?.state, .temporarilyMissing, "inside this batch's coverage: a real (qualified) miss")
-        XCTAssertEqual(coveredTrack?.qualifiedMissStreak, 1)
+        XCTAssertEqual(coveredTrack?.state, .stale)
+        XCTAssertEqual(coveredTrack?.qualifiedMissStreak, 0)
         XCTAssertEqual(uncoveredTrack?.state, .stale, "outside this batch's coverage: we simply didn't look there")
         XCTAssertEqual(uncoveredTrack?.qualifiedMissStreak, 0, "coverage loss must never count as a miss")
+        XCTAssertEqual(census.diagnostics.qualifiedMisses, 0)
+        XCTAssertEqual(census.diagnostics.retirements, 0)
+        XCTAssertEqual(census.snapshot(at: time + 4).tracks.count, 2,
+                       "repeated covered frames without depth proof must never retire either track")
+    }
+
+    func testExplicitDepthProvenEmptyTrackAloneAccruesMiss() throws {
+        let census = PhysicalCensus()
+        let provenEmpty = SIMD2<Float>(1, 0.5)
+        let unknown = SIMD2<Float>(4, 0.5)
+        let time = confirmTracks(census, targets: [(provenEmpty, nil), (unknown, nil)], rounds: 3,
+                                 zones: [:], startFrame: 0, startTime: 0)
+
+        let provenEmptyID = try XCTUnwrap(census.tracks.first {
+            simd_distance($0.anchorCenter, provenEmpty) < 0.01
+        }?.id)
+        let batch = ObservationBatch(frameID: FrameID(99), observations: [], coverage: CoverageMask(), quality: Self.acceptedQuality())
+        census.ingest(
+            .success(batch),
+            zones: [:],
+            context: CensusFrameContext(
+                worldToTable: matrix_identity_float4x4,
+                qualifiedEmptyTrackIDs: [provenEmptyID]
+            ),
+            at: time
+        )
+
+        let emptyTrack = census.tracks.first { simd_distance($0.anchorCenter, provenEmpty) < 0.01 }
+        let unknownTrack = census.tracks.first { simd_distance($0.anchorCenter, unknown) < 0.01 }
+        XCTAssertEqual(emptyTrack?.state, .temporarilyMissing)
+        XCTAssertEqual(emptyTrack?.qualifiedMissStreak, 1)
+        XCTAssertEqual(unknownTrack?.state, .stale)
+        XCTAssertEqual(unknownTrack?.qualifiedMissStreak, 0)
+        XCTAssertEqual(census.diagnostics.qualifiedMisses, 1)
     }
 
     // MARK: - failed/skipped add zero hits and zero misses (§8)

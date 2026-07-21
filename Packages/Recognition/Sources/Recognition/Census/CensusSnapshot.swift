@@ -98,12 +98,17 @@ public struct CensusAnchor: Sendable, Hashable {
 /// which unmatched world tracks were genuinely visible.
 public struct CensusFrameContext: Sendable {
     public var worldToTable: simd_float4x4
-    public var visibleTrackIDs: Set<CensusTrackID>
+    /// Unmatched tracks for which the app has already proved the exact
+    /// footprint is bare table. Membership is deliberately stronger than
+    /// image coverage: off-screen, occluded, missing-depth, moving-camera,
+    /// orientation-transition, and recognizer-failure cases must all be
+    /// omitted so they cannot become retirement evidence.
+    public var qualifiedEmptyTrackIDs: Set<CensusTrackID>
 
     public init(worldToTable: simd_float4x4,
-                visibleTrackIDs: Set<CensusTrackID>) {
+                qualifiedEmptyTrackIDs: Set<CensusTrackID>) {
         self.worldToTable = worldToTable
-        self.visibleTrackIDs = visibleTrackIDs
+        self.qualifiedEmptyTrackIDs = qualifiedEmptyTrackIDs
     }
 }
 

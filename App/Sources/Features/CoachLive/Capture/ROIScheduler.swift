@@ -244,6 +244,9 @@ struct ROIScheduler {
     /// plan. The session uses this only to calculate census stabilization for
     /// the exact work that reached Vision.
     var plannedRegions: [TableZoneID] { plannedZoneIDs }
+    var deferredRegionCount: Int {
+        max(0, fairQueue.pendingIDs.count - Set(plannedZoneIDs).count)
+    }
 
     /// Projects the tracker's fixed table-space zone geometry into
     /// oriented-normalized image rects — see the type doc's phase 1. A

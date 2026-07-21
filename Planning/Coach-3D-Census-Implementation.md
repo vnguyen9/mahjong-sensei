@@ -1,9 +1,11 @@
 # Coach Live — Authoritative ARKit World Census Handoff
 
-> **Source status (2026-07-20):** The authoritative census is integrated, and
-> the fresh-session/tracking repair is split across commits `2fdb525`,
-> `5027fac`, and `d00a47c`. Recognition has 293 tests; separate iPhone and
-> iPad iOS 26.5 Simulator gates pass. The M4 iPad/LiDAR
+> **Source status (2026-07-20):** The authoritative census now stays on one
+> persistent AR surface from marking through Live, exposes endpoint-defined
+> player regions, publishes unknown physical tiles, schedules every region
+> fairly, and requires depth-proven bare table before retirement. Recognition
+> has 307 tests; the universal iPhone/iPad iOS 26 Simulator build passes. The
+> M4 iPad/LiDAR
 > acceptance matrix in §9 remains a release gate
 > because Simulator testing cannot validate depth, physical anchor stability,
 > occlusion, or ARWorldMap relocalization.
@@ -62,8 +64,9 @@ On LiDAR hardware:
 4. If tracking is limited or depth disappears, the last census presentation
    is held and the overlays dim under “Recovering table tracking…”.
 5. After two continuous seconds without depth, AR depth semantics restart once.
-6. If pose or depth remains unhealthy for five continuous seconds, the current
-   calibration and counts are cleared and guided calibration restarts.
+6. If pose remains limited for five continuous seconds, the same AR surface
+   returns to editable review while holding the last census snapshot. It does
+   not replace the renderer, reset the session, or delete the calibration.
 
 Devices without supported scene depth cannot enter Coach Live. They see a
 disabled, clearly labeled “Requires a LiDAR-equipped iPad” control. Spatial
@@ -81,15 +84,24 @@ The guided flow has exactly three user-facing steps:
 1. **Mark your hand row** — “Tap or pinch one end of your tiles, then the other.”
 2. **Mark the pond** — “Tap or pinch two opposite corners of the discard area.”
 3. **Review your table** — live AR preview with direct region dragging and
-   “Confirm & Start”. Amber `person.fill` markers and the legend “Player
-   marker — drag to the center of their exposed tiles.” identify the three
-   opponent exposed-tile regions near the pond.
+   “Confirm & Start”. Each opponent region is a 40 mm-deep strip with two
+   endpoint controls: drag the body to translate it, or either endpoint to
+   resize and rotate it. Regions have a 72 mm minimum length, stay clamped to
+   the calibrated extent, provide 44-point projected hit targets, selection
+   haptics, and VoiceOver-labelled start/end/body controls.
 
 Step-3 edits emit a provisional `WorldTableCalibration` into the existing
 `WorldCensusController`, legacy-compatibility geometry, AR origin, zones, ROI,
 and overlays. They do not persist on every drag. Confirm finalizes that exact
 calibration, queues one recount, and is a presentation-only handoff: it never
 restarts the AR session, tracker, census controller, or pipeline generation.
+
+One `CoachLiveARSurface`/`ARSCNView` remains mounted above the flow switch.
+Confirmation changes its mode from editable review to read-only Live. The same
+SceneKit region nodes and labels remain visible; only handles, grid, coaching
+instructions, and edit gestures hide. Production Live uses a full-screen AR
+surface with a draggable gameplay bottom sheet, so expanding Map/Counts/Events
+never crops or resizes the camera renderer.
 
 `WorldTableCalibration` is the one geometry source:
 
@@ -98,6 +110,7 @@ tableToWorld
 extent                         // independent X and Z
 pondPolygon                    // exact marked polygon
 handPolygon                    // exact marked orientation
+revealedZoneMarks             // exact start/end/depth controls
 revealedZonePolygons
 source
 ```
@@ -161,17 +174,36 @@ For each detection:
 - confirmation: three hits in five qualified opportunities;
 - retirement: five qualified misses and at least 0.8 seconds.
 
-A miss is qualified only when the track projects inside the exact processed
-coverage, AR tracking is normal, trustworthy depth exists, and geometry is not
-more than 40 mm nearer than the expected track depth. Missing depth,
-recognizer failure, orientation changes, limited tracking, relocalization,
-offscreen positions, and occlusion never count as misses.
+A miss is qualified only when the camera and image are still, AR tracking is
+normal, the exact executed ROI covers the anchor, and at least three
+medium/high-confidence samples across its physical footprint prove bare table.
+The table-local median height must be −10...+8 mm and the upper percentile no
+higher than +12 mm. Geometry 12...40 mm above the plane is occupied; geometry
+more than 40 mm nearer than expected is occluded; missing or inconsistent depth
+is unknown. All three cases hold the identity. Missing depth, recognizer
+failure, orientation changes, camera motion, thermal suspension, limited
+tracking, relocalization, offscreen positions, and occlusion never count as
+misses.
 
 ## 5. Authoritative state and event integration
 
 `CensusStateAdapter` supplies every healthy LiDAR hand, bonus, meld, pond,
 opponent, unresolved, histogram, and total count. Confirmed, stale, and
 temporarily missing tracks remain counted until census retirement.
+
+`CensusPresentation` separates resolved gameplay tiles from confirmed physical
+anchors whose face is unknown. Unknown anchors still count toward their exact
+hand/pond/player/unresolved region and render as tappable `?` placeholders, but
+do not enter scoring, face histograms, advice, or conservation until corrected.
+The displayed Live total is the sum of census physical zone counts—never a mix
+of census and legacy tracker state.
+
+After confirmation, the existing recognition loop verifies Hand → Pond → Left
+→ Far → Right. Each region receives up to three successful still-frame reads,
+ending early when census identities and faces repeat stably. The two-crop limit
+lives in `ROIScheduler`; deferred/offscreen work remains queued with age-based
+fairness, and DEBUG labels report only recognizer calls that actually executed.
+The census never invokes a recognizer.
 
 Semantic ownership is deterministic:
 
@@ -230,6 +262,10 @@ The DEBUG HUD and console expose:
 - depth availability and acceptance rate;
 - tentative, confirmed, stale, and temporarily missing tracks;
 - births, matches, qualified misses, and retirements;
+- physical-versus-resolved totals and unknown-face anchors;
+- executed and deferred ROIs plus ordered verification progress;
+- bare-plane proofs, occupied holds, occlusion holds, missing-depth holds, and
+  depth-proven retirement causes;
 - anchor reprojection error;
 - depth, height, orientation, and geometry rejection reasons;
 - census processing time;
@@ -242,14 +278,10 @@ validation. Diagnostics never cause another inference.
 
 | Phase | Commit | Outcome |
 |---|---|---|
-| 0 | `d7bbae2` | Truthful source/health characterization and continuity baseline |
-| 1 | `b83b5a6` | Guided canonical calibration geometry near the pond |
-| 2 | `c0fbd6c` | Three-step calibration review, direct drag, amber player markers |
-| 3 | `7f377d8` | One pre-calibration AR/census pipeline and draft/final handoff |
-| repair 1 | `2fdb525` | Fresh Coach Live sessions and LiDAR-only entry |
-| repair 2 | `5027fac` | Five-second freeze-and-recalibrate recovery, no 2D fallback |
-| repair 3 | `d00a47c` | Display-cadence projection from ARKit’s current camera |
-| repair 4 | current commit | Shared orientation cleanup, diagnostics, documentation |
+| 1 | Phase 1 commit | One persistent AR surface, read-only Live mode, full-screen renderer, bottom sheet |
+| 2 | Phase 2 commit | Endpoint-defined accessible player regions and exact polygons |
+| 3 | Phase 3 commit | Unknown physical tiles plus fair ordered verification scheduling |
+| 4 | Phase 4 commit | Depth-proven bare-plane retirement, conservative holds, diagnostics, handoff |
 
 Important files:
 
@@ -261,12 +293,16 @@ Important files:
 | Guided calibration UI using the shared session | `App/Sources/Features/CoachLive/Capture/ARCalibrationView.swift` |
 | Visibility, occlusion, diagnostics, census controller | `App/Sources/Features/CoachLive/Capture/WorldCensusController.swift` |
 | Census-to-UI adapter | `App/Sources/Features/CoachLive/Capture/CensusStateAdapter.swift` |
+| Fair ROI and verification scheduler | `App/Sources/Features/CoachLive/Capture/ROIScheduler.swift` |
 | Source transitions, loop, recounts, corrections | `App/Sources/Features/CoachLive/CoachLiveSession.swift` |
 | Shared raw/oriented transform | `Packages/Recognition/Sources/Recognition/Tracking/FrameImageTransform.swift` |
 | Projection/unprojection | `Packages/Recognition/Sources/Recognition/Tracking/TableProjection.swift` |
 | Depth sampling | `Packages/Recognition/Sources/Recognition/Tracking/DepthSampler.swift` |
 | Canonical guided calibration | `Packages/Recognition/Sources/Recognition/Census/WorldTableCalibration.swift` |
 | Physical identities/lifecycle | `Packages/Recognition/Sources/Recognition/Census/PhysicalCensus.swift` |
+| Physical/unknown presentation | `Packages/Recognition/Sources/Recognition/Census/CensusPhysicalPresentation.swift` |
+| Tested deferred/verification policy | `Packages/Recognition/Sources/Recognition/Census/DeferredRegionWorkQueue.swift` |
+| Bare/occupied/occluded depth policy | `Packages/Recognition/Sources/Recognition/Census/TileFootprintDepthEvidence.swift` |
 | Census-to-event read model | `Packages/Recognition/Sources/Recognition/Census/CensusEventAdapter.swift` |
 | Existing settle-diff event engine integration | `Packages/Recognition/Sources/Recognition/Tracking/TableTracker.swift` |
 | Persistence metadata | `Packages/Recognition/Sources/Recognition/Census/WorldMapCalibrationMetadata.swift` |
@@ -277,45 +313,44 @@ Verified locally:
 
 ```text
 swift test --package-path Packages/Recognition
-293 tests, 0 failures
+307 tests, 0 failures
 
 Xcode 26.5 SDK / deployment target iOS 26.0:
-- generic iOS build: passed
-- generic physical-device (`iphoneos`, arm64) build: passed
-- separate iPhone iOS 26.5 Simulator gate: passed
-- separate iPad iOS 26.5 Simulator gate: passed
+- generic universal iPhone/iPad iOS Simulator build: passed (arm64 + x86_64)
 ```
 
 Coverage includes canonical transform construction, exact polygons, independent
 extent/clamping, invalid calibration, all four iPad orientation round trips,
 depth rejection, stable plane anchors, 24 mm adjacent-tile separation,
-pan-away and occlusion survival, exact fifth-miss retirement, deterministic
+known/unknown physical presentation, ordered three-read verification, deferred
+ROI survival and starvation freedom, occupied/occluded depth holds, bare-plane
+classification, pan-away survival, exact fifth-miss retirement, deterministic
 corrections, source-safe event parity, old persistence rejection, and v3
 metadata round trip. The unrelated untracked `Modeling` directory is preserved.
 
 Still required on an M4 iPad with LiDAR:
 
-1. Confirm guided calibration and Live retain the same AR session.
-2. Check pond/hand overlays within one tile width from three viewpoints.
-3. Rotate through all four iPad orientations and verify the same anchor stays
-   on each tile.
-4. Confirm DEBUG reports `source=CENSUS`.
-5. Confirm no spatial overlay is paired with legacy counts.
-6. Pan a zone away for ten seconds; counts and identities must hold.
-7. Cover tiles by hand; qualified misses and retirements must remain unchanged.
-8. Remove one tile; retirement must occur only after five qualified
-   visible-empty observations and 0.8 seconds.
-9. Recenter; overlay and ownership must move together immediately.
-10. Recalibrate live; no second coordinate system may appear.
-11. End Hand; tiles clear and calibration remains for that active session.
-12. Exit Coach Live; calibration and counts clear after confirmation.
-13. Force-quit and relaunch; Home appears, and the next Coach Live entry starts
-    fresh guided calibration.
-14. Interrupt pose or depth temporarily; the last census state holds and
-    degradation is visible. Recovery within five seconds resumes; sustained
-    failure returns to fresh calibration without 2D counts.
-15. Compare `inferencesRun` before/after census processing; the census must add
-    zero invocations.
+1. Confirm with the DEBUG HUD visible: session ID, pipeline generation, reset
+   counters, camera image, and region reprojection do not jump or blink.
+2. Exact labelled regions remain visible immediately in read-only Live mode;
+   handles disappear and Recalibrate restores them on the same surface.
+3. The collapsed gameplay sheet leaves the near hand visible, and all five
+   regions complete ordered verification with executed/deferred HUD evidence.
+4. Unknown physical anchors appear as `?` placeholders and displayed physical
+   zone totals equal the DEBUG physical totals.
+5. Move through three viewpoints and all four supported iPad orientations;
+   regions and confirmed anchors stay within one tile width.
+6. Pan a zone away for ten seconds; counts and identities hold. Cover tiles by
+   hand; occupied/occlusion holds rise while qualified misses do not.
+7. Remove one tile and reveal bare table; `empty` proofs advance retirement
+   only on the fifth qualified observation spanning at least 0.8 seconds.
+8. Recenter and recalibrate; overlay, ROI geometry, and ownership move together
+   without a second renderer/session/coordinate system.
+9. End Hand clears tiles but retains in-session calibration; exit/force-quit
+   clears both, returns to Home, and the next Coach Live entry starts fresh.
+10. Hold tracking limited for five seconds: the last census snapshot remains,
+    the same AR surface becomes editable, and session/reset counters do not
+    change. Compare `inferencesRun`; census processing adds zero invocations.
 
 These are physical-device gates, not deferred source work. Do not declare the
 LiDAR release accepted from Simulator results alone.

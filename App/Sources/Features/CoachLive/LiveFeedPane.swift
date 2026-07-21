@@ -562,8 +562,12 @@ struct LiveFeedPane: View {
             Text("tracking \(session.arCapture?.cameraTrackingReason ?? "—")")
             Text("config \(session.diagnostics.configurationRunCount) · reset \(session.diagnostics.resetTrackingRunCount)/\(session.diagnostics.removeExistingAnchorsRunCount) · \(session.diagnostics.lastConfigurationReason)\(session.diagnostics.lastConfigurationUsedReset ? " ⚠︎" : "")")
             Text("rec: \(session.diagnostics.recognizerType) · mode \(session.arCapture != nil && !session.usingFallbackCapture ? "AR" : "2D")")
-            Text(session.diagnostics.roiPlan)
+            Text("\(session.diagnostics.roiPlan) · deferred \(session.diagnostics.roiDeferredRegions)")
             Text("verification \(session.diagnostics.roiVerification)")
+            Text("physical \(session.diagnostics.worldCensusPhysicalCount) · resolved \(session.diagnostics.worldCensusResolvedCount)")
+            Text("empty \(session.diagnostics.worldCensusEmptyPlaneProofs) · occupied \(session.diagnostics.worldCensusOccupiedHolds) · occluded \(session.diagnostics.worldCensusOcclusionHolds)")
+            Text("depth-hold \(session.diagnostics.worldCensusMissingDepthHolds) · offscreen \(session.diagnostics.worldCensusOffscreenHolds) · suppressed \(session.diagnostics.worldCensusSuppressedMissFrames)")
+            Text("retire depth-proven \(session.diagnostics.worldCensusDepthProvenRetirements)")
             Text("err(\(session.recognizerErrorCount)): \(session.lastPipelineError ?? "—")")
             #if DEBUG
             let geo = session.calibratedTableGeometry

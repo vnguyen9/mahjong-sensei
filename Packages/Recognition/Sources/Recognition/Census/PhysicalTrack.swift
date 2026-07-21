@@ -17,10 +17,10 @@ public struct CensusTrackID: Sendable, Hashable, Comparable, Codable {
 /// ```
 /// tentative --3 hits in 5 opportunities--> confirmed
 /// tentative --window expires without 3 hits--> (dropped)
-/// confirmed --qualified covered miss--> temporarilyMissing
+/// confirmed --depth-proven qualified-empty miss--> temporarilyMissing
 /// temporarilyMissing --matched again--> confirmed
 /// temporarilyMissing --5 qualified misses AND >=0.8s--> retired
-/// confirmed --coverage lost (not a miss)--> stale
+/// confirmed --not explicitly proven empty--> stale
 /// stale --reacquired--> confirmed
 /// ```
 ///

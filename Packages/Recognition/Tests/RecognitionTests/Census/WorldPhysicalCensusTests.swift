@@ -29,7 +29,7 @@ final class WorldPhysicalCensusTests: XCTestCase {
 
     private func ingest(_ observations: [TileObservation],
                         into census: PhysicalCensus,
-                        visible: Set<CensusTrackID> = [],
+                        qualifiedEmpty: Set<CensusTrackID> = [],
                         frame: Int,
                         time: TimeInterval) {
         let batch = ObservationBatch(
@@ -45,7 +45,7 @@ final class WorldPhysicalCensusTests: XCTestCase {
             ]],
             context: CensusFrameContext(
                 worldToTable: matrix_identity_float4x4,
-                visibleTrackIDs: visible
+                qualifiedEmptyTrackIDs: qualifiedEmpty
             ),
             at: time
         )
@@ -103,10 +103,10 @@ final class WorldPhysicalCensusTests: XCTestCase {
             )
         }
 
-        // The app omits IDs from `visibleTrackIDs` for offscreen tracks,
-        // missing depth, and closer occluding geometry.
+        // The app omits IDs from `qualifiedEmptyTrackIDs` for offscreen
+        // tracks, missing depth, and closer occluding geometry.
         for frame in 3..<20 {
-            ingest([], into: census, visible: [], frame: frame, time: Double(frame))
+            ingest([], into: census, qualifiedEmpty: [], frame: frame, time: Double(frame))
         }
 
         let track = census.snapshot(at: 20).tracks.first
@@ -129,11 +129,11 @@ final class WorldPhysicalCensusTests: XCTestCase {
         let id = CensusTrackID(0)
         let missTimes: [TimeInterval] = [1.0, 1.2, 1.4, 1.6]
         for (offset, time) in missTimes.enumerated() {
-            ingest([], into: census, visible: [id], frame: 10 + offset, time: time)
+            ingest([], into: census, qualifiedEmpty: [id], frame: 10 + offset, time: time)
         }
         XCTAssertEqual(census.snapshot(at: 1.6).tracks.first?.lifecycle, .temporarilyMissing)
 
-        ingest([], into: census, visible: [id], frame: 20, time: 1.8)
+        ingest([], into: census, qualifiedEmpty: [id], frame: 20, time: 1.8)
         XCTAssertTrue(census.snapshot(at: 1.8).tracks.isEmpty)
         XCTAssertEqual(census.diagnostics.qualifiedMisses, 5)
         XCTAssertEqual(census.diagnostics.retirements, 1)

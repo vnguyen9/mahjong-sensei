@@ -1248,6 +1248,7 @@ final class CoachLiveSession: Identifiable {
                     case .none: roiLabel = "none"
                     }
                     self.diagnostics.roiPlan = self.useROIScheduler ? "roi: \(roiLabel)" : "roi: off"
+                    self.diagnostics.roiDeferredRegions = roiScheduler.deferredRegionCount
 
                     switch plan {
                     case .fullFrame:
@@ -1325,7 +1326,10 @@ final class CoachLiveSession: Identifiable {
                             ],
                             recognizerSucceeded: fullRecognizerSucceeded,
                             trackingIsNormal: arCapture.captureStage == .tracking,
-                            allowsQualifiedMisses: self.calibrationDraft == nil,
+                            allowsQualifiedMisses: self.calibrationDraft == nil
+                                && !moving
+                                && level < self.trackerConfig.motionSettle
+                                && self.spatialTrackingHealth == .healthy,
                             at: now
                         )
                         self.updateWorldCensusDiagnostics()
@@ -1454,7 +1458,10 @@ final class CoachLiveSession: Identifiable {
                             coverageRects: censusCoverageRects,
                             recognizerSucceeded: attemptedCrop && cropRecognizerSucceeded,
                             trackingIsNormal: arCapture.captureStage == .tracking,
-                            allowsQualifiedMisses: self.calibrationDraft == nil,
+                            allowsQualifiedMisses: self.calibrationDraft == nil
+                                && !moving
+                                && level < self.trackerConfig.motionSettle
+                                && self.spatialTrackingHealth == .healthy,
                             at: now
                         )
                         self.updateWorldCensusDiagnostics()
@@ -2376,6 +2383,21 @@ final class CoachLiveSession: Identifiable {
         diagnostics.worldCensusCalibrationSource =
             controller.calibration?.source.rawValue ?? "unmarked"
         diagnostics.worldCensusMilliseconds = controller.diagnostics.lastIngestMilliseconds
+        diagnostics.worldCensusPhysicalCount = liveTileCount
+        diagnostics.worldCensusResolvedCount = snapshot.tracks.count {
+            guard $0.lifecycle != .tentative,
+                  $0.lifecycle != .retired,
+                  $0.semanticZone != .ignoredWall,
+                  case .tile(_)? = $0.face else { return false }
+            return true
+        }
+        diagnostics.worldCensusEmptyPlaneProofs = controller.diagnostics.emptyPlaneProofs
+        diagnostics.worldCensusOccupiedHolds = controller.diagnostics.occupiedHolds
+        diagnostics.worldCensusOcclusionHolds = controller.diagnostics.occlusionHolds
+        diagnostics.worldCensusMissingDepthHolds = controller.diagnostics.missingDepthHolds
+        diagnostics.worldCensusOffscreenHolds = controller.diagnostics.offscreenHolds
+        diagnostics.worldCensusSuppressedMissFrames = controller.diagnostics.qualifiedMissesSuppressedFrames
+        diagnostics.worldCensusDepthProvenRetirements = controller.diagnostics.depthProvenRetirements
         refreshSpatialContinuityDiagnostics()
         if let calibration = controller.calibration {
             arCapture?.updateTableCalibration(
@@ -2413,7 +2435,7 @@ final class CoachLiveSession: Identifiable {
             diagnostics.worldCensusDepthSummary = "—"
         }
         Self.logger.debug(
-            "census source=\(self.countSource.diagnosticName, privacy: .public) health=\(self.spatialTrackingHealth.diagnosticName, privacy: .public) tracks=\(snapshot.tracks.count, privacy: .public) tentative=\(self.diagnostics.worldCensusTentative, privacy: .public) confirmed=\(self.diagnostics.worldCensusConfirmed, privacy: .public) stale=\(self.diagnostics.worldCensusStale, privacy: .public) missing=\(self.diagnostics.worldCensusMissing, privacy: .public) depthAcceptance=\(self.diagnostics.worldCensusDepthAcceptance, privacy: .public) reprojectionPx=\(self.diagnostics.worldCensusAnchorErrorPixels, privacy: .public) ms=\(self.diagnostics.worldCensusMilliseconds, privacy: .public) arSession=\(self.diagnostics.spatialSessionID, privacy: .public) pipeline=\(self.diagnostics.spatialPipelineGeneration, privacy: .public) calibration=\(self.diagnostics.calibrationRevision, privacy: .public) resets=\(self.diagnostics.resetTrackingRunCount, privacy: .public)"
+            "census source=\(self.countSource.diagnosticName, privacy: .public) health=\(self.spatialTrackingHealth.diagnosticName, privacy: .public) tracks=\(snapshot.tracks.count, privacy: .public) physical=\(self.diagnostics.worldCensusPhysicalCount, privacy: .public) resolved=\(self.diagnostics.worldCensusResolvedCount, privacy: .public) tentative=\(self.diagnostics.worldCensusTentative, privacy: .public) confirmed=\(self.diagnostics.worldCensusConfirmed, privacy: .public) stale=\(self.diagnostics.worldCensusStale, privacy: .public) missing=\(self.diagnostics.worldCensusMissing, privacy: .public) depthAcceptance=\(self.diagnostics.worldCensusDepthAcceptance, privacy: .public) emptyProofs=\(self.diagnostics.worldCensusEmptyPlaneProofs, privacy: .public) occupiedHolds=\(self.diagnostics.worldCensusOccupiedHolds, privacy: .public) occlusionHolds=\(self.diagnostics.worldCensusOcclusionHolds, privacy: .public) missingDepthHolds=\(self.diagnostics.worldCensusMissingDepthHolds, privacy: .public) depthRetirements=\(self.diagnostics.worldCensusDepthProvenRetirements, privacy: .public) roiDeferred=\(self.diagnostics.roiDeferredRegions, privacy: .public) reprojectionPx=\(self.diagnostics.worldCensusAnchorErrorPixels, privacy: .public) ms=\(self.diagnostics.worldCensusMilliseconds, privacy: .public) arSession=\(self.diagnostics.spatialSessionID, privacy: .public) pipeline=\(self.diagnostics.spatialPipelineGeneration, privacy: .public) calibration=\(self.diagnostics.calibrationRevision, privacy: .public) resets=\(self.diagnostics.resetTrackingRunCount, privacy: .public)"
         )
     }
 
@@ -3170,6 +3192,7 @@ struct LiveDiagnostics {
     /// on `startLoop`'s image-space path or the mock path (no scheduler
     /// runs there).
     var roiPlan = "—"
+    var roiDeferredRegions = 0
     /// The bounded post-confirmation region pass. `—` means no calibration
     /// verification is pending; values such as `verifying hand 1/3` are
     /// intentionally compact enough for the production status line too.
@@ -3185,6 +3208,15 @@ struct LiveDiagnostics {
     var worldCensusAnchorErrorPixels: Double = 0
     var worldCensusCalibrationSource = "—"
     var worldCensusMilliseconds: Double = 0
+    var worldCensusPhysicalCount = 0
+    var worldCensusResolvedCount = 0
+    var worldCensusEmptyPlaneProofs = 0
+    var worldCensusOccupiedHolds = 0
+    var worldCensusOcclusionHolds = 0
+    var worldCensusMissingDepthHolds = 0
+    var worldCensusOffscreenHolds = 0
+    var worldCensusSuppressedMissFrames = 0
+    var worldCensusDepthProvenRetirements = 0
     var worldCensusZoneSummary = "—"
     var worldCensusDepthSummary = "—"
     /// Calibration-to-Live continuity audit. These values come from
