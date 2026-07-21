@@ -1,15 +1,15 @@
 # Coach Live — Authoritative ARKit World Census Handoff
 
-> **Source status (2026-07-20):** Phases 0–3 are committed and Phase 4 is the
-> current integration commit. Recognition has 293 tests before any new tests;
-> separate iPhone and iPad iOS 26.5 Simulator gates pass. The M4 iPad/LiDAR
+> **Source status (2026-07-20):** The authoritative census is integrated, and
+> the fresh-session/tracking repair is split across commits `2fdb525`,
+> `5027fac`, and `d00a47c`. Recognition has 293 tests; separate iPhone and
+> iPad iOS 26.5 Simulator gates pass. The M4 iPad/LiDAR
 > acceptance matrix in §9 remains a release gate
 > because Simulator testing cannot validate depth, physical anchor stability,
 > occlusion, or ARWorldMap relocalization.
 >
-> There is no `coachLive.useWorldCensus` feature flag. A healthy LiDAR session
-> uses census counts; an unsupported or persistently failed depth session uses
-> an explicit, labeled 2D fallback.
+> There is no `coachLive.useWorldCensus` feature flag and no production 2D
+> fallback. Coach Live is temporarily restricted to LiDAR-equipped iPads.
 
 ## 1. User-visible outcome
 
@@ -28,8 +28,9 @@ Coach Live is no longer a camera-space counter with AR-shaped decoration:
   least 0.8 seconds.
 - Recenter and recalibration update zoning, ROI planning, and overlays
   atomically.
-- Relaunch persistence restores table calibration only—never tile identities
-  or counts.
+- Exiting or relaunching discards calibration and counts. Every Coach Live
+  entry starts the guided flow fresh while app-level first-run onboarding
+  remains remembered independently.
 
 The legacy “Table found — pan slowly…” sweep was removed in `d6f9713`. Plane
 lock enters tracking and requests one full inference; recounts are one-shot
@@ -58,17 +59,15 @@ On LiDAR hardware:
    tracking…” or “Looking for tiles…” screen.
 3. Confirming valid calibration activates `worldCensus` immediately, even when
    zero tracks have confirmed yet.
-4. If depth disappears, the last census presentation is held.
-5. After two continuous seconds, AR depth semantics are restarted once.
-6. If depth is still absent, Coach Live creates a clean legacy tracker and
-   enters visibly labeled `legacy2D(.depthUnavailable)` with Retry.
+4. If tracking is limited or depth disappears, the last census presentation
+   is held and the overlays dim under “Recovering table tracking…”.
+5. After two continuous seconds without depth, AR depth semantics restart once.
+6. If pose or depth remains unhealthy for five continuous seconds, the current
+   calibration and counts are cleared and guided calibration restarts.
 
-The clean tracker replacement is important: census-fed event tracks are never
-reused as legacy detections, so one snapshot cannot mix sources.
-
-On devices without supported scene depth, Coach Live explicitly uses
-`legacy2D(.depthUnsupported)`. Spatial polygons are hidden unless calibration
-and tracking are healthy.
+Devices without supported scene depth cannot enter Coach Live. They see a
+disabled, clearly labeled “Requires a LiDAR-equipped iPad” control. Spatial
+polygons remain hidden unless calibration and tracking are healthy.
 
 ## 3. Coordinate and calibration architecture
 
@@ -131,8 +130,11 @@ recognition, crop mapping, depth sampling, table projection, hand pose,
 raycasts, and overlays.
 
 `ARFrame.displayTransform(for:viewportSize:)` maps raw camera pixels to the
-preview. Portrait, upside-down portrait, landscape left, and landscape right
-are supported on iPadOS 26. iPhone remains portrait-only.
+preview. Production brackets and DEBUG polygons use
+`ARCamera.projectPoint(_:orientation:viewportSize:)` against the same current
+frame and shared orientation at 30 Hz, independent of recognizer cadence.
+Portrait, upside-down portrait, landscape left, and landscape right are
+supported on iPadOS 26. iPhone remains portrait-only.
 
 An orientation transition skips the frame and cannot count as a miss.
 
@@ -204,36 +206,20 @@ Face pinning, zone correction, deletion, recount, recenter, recalibration,
 histogram edits, and hand reset route according to `CoachLiveCountSource`.
 End Hand clears census tiles while retaining calibration.
 
-## 6. Persistence
+## 6. Fresh-session policy
 
-Persistence schema version 3 stores:
+AR world-map and tracker-session restoration are disabled while physical
+tracking is stabilized:
 
-- one named `mahjong-sensei.table-origin` `ARAnchor`;
-- rectangular X/Z extent;
-- exact local pond polygon;
-- exact local hand polygon;
-- exact revealed-zone polygons;
-- calibration source;
-- secure `ARWorldMap`.
+- `ARTableCapture.start()` deletes any older world-map archive before starting;
+- no AR world map is saved on pause, exit, or calibration confirmation;
+- clean exit deletes calibration, counts, and in-flight Coach Live state;
+- a killed and relaunched app opens Home, not Live;
+- entering Coach Live always presents setup, primer, and guided calibration;
+- app-level first-run onboarding remains a separate remembered preference.
 
-Versions 1 and 2 are rejected because they may contain the old plane-centroid
-or outer-plane geometry. Archives are written atomically under
-Application Support only while mapping is `.extending` or `.mapped`, and only
-when the named origin anchor is present in the captured map.
-
-Restore has an explicit decision state before guided marks: the same-session
-camera preview says “Restoring your table…” while ARKit relocalizes the named
-origin. Restore is adopted only after normal tracking observes that anchor;
-it restores calibration (not counts or tile identities), queues one recount,
-and enters Live without manual calibration. After eight seconds, the stale
-archive is deleted, tracking resets, and the still-running pipeline enters the
-normal primer/three-step calibration flow.
-
-No tile identity, count, or per-tile anchor is written to the AR archive.
-Coach Live’s older tracker-session archive is disabled for AR sessions, so it
-cannot restore spatial counts through a second persistence path. Recalibration
-invalidates the old archive immediately; a replacement is saved only once
-mapping is eligible.
+The versioned metadata and world-map store remain dormant for future restore
+work, but no current production route reads or writes them.
 
 ## 7. Diagnostics
 
@@ -260,14 +246,17 @@ validation. Diagnostics never cause another inference.
 | 1 | `b83b5a6` | Guided canonical calibration geometry near the pond |
 | 2 | `c0fbd6c` | Three-step calibration review, direct drag, amber player markers |
 | 3 | `7f377d8` | One pre-calibration AR/census pipeline and draft/final handoff |
-| 4 | current Phase 4 commit | Restore-flow integration, persistence adoption, final cleanup |
+| repair 1 | `2fdb525` | Fresh Coach Live sessions and LiDAR-only entry |
+| repair 2 | `5027fac` | Five-second freeze-and-recalibrate recovery, no 2D fallback |
+| repair 3 | `d00a47c` | Display-cadence projection from ARKit’s current camera |
+| repair 4 | current commit | Shared orientation cleanup, diagnostics, documentation |
 
 Important files:
 
 | Responsibility | File |
 |---|---|
 | AR lifecycle, depth semantics, named anchor, relocalization | `App/Sources/Features/CoachLive/Capture/ARTableCapture.swift` |
-| Atomic ARWorldMap archive | `App/Sources/Features/CoachLive/Capture/ARWorldMapStore.swift` |
+| Dormant future ARWorldMap archive | `App/Sources/Features/CoachLive/Capture/ARWorldMapStore.swift` |
 | Same-frame pose/image/orientation/depth carrier | `App/Sources/Features/CoachLive/Capture/ARTableFrame.swift` |
 | Guided calibration UI using the shared session | `App/Sources/Features/CoachLive/Capture/ARCalibrationView.swift` |
 | Visibility, occlusion, diagnostics, census controller | `App/Sources/Features/CoachLive/Capture/WorldCensusController.swift` |
@@ -317,12 +306,13 @@ Still required on an M4 iPad with LiDAR:
    visible-empty observations and 0.8 seconds.
 9. Recenter; overlay and ownership must move together immediately.
 10. Recalibrate live; no second coordinate system may appear.
-11. End Hand; tiles clear and calibration remains.
-12. Relaunch in the same room; calibration restores but counts start empty.
-13. Relaunch elsewhere; the stale map expires after eight seconds and fresh
-    calibration begins.
-14. Interrupt depth temporarily; the last census state holds, degradation is
-    visible, one restart occurs, and Retry is offered if fallback is needed.
+11. End Hand; tiles clear and calibration remains for that active session.
+12. Exit Coach Live; calibration and counts clear after confirmation.
+13. Force-quit and relaunch; Home appears, and the next Coach Live entry starts
+    fresh guided calibration.
+14. Interrupt pose or depth temporarily; the last census state holds and
+    degradation is visible. Recovery within five seconds resumes; sustained
+    failure returns to fresh calibration without 2D counts.
 15. Compare `inferencesRun` before/after census processing; the census must add
     zero invocations.
 

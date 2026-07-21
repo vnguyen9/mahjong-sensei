@@ -326,7 +326,6 @@ final class ARTableCapture: NSObject {
     /// cadence never determines where calibrated geometry appears onscreen.
     func projectWorldPoint(
         _ point: SIMD3<Float>,
-        interfaceOrientation: UIInterfaceOrientation,
         viewportSize: CGSize
     ) -> CGPoint? {
         guard viewportSize.width > 0, viewportSize.height > 0,
@@ -336,11 +335,21 @@ final class ARTableCapture: NSObject {
         guard cameraPoint.z < -0.001 else { return nil }
         let projected = frame.camera.projectPoint(
             point,
-            orientation: interfaceOrientation,
+            orientation: currentInterfaceOrientation,
             viewportSize: viewportSize
         )
         guard projected.x.isFinite, projected.y.isFinite else { return nil }
         return projected
+    }
+
+    private var currentInterfaceOrientation: UIInterfaceOrientation {
+        switch currentImageOrientation {
+        case .right: return .portrait
+        case .left: return .portraitUpsideDown
+        case .up: return .landscapeLeft
+        case .down: return .landscapeRight
+        default: return .portrait
+        }
     }
 
     /// Keeps exactly one named AR anchor for the fitted table origin. Tile

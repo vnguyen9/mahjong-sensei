@@ -306,13 +306,12 @@ final class CoachLiveSession: Identifiable {
         calibrationHasBeenFinalized = true
         calibrationDecision = "RESTORED"
         recountRequest = .fullTable
-        if ARTableCapture.supportsSceneDepth {
-            countSource = .worldCensus
-            spatialTrackingHealth = .healthy
-        } else {
-            countSource = .legacy2D(.depthUnsupported)
-            spatialTrackingHealth = .depthUnavailable
-        }
+        countSource = ARTableCapture.supportsSceneDepth
+            ? .worldCensus
+            : .spatialBootstrapping
+        spatialTrackingHealth = ARTableCapture.supportsSceneDepth
+            ? .healthy
+            : .depthUnavailable
         startupStage = .ready
         showARCalibration = false
         let state = presentationState(preserving: tracker?.state ?? .empty)
@@ -353,13 +352,12 @@ final class CoachLiveSession: Identifiable {
         arCapture?.updateTableCalibration(calibration)
         recountRequest = .fullTable
         calibrationHasBeenFinalized = true
-        if ARTableCapture.supportsSceneDepth {
-            countSource = .worldCensus
-            spatialTrackingHealth = .healthy
-        } else {
-            countSource = .legacy2D(.depthUnsupported)
-            spatialTrackingHealth = .depthUnavailable
-        }
+        countSource = ARTableCapture.supportsSceneDepth
+            ? .worldCensus
+            : .spatialBootstrapping
+        spatialTrackingHealth = ARTableCapture.supportsSceneDepth
+            ? .healthy
+            : .depthUnavailable
         startupStage = .ready
         verifyCalibrationContinuity(from: draft, phase: "finalize")
         calibrationDraft = nil
@@ -2289,12 +2287,11 @@ final class CoachLiveSession: Identifiable {
         if arCapture == nil {
             countSource = .legacy2D(.arUnavailable)
             spatialTrackingHealth = .trackingLimited
-        } else if ARTableCapture.supportsSceneDepth {
-            countSource = .spatialBootstrapping
-            spatialTrackingHealth = .calibrating
         } else {
-            countSource = .legacy2D(.depthUnsupported)
-            spatialTrackingHealth = .depthUnavailable
+            countSource = .spatialBootstrapping
+            spatialTrackingHealth = ARTableCapture.supportsSceneDepth
+                ? .calibrating
+                : .depthUnavailable
         }
     }
 
@@ -2599,8 +2596,7 @@ final class CoachLiveSession: Identifiable {
     /// rectangle stuck to the screen.
     @MainActor
     func currentProjectedZoneRects(
-        viewportSize: CGSize,
-        interfaceOrientation: UIInterfaceOrientation
+        viewportSize: CGSize
     ) -> (mine: CGRect?, pond: CGRect?) {
         guard countSource == .worldCensus,
               spatialTrackingHealth == .healthy,
@@ -2616,7 +2612,6 @@ final class CoachLiveSession: Identifiable {
                     * SIMD4<Float>(local.x, 0, local.y, 1)
                 return capture.projectWorldPoint(
                     SIMD3<Float>(world.x, world.y, world.z),
-                    interfaceOrientation: interfaceOrientation,
                     viewportSize: viewportSize
                 )
             }

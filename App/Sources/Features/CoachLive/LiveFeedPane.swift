@@ -548,6 +548,7 @@ struct LiveFeedPane: View {
             Text("calibration \(session.diagnostics.worldCensusCalibrationSource) · \(session.diagnostics.calibrationDecision)")
             Text("source \(session.countSource.diagnosticName) · health \(session.spatialTrackingHealth.diagnosticName)")
             Text("AR \(session.diagnostics.spatialSessionID) · pipe \(session.diagnostics.spatialPipelineGeneration) · cal \(session.diagnostics.calibrationRevision) · \(session.diagnostics.calibrationDecision)")
+            Text("tracking \(session.arCapture?.cameraTrackingReason ?? "—")")
             Text("config \(session.diagnostics.configurationRunCount) · reset \(session.diagnostics.resetTrackingRunCount)/\(session.diagnostics.removeExistingAnchorsRunCount) · \(session.diagnostics.lastConfigurationReason)\(session.diagnostics.lastConfigurationUsedReset ? " ⚠︎" : "")")
             Text("rec: \(session.diagnostics.recognizerType) · mode \(session.arCapture != nil && !session.usingFallbackCapture ? "AR" : "2D")")
             Text(session.diagnostics.roiPlan)

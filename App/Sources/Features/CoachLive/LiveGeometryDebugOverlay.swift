@@ -4,7 +4,6 @@ import DesignSystem
 import MahjongCore
 import Recognition
 import simd
-import UIKit
 
 /// DEV-ONLY overlay that draws the **calibrated table geometry** projected onto
 /// the live tracking feed — the hand band, the pond, each opponent's meld band,
@@ -13,11 +12,10 @@ import UIKit
 ///
 /// The live feed is a plain `CAMetalLayer` (no SceneKit), so rather than a 3D
 /// overlay (which would need a second `ARSession` fighting the tracking one),
-/// this projects each geometry corner to screen with the SAME math the tracking
-/// loop uses — `TableProjection.normalizedOrientedPoint` (`CoachLiveSession`'s
-/// per-frame projection) → `AspectFillMapping.previewRect` — and strokes flat
-/// `Canvas` polygons. `latestFrame` is polled (not observable), so a
-/// `TimelineView(.animation)` re-projects every display frame.
+/// this projects each world-space corner with ARKit's current
+/// `ARCamera.projectPoint` and strokes flat `Canvas` polygons. A
+/// `TimelineView(.animation)` re-projects every display frame, independently
+/// of recognition cadence.
 ///
 /// Gated to `#if DEBUG` and toggled from the triple-tap debug HUD; hidden until
 /// the plane is locked and a geometry exists.
@@ -52,8 +50,6 @@ struct LiveGeometryDebugOverlay: View {
         let extent = geometry.extent
         guard extent > 0 else { return }
 
-        let orientation = interfaceOrientation
-
         /// Normalized table point → screen point (nil if behind camera).
         func screen(_ n: SIMD2<Double>) -> CGPoint? {
             let local = SIMD2<Double>((n.x - 0.5) * extent, (n.y - 0.5) * extent)
@@ -61,7 +57,6 @@ struct LiveGeometryDebugOverlay: View {
                 * SIMD4<Float>(Float(local.x), 0, Float(local.y), 1)
             return capture.projectWorldPoint(
                 SIMD3<Float>(world.x, world.y, world.z),
-                interfaceOrientation: orientation,
                 viewportSize: previewBounds.size
             )
         }
@@ -70,7 +65,6 @@ struct LiveGeometryDebugOverlay: View {
             let world = planeTransform * SIMD4<Float>(local.x, 0, local.y, 1)
             return capture.projectWorldPoint(
                 SIMD3<Float>(world.x, world.y, world.z),
-                interfaceOrientation: orientation,
                 viewportSize: previewBounds.size
             )
         }
@@ -131,7 +125,6 @@ struct LiveGeometryDebugOverlay: View {
                 guard let world = track.worldPosition,
                       let point = capture.projectWorldPoint(
                         world,
-                        interfaceOrientation: orientation,
                         viewportSize: previewBounds.size
                       ) else { continue }
                 let anchor = Path(
@@ -153,13 +146,6 @@ struct LiveGeometryDebugOverlay: View {
                 .foregroundStyle(MJColor.creamHeading),
                 at: CGPoint(x: p.x, y: p.y - 14))
         }
-    }
-
-    private var interfaceOrientation: UIInterfaceOrientation {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }?
-            .effectiveGeometry.interfaceOrientation ?? .portrait
     }
 
     /// Pond outline points: rect/quad use their 4 corners; a disk is sampled

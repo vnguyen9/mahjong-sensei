@@ -1,11 +1,8 @@
 import SwiftUI
 import DesignSystem
 
-/// First-run illustrated primer (spec screen 1) — explains WHY Coach needs to
-/// learn the table before the camera/AR starts, and doubles as the soft
-/// camera-permission ask (the OS prompt fires when the AR session starts, right
-/// after "Set up table"). Shown once, ever (`CoachLivePrefs.hasSeenARPrimer`);
-/// re-reachable from Settings.
+/// Coach Live's per-session calibration primer. This is deliberately separate
+/// from app-level first-run onboarding and appears for every fresh table.
 struct CalibrationPrimerView: View {
     var onContinue: () -> Void
     var onCancel: () -> Void
@@ -21,7 +18,7 @@ struct CalibrationPrimerView: View {
             ScreenBackground(.live)
             VStack(spacing: 20) {
                 VStack(spacing: 8) {
-                    Text("FIRST-RUN SETUP").eyebrowStyle()
+                    Text("COACH LIVE TABLE SETUP").eyebrowStyle()
                     Text("Teach Coach your table")
                         .font(MJFont.serif(24, weight: .bold))
                         .foregroundStyle(MJColor.creamHeading)

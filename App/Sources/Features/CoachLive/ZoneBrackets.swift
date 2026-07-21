@@ -2,7 +2,6 @@ import SwiftUI
 import DesignSystem
 import MahjongCore
 import Recognition
-import UIKit
 
 /// Four rounded L-corners framing a zone — the feed's "fixed chrome" bracket
 /// (UI plan §7): 20pt arms, 3pt stroke, 10pt corner radius, none configurable.
@@ -43,12 +42,9 @@ struct CornerBracketShape: Shape {
 /// Zone corner brackets over the (fixed, full-screen) live feed (UI plan §7,
 /// redesigned under Workstream E2 — "faint zone guides, not loud boxes").
 ///
-/// For each zone the overlay folds `session.zoneBoxes` into a union box (MINE =
-/// hand+bonus+melds, TABLE = pond+opponent melds), maps it through
-/// `AspectFillMapping.previewRect` against the constant full-screen
-/// `previewBounds`, pads it, and converts it into the overlay's local space. A
-/// ±4pt stabilizer keeps the tracker's box jitter from shimmering the
-/// brackets; committed moves ease with a short spring.
+/// In healthy spatial mode, exact calibration polygons are projected from the
+/// current ARKit camera at 30 Hz, independently of recognition cadence. Mock
+/// scenes retain their image-space `session.zoneBoxes` mapping.
 ///
 /// E2 replaced the old "one amber bracket per unresolved tile" spam (dozens of
 /// "N ? · tap" boxes tiling the feed) with a SINGLE consolidated chip — the
@@ -67,9 +63,8 @@ struct CornerBracketShape: Shape {
 /// doesn't accidentally fire a reassignment.
 struct ZoneBracketsOverlay: View {
     @Environment(CoachLiveSession.self) private var session
-    /// The captured global frame of the fixed full-screen preview layer — the
-    /// constant `previewBounds` `AspectFillMapping` needs (it never changes as
-    /// the pane clip animates, so the rects survive split changes).
+    /// The captured global frame of the fixed full-screen preview layer. Its
+    /// size is ARKit's projection viewport; mock scenes also use its origin.
     let previewBounds: CGRect
     let onTapUnresolved: () -> Void
     /// Tapped MINE/POND chip → which zone it labels — the parent turns this
@@ -214,8 +209,7 @@ struct ZoneBracketsOverlay: View {
            previewBounds.width > 0,
            previewBounds.height > 0 {
             let projected = session.currentProjectedZoneRects(
-                viewportSize: previewBounds.size,
-                interfaceOrientation: interfaceOrientation
+                viewportSize: previewBounds.size
             )
             return (
                 projected.mine?.insetBy(dx: -6, dy: -6),
@@ -226,13 +220,6 @@ struct ZoneBracketsOverlay: View {
             mappedRect(for: session.zoneBoxes.mine),
             mappedRect(for: session.zoneBoxes.table)
         )
-    }
-
-    private var interfaceOrientation: UIInterfaceOrientation {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }?
-            .effectiveGeometry.interfaceOrientation ?? .portrait
     }
 
     /// Fold `boxes` into their union, map to the preview, pad +6pt, and shift
