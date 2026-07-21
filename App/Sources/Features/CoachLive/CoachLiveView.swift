@@ -42,7 +42,7 @@ struct LiveControlMetrics: Equatable {
             return LiveControlMetrics(scale: 1.1, segmentedHeight: 40, paneWidthCap: 620,
                                       countTileWidthCap: 24, handTileWidth: 24,
                                       pondTileWidth: 18, meldTileWidth: 17,
-                                      minimumEditHitTarget: 40)
+                                      minimumEditHitTarget: 44)
         case .compact:
             return LiveControlMetrics(scale: 1.25, segmentedHeight: 46, paneWidthCap: 680,
                                       countTileWidthCap: 28, handTileWidth: 28,
@@ -148,10 +148,10 @@ struct CoachLiveView: View {
         self.onScoreHandoff = onScoreHandoff
         _tab = State(initialValue: initialTab)
         _sheet = State(initialValue: initialSheet)
-        // An iPad has enough vertical room for a complete editing surface at
-        // launch. iPhone retains its camera-first peek state.
-        _gameplayDrawerDetent = State(initialValue:
-            UIDevice.current.userInterfaceIdiom == .pad ? .compact : .peek)
+        // Both devices start with the camera-first lowest detent. On iPad the
+        // lowest detent still contains the selected Map / Counts / Events
+        // content; iPhone retains its original lightweight summary.
+        _gameplayDrawerDetent = State(initialValue: .peek)
     }
 
     /// Compression from the space actually AVAILABLE to the state pane
@@ -225,10 +225,12 @@ struct CoachLiveView: View {
             Button("Cancel", role: .cancel) { reassignZone = nil }
         }
         .onChange(of: tab) { _, _ in
-            // Selecting another tab is an intentional request to inspect its
-            // contents, rather than merely changing a hidden selection in the
-            // iPad peek state.
-            if gameplayDrawerDetent == .peek {
+            // The iPad peek already displays the selected tab's real content,
+            // so changing tabs must not unexpectedly move the drawer. Keep
+            // the legacy promotion only for a phone state where content is
+            // intentionally summarized.
+            if UIDevice.current.userInterfaceIdiom != .pad,
+               gameplayDrawerDetent == .peek {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
                     gameplayDrawerDetent = .compact
                 }
@@ -241,10 +243,10 @@ struct CoachLiveView: View {
     private func gameplaySheet(height: CGFloat) -> some View {
         let isPad = UIDevice.current.userInterfaceIdiom == .pad
         let metrics = isPad ? LiveControlMetrics.iPad(detent: gameplayDrawerDetent) : .phone
-        // The iPad peek is deliberately tall enough to retain the segmented
-        // Map / Counts / Events control. A down-swipe steps through these
-        // detents; it never removes the drawer from the user’s reach.
-        let peekHeight: CGFloat = isPad ? 260 : 132
+        // Roughly 15% taller than the former 260pt iPad floor: enough room for
+        // the selected tab's actual content while preserving most of the AR
+        // camera. A down-swipe never moves below this useful floor.
+        let peekHeight: CGFloat = isPad ? min(300, height * 0.48) : 132
         let compactHeight = min(height * (isPad ? 0.62 : 0.58), max(isPad ? 500 : 360, height - 170))
         let expandedHeight = min(height * (isPad ? 0.82 : 0.72), max(isPad ? 620 : 480, height - 110))
         let currentHeight: CGFloat
@@ -255,17 +257,18 @@ struct CoachLiveView: View {
         }
 
         return VStack(spacing: 0) {
-            Capsule()
-                .fill(MJColor.cream(0.35))
-                .frame(width: 36, height: 5)
-                .padding(.top, 9)
-                .padding(.bottom, gameplayDrawerDetent == .peek ? 10 : 7)
+            drawerHandle
 
             if gameplayDrawerDetent == .peek {
-                peekSheetSummary(metrics: metrics)
+                if isPad {
+                    iPadPeekPane(metrics: metrics)
+                        .environment(\.liveCompression, .compact)
+                } else {
+                    phonePeekSummary
+                }
             } else {
-                statePane(compression: compression(for: currentHeight - 22), metrics: metrics)
-                    .environment(\.liveCompression, compression(for: currentHeight - 22))
+                statePane(compression: compression(for: currentHeight - 44), metrics: metrics)
+                    .environment(\.liveCompression, compression(for: currentHeight - 44))
             }
         }
         .frame(maxWidth: .infinity, minHeight: currentHeight, maxHeight: currentHeight, alignment: .top)
@@ -275,28 +278,6 @@ struct CoachLiveView: View {
         .overlay(alignment: .top) {
             Rectangle().fill(MJColor.gold(0.18)).frame(height: 1)
         }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if gameplayDrawerDetent == .peek {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                    gameplayDrawerDetent = .compact
-                }
-            }
-        }
-        .gesture(
-            DragGesture(minimumDistance: 8)
-                .onEnded { value in
-                    if value.translation.height < -36 {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                            gameplayDrawerDetent = gameplayDrawerDetent.next
-                        }
-                    } else if value.translation.height > 36 {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                            gameplayDrawerDetent = gameplayDrawerDetent.previous
-                        }
-                    }
-                }
-        )
         .accessibilityElement(children: .contain)
         .accessibilityLabel(gameplayDrawerDetent == .peek ? "Gameplay controls" : "Gameplay details")
         .accessibilityHint(gameplayDrawerDetent == .peek
@@ -304,8 +285,51 @@ struct CoachLiveView: View {
             : "Swipe down for a smaller gameplay drawer.")
     }
 
-    private func peekSheetSummary(metrics: LiveControlMetrics) -> some View {
-        VStack(spacing: 10) {
+    /// The drag target is isolated from the drawer content so scrolling Events
+    /// or tapping tiles never changes detents accidentally. Its 44pt frame is
+    /// large enough for touch and VoiceOver while the visible capsule remains
+    /// visually quiet.
+    private var drawerHandle: some View {
+        Capsule()
+            .fill(MJColor.cream(0.35))
+            .frame(width: 36, height: 5)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+                    gameplayDrawerDetent = gameplayDrawerDetent.next
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 8)
+                    .onEnded { value in
+                        if value.translation.height < -36 {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+                                gameplayDrawerDetent = gameplayDrawerDetent.next
+                            }
+                        } else if value.translation.height > 36 {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+                                gameplayDrawerDetent = gameplayDrawerDetent.previous
+                            }
+                        }
+                    }
+            )
+            .accessibilityLabel("Resize gameplay drawer")
+            .accessibilityValue(drawerDetentAccessibilityValue)
+            .accessibilityHint("Swipe up or down to resize the drawer")
+            .accessibilityAddTraits(.isButton)
+    }
+
+    private var drawerDetentAccessibilityValue: String {
+        switch gameplayDrawerDetent {
+        case .peek: return "Lowest"
+        case .compact: return "Middle"
+        case .expanded: return "Highest"
+        }
+    }
+
+    private func iPadPeekPane(metrics: LiveControlMetrics) -> some View {
+        VStack(spacing: 8) {
             LiveSegmentedBar(selection: $tab)
             HStack(spacing: 8) {
                 Circle().fill(MJColor.liveRed).frame(width: 7, height: 7)
@@ -316,14 +340,39 @@ struct CoachLiveView: View {
                     .font(MJFont.ui(13, weight: .bold))
             }
             .foregroundStyle(MJColor.creamHeading)
-            Text("Swipe up for more table details")
-                .font(MJFont.ui(11, weight: .medium))
-                .foregroundStyle(MJColor.cream(0.58))
+            tabContent
+                .frame(maxWidth: .infinity, minHeight: 84, maxHeight: .infinity)
         }
         .padding(.horizontal, 16)
-        .padding(.bottom, 16)
+        .padding(.bottom, 10)
         .frame(maxWidth: metrics.paneWidthCap)
-        .frame(maxWidth: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private var phonePeekSummary: some View {
+        Button {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+                gameplayDrawerDetent = .compact
+            }
+        } label: {
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    Circle().fill(MJColor.liveRed).frame(width: 7, height: 7)
+                    Text(collapsedTrackingStatus)
+                        .font(MJFont.ui(13, weight: .semibold))
+                    Spacer()
+                    Text("\(session.liveTileCount) physical tiles")
+                        .font(MJFont.ui(13, weight: .bold))
+                }
+                .foregroundStyle(MJColor.creamHeading)
+                Text("Swipe up for map, counts, and events")
+                    .font(MJFont.ui(11, weight: .medium))
+                    .foregroundStyle(MJColor.cream(0.58))
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 16)
+        }
+        .buttonStyle(.plain)
     }
 
     private var collapsedTrackingStatus: String {
