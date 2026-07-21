@@ -31,9 +31,11 @@ final class PhysicalCensusTests: XCTestCase {
                         faceHypothesis: face, footprintCenter: center, footprintRadius: radius)
     }
 
-    private static func hypothesis(top: TileFace, topProb: Float, alt: TileFace, altProb: Float) -> TileFaceHypothesis {
+    private static func hypothesis(top: TileFace, topProb: Float, alt: TileFace,
+                                   altProb: Float, confidence: Float? = nil) -> TileFaceHypothesis {
         TileFaceHypothesis(probabilities: [top: topProb, alt: altProb], topFace: top,
-                           confidence: 0.9, margin: topProb - altProb, rejectionScore: 1 - topProb)
+                           confidence: confidence ?? topProb,
+                           margin: topProb - altProb, rejectionScore: 1 - topProb)
     }
 
     /// A 5×1m mineHand strip so several well-separated tracks can live in
@@ -85,6 +87,191 @@ final class PhysicalCensusTests: XCTestCase {
         return time
     }
 
+    private func ingest(
+        _ census: PhysicalCensus,
+        center: SIMD2<Float> = SIMD2(2, 0.5),
+        detectionConfidence: Float,
+        face: TileFace,
+        alternate: TileFace,
+        frame: Int,
+        at time: TimeInterval
+    ) {
+        let hypothesis = Self.hypothesis(
+            top: face,
+            topProb: detectionConfidence,
+            alt: alternate,
+            altProb: max(0, 1 - detectionConfidence),
+            confidence: detectionConfidence
+        )
+        let batch = ObservationBatch(
+            frameID: FrameID(frame),
+            observations: [
+                Self.observation(
+                    center: center,
+                    face: hypothesis,
+                    confidence: detectionConfidence,
+                    frame: frame
+                ),
+            ],
+            coverage: CoverageMask(),
+            quality: Self.acceptedQuality()
+        )
+        census.ingest(.success(batch), zones: [:], at: time)
+    }
+
+    // MARK: - Physical recall is separate from face certainty
+
+    func testCoachCandidateThresholdRejectsPoint29ButConfirmsPoint30AsUnknown() {
+        var config = CensusConfig()
+        config.birthConfidenceThreshold = 0.30
+        let census = PhysicalCensus(config: config)
+        let faceA = TileFace.tile(.m(1))
+        let faceB = TileFace.tile(.p(1))
+
+        ingest(census, detectionConfidence: 0.29, face: faceA, alternate: faceB, frame: 0, at: 0)
+        XCTAssertTrue(census.tracks.isEmpty)
+
+        for frame in 1 ... 3 {
+            ingest(
+                census,
+                detectionConfidence: 0.30,
+                face: faceA,
+                alternate: faceB,
+                frame: frame,
+                at: Double(frame) * 0.1
+            )
+        }
+
+        XCTAssertEqual(census.tracks.count, 1)
+        XCTAssertEqual(census.tracks.first?.state, .confirmed)
+        XCTAssertNil(census.tracks.first?.publishedFace)
+        XCTAssertEqual(census.tracks.first?.faceSuggestion?.face, faceA)
+        XCTAssertEqual(census.diagnostics.lowConfidenceFaceCandidates, 3)
+    }
+
+    func testTwoPoint79ReadsNeverPublishAFace() {
+        var config = CensusConfig()
+        config.birthConfidenceThreshold = 0.30
+        let census = PhysicalCensus(config: config)
+        let faceA = TileFace.tile(.m(2))
+        let faceB = TileFace.tile(.p(2))
+
+        ingest(census, detectionConfidence: 0.79, face: faceA, alternate: faceB, frame: 0, at: 0)
+        ingest(census, detectionConfidence: 0.79, face: faceA, alternate: faceB, frame: 1, at: 0.1)
+
+        XCTAssertNil(census.tracks.first?.publishedFace)
+        XCTAssertEqual(census.tracks.first?.strongFaceReadCount, 0)
+        XCTAssertEqual(census.tracks.first?.faceSuggestion?.face, faceA)
+    }
+
+    func testSecondMatchingPoint80ReadPublishesFace() {
+        var config = CensusConfig()
+        config.birthConfidenceThreshold = 0.30
+        let census = PhysicalCensus(config: config)
+        let faceA = TileFace.tile(.m(3))
+        let faceB = TileFace.tile(.p(3))
+
+        ingest(census, detectionConfidence: 0.80, face: faceA, alternate: faceB, frame: 0, at: 0)
+        XCTAssertNil(census.tracks.first?.publishedFace)
+        XCTAssertEqual(census.tracks.first?.strongFaceReadCount, 1)
+
+        ingest(census, detectionConfidence: 0.80, face: faceA, alternate: faceB, frame: 1, at: 0.1)
+        XCTAssertEqual(census.tracks.first?.publishedFace, faceA)
+        XCTAssertEqual(census.tracks.first?.publishedFaceConfidence, 0.80)
+        XCTAssertEqual(census.diagnostics.facePublications, 1)
+    }
+
+    func testStrongDisagreementResetsPrePublicationAgreement() {
+        var config = CensusConfig()
+        config.birthConfidenceThreshold = 0.30
+        let census = PhysicalCensus(config: config)
+        let faceA = TileFace.tile(.m(4))
+        let faceB = TileFace.tile(.p(4))
+
+        ingest(census, detectionConfidence: 0.85, face: faceA, alternate: faceB, frame: 0, at: 0)
+        ingest(census, detectionConfidence: 0.86, face: faceB, alternate: faceA, frame: 1, at: 0.1)
+        XCTAssertNil(census.tracks.first?.publishedFace)
+        XCTAssertEqual(census.tracks.first?.strongFaceReadCount, 1)
+
+        ingest(census, detectionConfidence: 0.87, face: faceB, alternate: faceA, frame: 2, at: 0.2)
+        XCTAssertEqual(census.tracks.first?.publishedFace, faceB)
+    }
+
+    func testLowConfidenceDisagreementCannotClearPublishedFace() {
+        var config = CensusConfig()
+        config.birthConfidenceThreshold = 0.30
+        let census = PhysicalCensus(config: config)
+        let faceA = TileFace.tile(.m(5))
+        let faceB = TileFace.tile(.p(5))
+
+        ingest(census, detectionConfidence: 0.90, face: faceA, alternate: faceB, frame: 0, at: 0)
+        ingest(census, detectionConfidence: 0.90, face: faceA, alternate: faceB, frame: 1, at: 0.1)
+        for frame in 2 ... 6 {
+            ingest(
+                census,
+                detectionConfidence: 0.79,
+                face: faceB,
+                alternate: faceA,
+                frame: frame,
+                at: Double(frame) * 0.1
+            )
+        }
+
+        XCTAssertEqual(census.tracks.first?.publishedFace, faceA)
+        XCTAssertFalse(census.tracks.first?.requiresManualFaceResolution == true)
+    }
+
+    func testPinnedFaceIgnoresSubsequentAutomaticEvidence() throws {
+        var config = CensusConfig()
+        config.birthConfidenceThreshold = 0.30
+        let census = PhysicalCensus(config: config)
+        let automatic = TileFace.tile(.m(6))
+        let correction = TileFace.tile(.p(6))
+
+        ingest(census, detectionConfidence: 0.90, face: automatic, alternate: correction, frame: 0, at: 0)
+        let trackID = try XCTUnwrap(census.tracks.first?.id)
+        census.pinFace(correction, trackID: trackID)
+        for frame in 1 ... 4 {
+            ingest(
+                census,
+                detectionConfidence: 0.99,
+                face: automatic,
+                alternate: correction,
+                frame: frame,
+                at: Double(frame) * 0.1
+            )
+        }
+
+        XCTAssertEqual(census.tracks.first?.publishedFace, correction)
+        XCTAssertTrue(census.tracks.first?.isPinned == true)
+        XCTAssertEqual(census.tracks.first?.publishedFaceConfidence, 1)
+    }
+
+    func testFaceSuggestionUsesOnlyTheLastFiveObservations() {
+        var config = CensusConfig()
+        config.birthConfidenceThreshold = 0.30
+        config.faceSuggestionWindow = 5
+        let census = PhysicalCensus(config: config)
+        let oldFace = TileFace.tile(.m(7))
+        let recentFace = TileFace.tile(.p(7))
+
+        for frame in 0 ..< 5 {
+            ingest(census, detectionConfidence: 0.70, face: oldFace, alternate: recentFace,
+                   frame: frame, at: Double(frame) * 0.1)
+        }
+        for frame in 5 ..< 10 {
+            ingest(census, detectionConfidence: 0.70, face: recentFace, alternate: oldFace,
+                   frame: frame, at: Double(frame) * 0.1)
+        }
+
+        XCTAssertEqual(census.tracks.first?.faceSuggestion?.face, recentFace)
+        XCTAssertEqual(census.tracks.first?.recentFaceEvidence.count, 5)
+        XCTAssertEqual(
+            Set(census.tracks.first?.faceSupport.keys.map { $0 } ?? []),
+            Set([recentFace])
+        )
+    }
+
     // MARK: - Ownership is independent of the published face (§10.1)
 
     func testConfirmedCorrectionIsImmediatelyAuthoritativeAndDeterministic() {
@@ -115,7 +302,7 @@ final class PhysicalCensusTests: XCTestCase {
         XCTAssertEqual(snapshot.tracks.first?.worldPosition, SIMD3(1, 2, 3))
     }
 
-    func testBucketStaysPutWhenPublishedFaceChanges() {
+    func testBucketStaysPutWhenPublishedFaceBecomesConflicted() {
         let census = PhysicalCensus()
         let zones: [SemanticZoneID: [SIMD2<Float>]] = [.mineHand: Self.mineHandStrip]
         let center = SIMD2<Float>(2, 0.5) // inside mineHandStrip
@@ -123,7 +310,7 @@ final class PhysicalCensusTests: XCTestCase {
         let faceA = TileFace.tile(.m(1))
         let faceC = TileFace.tile(.p(9))
 
-        // Publish A: 2 confirming hits already meet minFaceEvidence + publishMargin.
+        // Two strong reads publish A; the third also confirms the identity.
         var time = ingestRepeatedHits(census, center: center, hits: 3,
                                       hypothesis: Self.hypothesis(top: faceA, topProb: 0.9, alt: faceC, altProb: 0.1),
                                       zones: zones, startFrame: 0, startTime: 0)
@@ -132,22 +319,22 @@ final class PhysicalCensusTests: XCTestCase {
         XCTAssertEqual(track.publishedFace, faceA)
         XCTAssertEqual(track.bucket, .mine, "center sits inside mineHand")
 
-        // Force a switch to C with enough conflicting evidence (see the face-flip test for the math:
-        // with 3 confirming hits for A, 5 conflicting hits is what clears the switch margin).
-        time = ingestRepeatedHits(census, center: center, hits: 5,
+        // Two strong contradictory reads deliberately return the face to ?.
+        time = ingestRepeatedHits(census, center: center, hits: 2,
                                   hypothesis: Self.hypothesis(top: faceC, topProb: 0.9, alt: faceA, altProb: 0.1),
                                   zones: zones, startFrame: 10, startTime: time)
 
         guard let flipped = census.tracks.first(where: { $0.id == track.id }) else {
             return XCTFail("same physical track should persist")
         }
-        XCTAssertEqual(flipped.publishedFace, faceC, "enough conflicting evidence should have flipped the face")
-        XCTAssertEqual(flipped.bucket, .mine, "ownership must not move just because the classified face changed")
+        XCTAssertNil(flipped.publishedFace)
+        XCTAssertTrue(flipped.requiresManualFaceResolution)
+        XCTAssertEqual(flipped.bucket, .mine, "ownership must not move just because face certainty changed")
     }
 
-    // MARK: - A confirmed track's face flip needs the margin (§9.3)
+    // MARK: - Published faces require explicit conflict resolution (§9.3)
 
-    func testFaceFlipRequiresTheSwitchMargin() {
+    func testTwoStrongConflictingReadsReturnPublishedFaceToUnknown() {
         let census = PhysicalCensus()
         let center = SIMD2<Float>(2, 0.5)
         let faceA = TileFace.tile(.m(1))
@@ -158,21 +345,28 @@ final class PhysicalCensusTests: XCTestCase {
                                       zones: [:], startFrame: 0, startTime: 0)
         XCTAssertEqual(census.tracks.first?.publishedFace, faceA)
 
-        // Four conflicting hits (vs. 3 confirming hits for A): the log-prob
-        // gap has flipped in B's favor internally, but not by enough to
-        // clear the (higher) switch margin yet — the published face is sticky.
-        time = ingestRepeatedHits(census, center: center, hits: 4,
+        // One strong disagreement is insufficient to clear a published face.
+        time = ingestRepeatedHits(census, center: center, hits: 1,
                                   hypothesis: Self.hypothesis(top: faceB, topProb: 0.9, alt: faceA, altProb: 0.1),
                                   zones: [:], startFrame: 10, startTime: time)
         XCTAssertEqual(census.tracks.first?.publishedFace, faceA,
-                       "a handful of conflicting views must not flip an already-published face")
+                       "one conflicting view must not clear an authoritative face")
 
-        // A fifth conflicting hit tips the accumulated margin past the switch threshold.
+        // A low-confidence disagreement is suggestion evidence only and does
+        // not interrupt the qualifying B agreement.
+        _ = ingestRepeatedHits(census, center: center, hits: 1,
+                               hypothesis: Self.hypothesis(top: faceA, topProb: 0.79, alt: faceB, altProb: 0.21),
+                               zones: [:], startFrame: 20, startTime: time)
+        XCTAssertEqual(census.tracks.first?.publishedFace, faceA)
+
+        // The second strong B read makes the conflict explicit instead of
+        // silently replacing a gameplay face.
         _ = ingestRepeatedHits(census, center: center, hits: 1,
                                hypothesis: Self.hypothesis(top: faceB, topProb: 0.9, alt: faceA, altProb: 0.1),
-                               zones: [:], startFrame: 20, startTime: time)
-        XCTAssertEqual(census.tracks.first?.publishedFace, faceB,
-                       "sustained strong conflicting evidence should eventually flip the face")
+                               zones: [:], startFrame: 21, startTime: time + 0.1)
+        XCTAssertNil(census.tracks.first?.publishedFace)
+        XCTAssertTrue(census.tracks.first?.requiresManualFaceResolution == true)
+        XCTAssertEqual(census.diagnostics.confidentFaceConflicts, 1)
     }
 
     // MARK: - Depth-proven empty misses (§9.2, §5.2)
@@ -304,12 +498,13 @@ final class PhysicalCensusTests: XCTestCase {
         let face = TileFace.tile(.m(1))
         let alt = TileFace.tile(.p(1))
         let strongHypothesis = Self.hypothesis(top: face, topProb: 0.95, alt: alt, altProb: 0.05)
-        let weakHypothesis = Self.hypothesis(top: face, topProb: 0.75, alt: alt, altProb: 0.25)
+        let weakHypothesis = Self.hypothesis(top: face, topProb: 0.82, alt: alt, altProb: 0.18)
 
         // 5 well-separated tracks confirmed side by side, all published as
         // the same tile (1m) — one copy over the ≤4-per-suited-tile cap
         // (§10.3). Track 3 gets a deliberately weaker hypothesis every
-        // round, so its accumulated face margin is unambiguously the lowest
+        // round, so its normalized publication confidence is unambiguously
+        // the lowest
         // of the five once all are confirmed.
         let targets: [(center: SIMD2<Float>, hypothesis: TileFaceHypothesis?)] = (0..<5).map { i in
             (SIMD2<Float>(0.5 + Float(i), 0.5), i == 3 ? weakHypothesis : strongHypothesis)

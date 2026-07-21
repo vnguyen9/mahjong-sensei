@@ -55,3 +55,10 @@ Dataset/
 **/runs/
 **/weights/
 **/wandb/
+
+# Production Core ML resources are source inputs, not training artifacts.
+# Xcode Cloud checks out only tracked files, and the application project
+# compiles every package in this directory during archive builds.
+!App/Sources/Resources/Models/
+!App/Sources/Resources/Models/*.mlpackage/
+!App/Sources/Resources/Models/*.mlpackage/**

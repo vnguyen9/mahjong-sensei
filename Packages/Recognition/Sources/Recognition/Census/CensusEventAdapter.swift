@@ -61,10 +61,7 @@ public enum CensusEventAdapter {
             let height = Double(0.032 / tableExtent.y)
             let centerX = Double(track.tablePoint.x / tableExtent.x + 0.5)
             let centerY = Double(track.tablePoint.y / tableExtent.y + 0.5)
-            let confidence = max(
-                0,
-                min(1, 1 - exp(-Double(max(0, track.faceConfidence))))
-            )
+            let confidence = max(0, min(1, Double(track.faceConfidence)))
             let ownership = eventOwnership(
                 for: track.semanticZone,
                 tile: tile

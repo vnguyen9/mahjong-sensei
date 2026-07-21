@@ -93,6 +93,19 @@ public struct CensusAnchor: Sendable, Hashable {
     }
 }
 
+/// The census's best recent face suggestion for an unresolved physical tile.
+/// Informational only: it never contributes to gameplay counts until the
+/// strong-read rule publishes it or the user confirms it.
+public struct CensusFaceSuggestion: Sendable, Hashable {
+    public var face: TileFace
+    public var confidence: Float
+
+    public init(face: TileFace, confidence: Float) {
+        self.face = face
+        self.confidence = confidence
+    }
+}
+
 /// Frame-specific facts computed by the app from AR tracking, exact
 /// recognizer coverage, and depth/occlusion tests. The package never guesses
 /// which unmatched world tracks were genuinely visible.
@@ -117,7 +130,12 @@ public struct CensusTrackSnapshot: Sendable, Hashable {
     public var worldPosition: SIMD3<Float>?
     public var tablePoint: SIMD2<Float>
     public var face: TileFace?
+    /// Normalized 0...1 confidence for the currently published face.
     public var faceConfidence: Float
+    public var faceSuggestion: CensusFaceSuggestion?
+    public var strongFaceReadCount: Int
+    public var faceIsUserPinned: Bool
+    public var requiresManualFaceResolution: Bool
     public var semanticZone: SemanticZoneID
     public var lifecycle: TrackLifecycleState
     public var firstSeen: TimeInterval
@@ -128,6 +146,10 @@ public struct CensusTrackSnapshot: Sendable, Hashable {
                 tablePoint: SIMD2<Float>,
                 face: TileFace?,
                 faceConfidence: Float,
+                faceSuggestion: CensusFaceSuggestion? = nil,
+                strongFaceReadCount: Int = 0,
+                faceIsUserPinned: Bool = false,
+                requiresManualFaceResolution: Bool = false,
                 semanticZone: SemanticZoneID,
                 lifecycle: TrackLifecycleState,
                 firstSeen: TimeInterval,
@@ -137,6 +159,10 @@ public struct CensusTrackSnapshot: Sendable, Hashable {
         self.tablePoint = tablePoint
         self.face = face
         self.faceConfidence = faceConfidence
+        self.faceSuggestion = faceSuggestion
+        self.strongFaceReadCount = strongFaceReadCount
+        self.faceIsUserPinned = faceIsUserPinned
+        self.requiresManualFaceResolution = requiresManualFaceResolution
         self.semanticZone = semanticZone
         self.lifecycle = lifecycle
         self.firstSeen = firstSeen

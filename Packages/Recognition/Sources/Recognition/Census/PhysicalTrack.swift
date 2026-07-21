@@ -49,13 +49,28 @@ struct PhysicalTrack {
     var imageBox: TileBoundingBox
 
     // MARK: Face evidence (§9.3)
-    var faceLogProbs: [TileFace: Float] = [:]
-    var faceEvidenceCount: Int = 0
+    struct FaceEvidenceSample {
+        var face: TileFace
+        var confidence: Float
+    }
+
+    /// Recent positive support, rebuilt from `recentFaceEvidence`. The
+    /// detector currently returns one top class rather than a calibrated
+    /// distribution, so treating absent classes as log-probabilities creates
+    /// false infinite margins. Positive support keeps suggestion ranking
+    /// honest while publication uses the separate strong-read rule below.
+    var recentFaceEvidence: [FaceEvidenceSample] = []
+    var faceSupport: [TileFace: Float] = [:]
+    var faceSuggestion: CensusFaceSuggestion?
+    var strongFaceCandidate: TileFace?
+    var strongFaceReadCount: Int = 0
+    var strongFaceConfidence: Float = 0
     var publishedFace: TileFace?
-    /// Log-prob gap between the best and second-best face candidate the last
-    /// time fusion ran; also doubles as this track's face-confidence signal
-    /// for conservation (§10.3) tie-breaking.
-    var publishedFaceMargin: Float = 0
+    /// Normalized detector confidence for the published face.
+    var publishedFaceConfidence: Float = 0
+    /// Set after two strong reads contradict an already-published face. The
+    /// census stays unresolved until the user pins the correct answer.
+    var requiresManualFaceResolution: Bool = false
     /// A pinned (user-corrected) face is never touched by fusion again until
     /// the track retires (§9.3).
     var isPinned: Bool = false

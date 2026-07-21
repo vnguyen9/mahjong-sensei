@@ -117,23 +117,16 @@ enum TrackAssociator {
     /// opinion.
     private static func faceDistributionCost(track: PhysicalTrack, observation: TileObservation) -> Float {
         guard let hypothesis = observation.faceHypothesis, !hypothesis.probabilities.isEmpty else { return 0 }
-        let trackDistribution = normalizedDistribution(from: track.faceLogProbs)
+        let trackDistribution = normalizedDistribution(from: track.faceSupport)
         guard !trackDistribution.isEmpty else { return 0 }
         let similarity = cosineSimilarity(trackDistribution, hypothesis.probabilities)
         return 1 - max(0, min(1, similarity))
     }
 
-    private static func normalizedDistribution(from logProbs: [TileFace: Float]) -> [TileFace: Float] {
-        guard let maxLogProb = logProbs.values.max() else { return [:] }
-        var exponentiated: [TileFace: Float] = [:]
-        var sum: Float = 0
-        for (face, logProb) in logProbs {
-            let e = exp(logProb - maxLogProb) // shifted for numerical stability
-            exponentiated[face] = e
-            sum += e
-        }
+    private static func normalizedDistribution(from support: [TileFace: Float]) -> [TileFace: Float] {
+        let sum = support.values.reduce(0, +)
         guard sum > 0 else { return [:] }
-        return exponentiated.mapValues { $0 / sum }
+        return support.mapValues { $0 / sum }
     }
 
     private static func cosineSimilarity(_ a: [TileFace: Float], _ b: [TileFace: Float]) -> Float {

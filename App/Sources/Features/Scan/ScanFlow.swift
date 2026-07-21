@@ -313,11 +313,23 @@ final class ScanCoordinator {
             return capture
         }
         let loader = recognizerLoader
-        coachLive = CoachLiveSession(camera: camera, arCapture: arCapture, recognizerProvider: { await loader.active() })
+        coachLive = CoachLiveSession(
+            camera: camera,
+            arCapture: arCapture,
+            recognizerProvider: {
+                await loader.active(
+                    minimumConfidence: CoachLiveRecognitionPolicy.candidateConfidence
+                )
+            }
+        )
         // Warm the (multi-second) Core ML detector now, while the user is on the
         // setup card tapping winds — `RecognizerLoader` caches, so the tracking
         // loop's first `await recognizerProvider()` then returns instantly.
-        Task { _ = await loader.active() }
+        Task {
+            _ = await loader.active(
+                minimumConfidence: CoachLiveRecognitionPolicy.candidateConfidence
+            )
+        }
         #endif
     }
 
@@ -420,9 +432,16 @@ actor RecognizerLoader {
     private var recognizer: (any Recognizer)?
     private var loadedModelName: String?
 
-    func active() async -> any Recognizer {
+    /// Returns a lightweight threshold-configured value around the one cached
+    /// Core ML model. `VisionRecognizer` is a struct, so changing the copied
+    /// threshold does not load another model or affect simultaneous Scan calls.
+    func active(
+        minimumConfidence: Double = VisionRecognizer.defaultConfidenceThreshold
+    ) async -> any Recognizer {
         let wanted = TileDetector.preferredModelName
-        if let recognizer, loadedModelName == wanted { return recognizer }
+        if let recognizer, loadedModelName == wanted {
+            return configured(recognizer, minimumConfidence: minimumConfidence)
+        }
         let loaded = await Task.detached(priority: .userInitiated) {
             (try? VisionRecognizer(bundledModelNamed: wanted)) as (any Recognizer)?
                 ?? (try? VisionRecognizer(bundledModelNamed: TileDetector.fastModel)) as (any Recognizer)?
@@ -430,7 +449,16 @@ actor RecognizerLoader {
         }.value
         recognizer = loaded
         loadedModelName = wanted
-        return loaded
+        return configured(loaded, minimumConfidence: minimumConfidence)
+    }
+
+    private func configured(
+        _ recognizer: any Recognizer,
+        minimumConfidence: Double
+    ) -> any Recognizer {
+        guard var vision = recognizer as? VisionRecognizer else { return recognizer }
+        vision.confidenceThreshold = minimumConfidence
+        return vision
     }
 }
 

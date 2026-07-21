@@ -32,11 +32,10 @@ public struct CensusConfig: Sendable {
     public var worldMatchRadius: Float = 0.018
     public var worldPositionEMAContribution: Float = 0.25
 
-    // MARK: Face fusion (§9.3)
-    public var minFaceEvidence: Int = 2
-    public var minFaceWeight: Float = 0.05
-    public var publishMargin: Float = 1.0
-    public var switchMargin: Float = 2.5
+    // MARK: Face certainty (§9.3)
+    public var facePublicationConfidenceThreshold: Float = 0.80
+    public var requiredStrongFaceReads: Int = 2
+    public var faceSuggestionWindow: Int = 5
 
     // MARK: Zone freshness (debug/HUD signal, independent of track lifecycle)
     public var zoneStaleAfter: TimeInterval = 1.5
@@ -51,6 +50,10 @@ public struct CensusDiagnostics: Sendable, Equatable {
     public var matches: Int = 0
     public var qualifiedMisses: Int = 0
     public var retirements: Int = 0
+    public var lowConfidenceFaceCandidates: Int = 0
+    public var strongFaceReads: Int = 0
+    public var facePublications: Int = 0
+    public var confidentFaceConflicts: Int = 0
 
     public init() {}
 }
@@ -287,13 +290,15 @@ public final class PhysicalCensus {
                     break // a known face-down tile: deliberately excluded, not unresolved.
                 case nil:
                     unresolved.append(UnresolvedTile(trackID: track.id, reason: .faceUnresolved,
-                                                      anchorCenter: track.anchorCenter))
+                                                      anchorCenter: track.anchorCenter,
+                                                      candidateFace: track.faceSuggestion?.face))
                 }
             case .ignored:
                 break // opponents' concealed backs: deliberately excluded, never enumerated.
             case .unresolved:
                 unresolved.append(UnresolvedTile(trackID: track.id, reason: .ownershipUnresolved,
-                                                  anchorCenter: track.anchorCenter, candidateFace: track.publishedFace))
+                                                  anchorCenter: track.anchorCenter,
+                                                  candidateFace: track.publishedFace ?? track.faceSuggestion?.face))
             }
         }
 
@@ -301,7 +306,7 @@ public final class PhysicalCensus {
         let downgraded = Conservation.violatingTrackIDs(among: allPlaced,
                                                         tile: { $0.tile },
                                                         id: { $0.track.id },
-                                                        confidence: { $0.track.publishedFaceMargin })
+                                                        confidence: { $0.track.publishedFaceConfidence })
 
         var mine = TileMultiset()
         for placed in placedMine {
@@ -339,7 +344,11 @@ public final class PhysicalCensus {
                 worldPosition: $0.worldPosition,
                 tablePoint: $0.anchorCenter,
                 face: $0.publishedFace,
-                faceConfidence: $0.publishedFaceMargin,
+                faceConfidence: $0.publishedFaceConfidence,
+                faceSuggestion: $0.faceSuggestion,
+                strongFaceReadCount: $0.strongFaceReadCount,
+                faceIsUserPinned: $0.isPinned,
+                requiresManualFaceResolution: $0.requiresManualFaceResolution,
                 semanticZone: $0.semanticZone,
                 lifecycle: $0.state,
                 firstSeen: $0.createdAt,
@@ -373,8 +382,7 @@ public final class PhysicalCensus {
         }
         tracks[trackIndex].imageBox = observation.box
         TrackLifecycle.recordHit(on: &tracks[trackIndex], at: time, config: config)
-        FaceFusion.absorb(hypothesis: observation.faceHypothesis, observationConfidence: observation.confidence,
-                          into: &tracks[trackIndex], config: config)
+        recordFaceEvidence(observation, into: &tracks[trackIndex])
     }
 
     @discardableResult
@@ -412,11 +420,41 @@ public final class PhysicalCensus {
                                   measuredSurfaceDepth: observation.measuredSurfaceDepth,
                                   footprintRadius: radius,
                                   imageBox: observation.box, at: time)
-        FaceFusion.absorb(hypothesis: observation.faceHypothesis, observationConfidence: observation.confidence,
-                          into: &track, config: config)
+        recordFaceEvidence(observation, into: &track)
         TrackLifecycle.recordHit(on: &track, at: time, config: config) // first sighting = first opportunity
         tracks.append(track)
         return true
+    }
+
+    private func recordFaceEvidence(
+        _ observation: TileObservation,
+        into track: inout PhysicalTrack
+    ) {
+        if let hypothesis = observation.faceHypothesis, hypothesis.topFace != nil {
+            let effectiveConfidence = min(
+                max(0, hypothesis.confidence),
+                max(0, observation.confidence)
+            )
+            if effectiveConfidence >= config.facePublicationConfidenceThreshold {
+                diagnostics.strongFaceReads += 1
+            } else {
+                diagnostics.lowConfidenceFaceCandidates += 1
+            }
+        }
+
+        switch FaceFusion.absorb(
+            hypothesis: observation.faceHypothesis,
+            observationConfidence: observation.confidence,
+            into: &track,
+            config: config
+        ) {
+        case .none:
+            break
+        case .published:
+            diagnostics.facePublications += 1
+        case .conflict:
+            diagnostics.confidentFaceConflicts += 1
+        }
     }
 
     private func recordCoverage(_ coverage: CoverageMask, at time: TimeInterval) {

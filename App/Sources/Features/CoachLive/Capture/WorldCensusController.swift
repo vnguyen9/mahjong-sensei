@@ -4,6 +4,24 @@ import MahjongCore
 import Recognition
 import simd
 
+/// Coach Live deliberately separates physical-tile recall from face certainty.
+/// Other recognition modes continue using `VisionRecognizer`'s 0.50 default.
+enum CoachLiveRecognitionPolicy {
+    static let candidateConfidence = 0.30
+    static let facePublicationConfidence: Float = 0.80
+    static let requiredStrongFaceReads = 2
+    static let faceSuggestionWindow = 5
+
+    static var censusConfig: CensusConfig {
+        var config = CensusConfig()
+        config.birthConfidenceThreshold = Float(candidateConfidence)
+        config.facePublicationConfidenceThreshold = facePublicationConfidence
+        config.requiredStrongFaceReads = requiredStrongFaceReads
+        config.faceSuggestionWindow = faceSuggestionWindow
+        return config
+    }
+}
+
 struct WorldCensusDiagnostics {
     var depthRejections: [DepthSampleRejection: Int] = [:]
     var depthSamplesAttempted = 0
@@ -18,6 +36,10 @@ struct WorldCensusDiagnostics {
     var offscreenHolds = 0
     var qualifiedMissesSuppressedFrames = 0
     var depthProvenRetirements = 0
+    var lowConfidenceCandidateDetections = 0
+    var strongFaceDetections = 0
+    var recoveredBelowLegacyFloor = 0
+    var zeroDetectionFrames = 0
 
     var depthAcceptanceRate: Double {
         guard depthSamplesAttempted > 0 else { return 0 }
@@ -31,7 +53,9 @@ struct WorldCensusDiagnostics {
 @MainActor
 final class WorldCensusController {
     private var frameIDs = FrameIDGenerator()
-    private(set) var census = PhysicalCensus()
+    private(set) var census = PhysicalCensus(
+        config: CoachLiveRecognitionPolicy.censusConfig
+    )
     private(set) var diagnostics = WorldCensusDiagnostics()
     private(set) var revision = 0
     private(set) var worldToTable: simd_float4x4
@@ -144,6 +168,21 @@ final class WorldCensusController {
         guard trackingIsNormal else {
             census.ingest(.skipped(.trackingNotNormal), zones: zones, at: time)
             return
+        }
+
+        if detections.isEmpty {
+            diagnostics.zeroDetectionFrames += 1
+        }
+        diagnostics.lowConfidenceCandidateDetections += detections.count {
+            $0.confidence >= CoachLiveRecognitionPolicy.candidateConfidence
+                && $0.confidence < Double(CoachLiveRecognitionPolicy.facePublicationConfidence)
+        }
+        diagnostics.strongFaceDetections += detections.count {
+            $0.confidence >= Double(CoachLiveRecognitionPolicy.facePublicationConfidence)
+        }
+        diagnostics.recoveredBelowLegacyFloor += detections.count {
+            $0.confidence >= CoachLiveRecognitionPolicy.candidateConfidence
+                && $0.confidence < VisionRecognizer.defaultConfidenceThreshold
         }
 
         let frameID = frameIDs.nextID()

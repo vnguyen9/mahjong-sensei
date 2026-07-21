@@ -1276,7 +1276,7 @@ final class CoachLiveSession: Identifiable {
                             fullTiles = await TiledTileRecognizer.recognize(
                                 buffer: frame.pixelBuffer,
                                 roi: nil,
-                                minConfidence: VisionRecognizer.defaultConfidenceThreshold,
+                                minConfidence: CoachLiveRecognitionPolicy.candidateConfidence,
                                 imageOrientation: frame.imageOrientation,
                                 using: { f in
                                     do {
@@ -1949,8 +1949,8 @@ final class CoachLiveSession: Identifiable {
         return arCapture?.projectWorldPoint(world, viewportSize: viewportSize)
     }
 
-    /// Commits the editor's staged face and zone as one census/UI
-    /// publication. A nil face means the user left the current face unchanged.
+    /// Applies one editor correction and publishes the resulting census state
+    /// exactly once. A nil face leaves the authoritative face unchanged.
     @MainActor
     func correctSpatialTrack(
         _ id: TrackID,
@@ -2479,6 +2479,37 @@ final class CoachLiveSession: Identifiable {
         diagnostics.worldCensusOffscreenHolds = controller.diagnostics.offscreenHolds
         diagnostics.worldCensusSuppressedMissFrames = controller.diagnostics.qualifiedMissesSuppressedFrames
         diagnostics.worldCensusDepthProvenRetirements = controller.diagnostics.depthProvenRetirements
+        diagnostics.worldCensusLowConfidenceCandidates = controller.diagnostics.lowConfidenceCandidateDetections
+        diagnostics.worldCensusStrongFaceDetections = controller.diagnostics.strongFaceDetections
+        diagnostics.worldCensusRecoveredBelowLegacyFloor = controller.diagnostics.recoveredBelowLegacyFloor
+        diagnostics.worldCensusZeroDetectionFrames = controller.diagnostics.zeroDetectionFrames
+        diagnostics.worldCensusUnknownFaces = snapshot.tracks.count {
+            ($0.lifecycle == .confirmed
+                || $0.lifecycle == .stale
+                || $0.lifecycle == .temporarilyMissing)
+                && $0.semanticZone != .ignoredWall
+                && $0.face == nil
+        }
+        diagnostics.worldCensusSuggestionSummary = snapshot.tracks
+            .filter {
+                ($0.lifecycle == .confirmed
+                    || $0.lifecycle == .stale
+                    || $0.lifecycle == .temporarilyMissing)
+                    && $0.face == nil
+                    && $0.faceSuggestion != nil
+            }
+            .sorted { $0.id < $1.id }
+            .prefix(8)
+            .compactMap { track in
+                guard let suggestion = track.faceSuggestion else { return nil }
+                let percent = Int((suggestion.confidence * 100).rounded())
+                let conflict = track.requiresManualFaceResolution ? "!" : ""
+                return "#\(track.id.value)=\(String(describing: suggestion.face))@\(percent)%[\(track.strongFaceReadCount)]\(conflict)"
+            }
+            .joined(separator: " · ")
+        if diagnostics.worldCensusSuggestionSummary.isEmpty {
+            diagnostics.worldCensusSuggestionSummary = "—"
+        }
         refreshSpatialContinuityDiagnostics()
         if let calibration = controller.calibration {
             arCapture?.updateTableCalibration(
@@ -2516,7 +2547,7 @@ final class CoachLiveSession: Identifiable {
             diagnostics.worldCensusDepthSummary = "—"
         }
         Self.logger.debug(
-            "census source=\(self.countSource.diagnosticName, privacy: .public) health=\(self.spatialTrackingHealth.diagnosticName, privacy: .public) tracks=\(snapshot.tracks.count, privacy: .public) physical=\(self.diagnostics.worldCensusPhysicalCount, privacy: .public) resolved=\(self.diagnostics.worldCensusResolvedCount, privacy: .public) tentative=\(self.diagnostics.worldCensusTentative, privacy: .public) confirmed=\(self.diagnostics.worldCensusConfirmed, privacy: .public) stale=\(self.diagnostics.worldCensusStale, privacy: .public) missing=\(self.diagnostics.worldCensusMissing, privacy: .public) depthAcceptance=\(self.diagnostics.worldCensusDepthAcceptance, privacy: .public) emptyProofs=\(self.diagnostics.worldCensusEmptyPlaneProofs, privacy: .public) occupiedHolds=\(self.diagnostics.worldCensusOccupiedHolds, privacy: .public) occlusionHolds=\(self.diagnostics.worldCensusOcclusionHolds, privacy: .public) missingDepthHolds=\(self.diagnostics.worldCensusMissingDepthHolds, privacy: .public) depthRetirements=\(self.diagnostics.worldCensusDepthProvenRetirements, privacy: .public) roiDeferred=\(self.diagnostics.roiDeferredRegions, privacy: .public) reprojectionPx=\(self.diagnostics.worldCensusAnchorErrorPixels, privacy: .public) ms=\(self.diagnostics.worldCensusMilliseconds, privacy: .public) arSession=\(self.diagnostics.spatialSessionID, privacy: .public) pipeline=\(self.diagnostics.spatialPipelineGeneration, privacy: .public) calibration=\(self.diagnostics.calibrationRevision, privacy: .public) resets=\(self.diagnostics.resetTrackingRunCount, privacy: .public)"
+            "census source=\(self.countSource.diagnosticName, privacy: .public) health=\(self.spatialTrackingHealth.diagnosticName, privacy: .public) tracks=\(snapshot.tracks.count, privacy: .public) physical=\(self.diagnostics.worldCensusPhysicalCount, privacy: .public) resolved=\(self.diagnostics.worldCensusResolvedCount, privacy: .public) unknown=\(self.diagnostics.worldCensusUnknownFaces, privacy: .public) suggestions=\(self.diagnostics.worldCensusSuggestionSummary, privacy: .public) candidateDetections30to79=\(self.diagnostics.worldCensusLowConfidenceCandidates, privacy: .public) strongDetections80=\(self.diagnostics.worldCensusStrongFaceDetections, privacy: .public) strongDepthReads80=\(self.diagnostics.worldCensus.strongFaceReads, privacy: .public) recoveredBelow50=\(self.diagnostics.worldCensusRecoveredBelowLegacyFloor, privacy: .public) noBoxFrames=\(self.diagnostics.worldCensusZeroDetectionFrames, privacy: .public) publications=\(self.diagnostics.worldCensus.facePublications, privacy: .public) conflicts=\(self.diagnostics.worldCensus.confidentFaceConflicts, privacy: .public) candidateFloor=\(CoachLiveRecognitionPolicy.candidateConfidence, privacy: .public) faceFloor=\(CoachLiveRecognitionPolicy.facePublicationConfidence, privacy: .public) tentative=\(self.diagnostics.worldCensusTentative, privacy: .public) confirmed=\(self.diagnostics.worldCensusConfirmed, privacy: .public) stale=\(self.diagnostics.worldCensusStale, privacy: .public) missing=\(self.diagnostics.worldCensusMissing, privacy: .public) depthAcceptance=\(self.diagnostics.worldCensusDepthAcceptance, privacy: .public) emptyProofs=\(self.diagnostics.worldCensusEmptyPlaneProofs, privacy: .public) occupiedHolds=\(self.diagnostics.worldCensusOccupiedHolds, privacy: .public) occlusionHolds=\(self.diagnostics.worldCensusOcclusionHolds, privacy: .public) missingDepthHolds=\(self.diagnostics.worldCensusMissingDepthHolds, privacy: .public) depthRetirements=\(self.diagnostics.worldCensusDepthProvenRetirements, privacy: .public) roiDeferred=\(self.diagnostics.roiDeferredRegions, privacy: .public) reprojectionPx=\(self.diagnostics.worldCensusAnchorErrorPixels, privacy: .public) ms=\(self.diagnostics.worldCensusMilliseconds, privacy: .public) arSession=\(self.diagnostics.spatialSessionID, privacy: .public) pipeline=\(self.diagnostics.spatialPipelineGeneration, privacy: .public) calibration=\(self.diagnostics.calibrationRevision, privacy: .public) resets=\(self.diagnostics.resetTrackingRunCount, privacy: .public)"
         )
     }
 
@@ -3299,6 +3330,12 @@ struct LiveDiagnostics {
     var worldCensusOffscreenHolds = 0
     var worldCensusSuppressedMissFrames = 0
     var worldCensusDepthProvenRetirements = 0
+    var worldCensusLowConfidenceCandidates = 0
+    var worldCensusStrongFaceDetections = 0
+    var worldCensusRecoveredBelowLegacyFloor = 0
+    var worldCensusZeroDetectionFrames = 0
+    var worldCensusUnknownFaces = 0
+    var worldCensusSuggestionSummary = "—"
     var worldCensusZoneSummary = "—"
     var worldCensusDepthSummary = "—"
     /// Calibration-to-Live continuity audit. These values come from

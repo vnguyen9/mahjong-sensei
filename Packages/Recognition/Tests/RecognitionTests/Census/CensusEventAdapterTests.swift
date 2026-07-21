@@ -83,7 +83,7 @@ final class CensusEventAdapterTests: XCTestCase {
                         Float($0.box.centerY - 0.5)
                     ),
                     face: .tile($0.face),
-                    faceConfidence: 4,
+                    faceConfidence: 0.9,
                     semanticZone: semanticZone(
                         for: $0.zone,
                         seat: $0.seat
@@ -183,7 +183,7 @@ final class CensusEventAdapterTests: XCTestCase {
             worldPosition: nil,
             tablePoint: point,
             face: .tile(tile),
-            faceConfidence: 4,
+            faceConfidence: 0.9,
             semanticZone: zone,
             lifecycle: lifecycle,
             firstSeen: 0,

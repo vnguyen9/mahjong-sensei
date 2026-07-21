@@ -632,16 +632,14 @@ private struct SpatialTrackMarker: View {
     }
 }
 
-/// One transaction-oriented editor for a census identity. The top-right Save
-/// commits region-only edits; choosing a face with Use commits that face and
-/// the currently selected region in the same publication.
+/// One immediately-applied editor for a census identity. Region changes save
+/// as soon as they are selected; choosing a face with Use publishes and pins
+/// that face before closing the complete editor.
 private struct SpatialTrackEditorSheet: View {
     let session: CoachLiveSession
     let trackID: TrackID
 
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedZone: SemanticZoneID = .boundaryUnresolved
-    @State private var didLoadTrack = false
     @State private var showRemoveConfirmation = false
     private let retirementCheck = Timer.publish(
         every: 0.25,
@@ -658,6 +656,17 @@ private struct SpatialTrackEditorSheet: View {
         return tile
     }
 
+    private var suggestedFace: Tile? {
+        guard case let .tile(tile)? = track?.faceSuggestion?.face else { return nil }
+        return tile
+    }
+
+    private var displayedFace: Tile? { originalFace ?? suggestedFace }
+
+    private var currentZone: SemanticZoneID {
+        track?.semanticZone ?? .boundaryUnresolved
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -666,7 +675,6 @@ private struct SpatialTrackEditorSheet: View {
                     VStack(alignment: .leading, spacing: 18) {
                         faceCard
                         removeTrackButton
-                        zoneCard
                         statisticsSection
                     }
                     .padding(20)
@@ -676,24 +684,20 @@ private struct SpatialTrackEditorSheet: View {
             .navigationTitle("Physical tile")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { commit(face: nil) }
-                        .disabled(track == nil)
+                    Button("Done") { dismiss() }
                 }
             }
             .navigationDestination(for: SpatialEditorRoute.self) { _ in
                 CoachLiveFacePicker(
-                    current: originalFace,
+                    current: displayedFace,
                     statistics: { tile in
                         session.censusTileStatistics(
                             for: tile,
                             applying: CensusTrackCorrectionDraft(
                                 trackID: CensusTrackID(trackID.raw),
                                 face: tile,
-                                semanticZone: selectedZone
+                                semanticZone: currentZone
                             )
                         )
                     },
@@ -706,11 +710,6 @@ private struct SpatialTrackEditorSheet: View {
             }
         }
         .preferredColorScheme(.dark)
-        .onAppear {
-            guard !didLoadTrack, let track else { return }
-            selectedZone = track.semanticZone
-            didLoadTrack = true
-        }
         .onReceive(retirementCheck) { _ in
             guard session.spatialTrackSnapshot(trackID) != nil else {
                 dismiss()
@@ -738,8 +737,9 @@ private struct SpatialTrackEditorSheet: View {
                 .font(MJFont.ui(13, weight: .semibold))
                 .foregroundStyle(MJColor.creamHeading)
             HStack(spacing: 14) {
-                if let face = originalFace {
+                if let face = displayedFace {
                     MahjongTileView(face, theme: .jade, width: 46)
+                        .opacity(originalFace == nil ? 0.72 : 1)
                 } else {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .strokeBorder(Color(uiColor: .systemOrange), style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
@@ -751,22 +751,158 @@ private struct SpatialTrackEditorSheet: View {
                         }
                 }
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(originalFace == nil ? "Face needed" : "Face resolved")
+                    Text(faceStatusTitle)
                         .font(MJFont.ui(14, weight: .semibold))
                         .foregroundStyle(MJColor.creamHeading)
-                    Text("Choose the physical tile face without changing its AR identity.")
+                    Text(faceStatusDetail)
                         .font(MJFont.ui(12))
                         .foregroundStyle(MJColor.cream(0.62))
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
             }
+            if let statistics = quickStatistics {
+                quickStats(statistics)
+            }
             NavigationLink(value: SpatialEditorRoute.face) {
                 SettingLikeAction(title: "Change face", systemImage: "square.grid.3x3")
             }
             .buttonStyle(.plain)
+            Divider().overlay(MJColor.gold(0.12))
+            regionPicker
         }
         .mjCard()
+    }
+
+    private var faceStatusTitle: String {
+        guard let track else { return "Face unavailable" }
+        if track.faceIsUserPinned { return "Confirmed by you" }
+        if originalFace != nil {
+            return "Recognition confidence · \(percent(track.faceConfidence))"
+        }
+        if track.requiresManualFaceResolution {
+            return "Conflicting confident reads"
+        }
+        if let suggestion = track.faceSuggestion,
+           case .tile(let tile) = suggestion.face {
+            return "Suggested: \(tile.code) · \(percent(suggestion.confidence))"
+        }
+        return "Face needed"
+    }
+
+    private var faceStatusDetail: String {
+        guard let track else { return "This physical track is no longer available." }
+        if track.requiresManualFaceResolution {
+            return "Choose the correct face. This tile is not counted by face until you confirm it."
+        }
+        if originalFace != nil {
+            return "This face contributes to Coach Live counts and statistics."
+        }
+        if track.faceSuggestion != nil {
+            if track.strongFaceReadCount == 1,
+               track.faceSuggestion?.confidence ?? 0 >= CoachLiveRecognitionPolicy.facePublicationConfidence {
+                return "Needs one more confident read. Not counted until confirmed."
+            }
+            return "Not counted until confirmed. Review the suggestion before using it."
+        }
+        return "Choose the physical tile face without changing its AR identity."
+    }
+
+    private var quickStatistics: CoachLiveTileStatistics? {
+        guard let face = displayedFace else { return nil }
+        return session.censusTileStatistics(
+            for: face,
+            applying: CensusTrackCorrectionDraft(
+                trackID: CensusTrackID(trackID.raw),
+                face: face,
+                semanticZone: currentZone
+            )
+        )
+    }
+
+    private func quickStats(_ statistics: CoachLiveTileStatistics) -> some View {
+        let preview = originalFace == nil
+        return VStack(alignment: .leading, spacing: 8) {
+            if preview {
+                Text("If used")
+                    .font(MJFont.ui(10, weight: .semibold))
+                    .foregroundStyle(Color(uiColor: .systemOrange))
+            }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 18) {
+                    quickStat(
+                        "\(statistics.insight.liveCopies)",
+                        "copies live"
+                    )
+                    Divider().frame(height: 34).overlay(MJColor.gold(0.15))
+                    quickStat(
+                        TileInsight.percent(statistics.insight.drawChance),
+                        "next-draw odds"
+                    )
+                    Spacer(minLength: 0)
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    quickStat("\(statistics.insight.liveCopies)", "copies live")
+                    quickStat(TileInsight.percent(statistics.insight.drawChance), "next-draw odds")
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "\(preview ? "If used. " : "")\(statistics.insight.liveCopies) copies live. \(TileInsight.percent(statistics.insight.drawChance)) next draw odds."
+        )
+    }
+
+    private func quickStat(_ value: String, _ label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(MJFont.serif(18, weight: .bold))
+                .foregroundStyle(MJColor.lightGold)
+            Text(label)
+                .font(MJFont.ui(10, weight: .medium))
+                .foregroundStyle(MJColor.cream(0.56))
+        }
+    }
+
+    private var regionPicker: some View {
+        HStack(spacing: 12) {
+            Label("Table region", systemImage: "square.grid.2x2")
+                .font(MJFont.ui(14, weight: .semibold))
+                .foregroundStyle(MJColor.creamHeading)
+            Spacer(minLength: 8)
+            Circle()
+                .fill(currentZone.indicatorColor)
+                .frame(width: 10, height: 10)
+                .accessibilityHidden(true)
+            Picker("Table region", selection: regionBinding) {
+                ForEach(SemanticZoneID.allCases, id: \.self) { zone in
+                    Text(zone.editorName).tag(zone)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .tint(MJColor.gold)
+            .accessibilityLabel("Table region")
+            .accessibilityValue(currentZone.editorName)
+            .accessibilityHint("Changes this physical tile's table region immediately")
+        }
+        .frame(minHeight: 44)
+    }
+
+    private var regionBinding: Binding<SemanticZoneID> {
+        Binding(
+            get: { currentZone },
+            set: { newZone in
+                guard track != nil, newZone != currentZone else { return }
+                UISelectionFeedbackGenerator().selectionChanged()
+                session.correctSpatialTrack(trackID, face: nil, zone: newZone)
+            }
+        )
+    }
+
+    private func percent(_ confidence: Float) -> String {
+        "\(Int((max(0, min(1, confidence)) * 100).rounded()))%"
     }
 
     private var removeTrackButton: some View {
@@ -787,62 +923,35 @@ private struct SpatialTrackEditorSheet: View {
 
     private func commit(face: Tile?) {
         guard track != nil else { return }
-        session.correctSpatialTrack(trackID, face: face, zone: selectedZone)
+        session.correctSpatialTrack(trackID, face: face, zone: currentZone)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         dismiss()
     }
 
-    private var zoneCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Table region")
-                .font(MJFont.ui(13, weight: .semibold))
-                .foregroundStyle(MJColor.creamHeading)
-                .padding(.horizontal, 4)
-            ForEach(SemanticZoneID.allCases, id: \.self) { zone in
-                Button {
-                    selectedZone = zone
-                    UISelectionFeedbackGenerator().selectionChanged()
-                } label: {
-                    HStack(spacing: 12) {
-                        Circle()
-                            .fill(zone.indicatorColor)
-                            .frame(width: 12, height: 12)
-                        Text(zone.editorName)
-                            .font(MJFont.ui(14, weight: .medium))
-                            .foregroundStyle(MJColor.creamHeading)
-                        Spacer()
-                        if selectedZone == zone {
-                            Image(systemName: "checkmark")
-                                .font(.body.bold())
-                                .foregroundStyle(MJColor.gold)
-                        }
-                    }
-                    .frame(minHeight: 44)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityValue(selectedZone == zone ? "Selected" : "Not selected")
-                if zone != SemanticZoneID.allCases.last {
-                    Divider().overlay(MJColor.gold(0.12))
-                }
-            }
-        }
-        .mjCard(padding: 8)
-    }
-
     @ViewBuilder
     private var statisticsSection: some View {
-        if let originalFace {
-            CoachLiveTileStatsView(
-                statistics: session.censusTileStatistics(
-                    for: originalFace,
-                    applying: CensusTrackCorrectionDraft(
-                        trackID: CensusTrackID(trackID.raw),
-                        face: originalFace,
-                        semanticZone: selectedZone
+        if let displayedFace {
+            VStack(alignment: .leading, spacing: 10) {
+                if originalFace == nil {
+                    Label(
+                        "Preview for suggestion · not counted until Use",
+                        systemImage: "questionmark.diamond"
+                    )
+                    .font(MJFont.ui(11, weight: .semibold))
+                    .foregroundStyle(Color(uiColor: .systemOrange))
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                CoachLiveTileStatsView(
+                    statistics: session.censusTileStatistics(
+                        for: displayedFace,
+                        applying: CensusTrackCorrectionDraft(
+                            trackID: CensusTrackID(trackID.raw),
+                            face: displayedFace,
+                            semanticZone: currentZone
+                        )
                     )
                 )
-            )
+            }
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Tile statistics")

@@ -81,7 +81,7 @@ enum CensusStateAdapter {
                 width: Double(0.024 / tableExtent.x),
                 height: Double(0.032 / tableExtent.y)
             )
-            let confidence = max(0, min(1, 1 - exp(-Double(max(0, track.faceConfidence)))))
+            let confidence = max(0, min(1, Double(track.faceConfidence)))
             func makeTracked(_ zone: TileZone, seat: RelativeSeat? = nil) -> TrackedTile {
                 TrackedTile(
                     id: TrackID(raw: track.id.value),
