@@ -82,7 +82,11 @@ struct LiveFeedPane: View {
                 .frame(width: fullSize.width, height: fullSize.height)
                 .animation(.easeInOut(duration: 0.25), value: session.startupStage)
 
-            if session.countSource != .spatialBootstrapping {
+            // On a real AR surface the exact calibrated region nodes already
+            // live in SceneKit.  Drawing this former 2D reconstruction on top
+            // would create a second, visually different coordinate system.
+            if !session.isARCaptureActive,
+               session.countSource != .spatialBootstrapping {
                 ZoneBracketsOverlay(previewBounds: previewFrame, onTapUnresolved: onTapUnresolved,
                                     onTapZoneChip: onTapZoneChip)
                     .frame(width: fullSize.width, height: fullSize.height)
@@ -113,7 +117,8 @@ struct LiveFeedPane: View {
 
             #if DEBUG
             // Dev-only: the calibrated geometry projected onto the feed.
-            if showGeometryDebug, session.spatialTrackingHealth == .healthy {
+            if !session.isARCaptureActive,
+               showGeometryDebug, session.spatialTrackingHealth == .healthy {
                 LiveGeometryDebugOverlay(previewBounds: previewFrame)
                     .frame(width: fullSize.width, height: fullSize.height)
             }
@@ -237,8 +242,11 @@ struct LiveFeedPane: View {
         #if targetEnvironment(simulator)
         ScreenBackground(.live)
         #else
-        if let arCapture = session.arCapture {
-            ARCameraPreview(capture: arCapture)
+        if session.arCapture != nil {
+            // The persistent `CoachLiveARSurface` below this SwiftUI chrome
+            // owns ARKit's camera rendering.  Do not create a CAMetal preview
+            // here: doing so was the visible calibration → Live handoff.
+            Color.clear
         } else {
             CameraPreview(session: session.camera.session)
         }

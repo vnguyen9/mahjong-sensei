@@ -20,8 +20,22 @@ import simd
 ///   3. **reviews and directly adjusts** the resulting pond-adjacent regions,
 /// which are converted into the canonical `WorldTableCalibration` shared by
 /// census ownership, ROI planning, and overlays.
-struct ARCalibrationView: UIViewControllerRepresentable {
+/// The presentation mode of Coach Live's one ARKit renderer.  Calibration and
+/// Live deliberately share the *same* view controller, SceneKit scene and
+/// `ARSession`; changing this value must never run/reconfigure ARKit.
+enum CoachLiveARSurfaceMode: Equatable {
+    case marking
+    case reviewEditable
+    case liveReadOnly
+}
+
+/// A persistent host for the one AR surface used by guided calibration and
+/// Coach Live.  It is intentionally not named a "calibration view": after
+/// confirmation the exact same controller stays mounted and merely becomes
+/// read-only.
+struct CoachLiveARSurface: UIViewControllerRepresentable {
     let capture: ARTableCapture
+    let mode: CoachLiveARSurfaceMode
     /// The user's seat wind (from the setup card), used to label the seats.
     var mySeatWind: Wind = .east
     var onComplete: (WorldTableCalibration) -> Void
@@ -31,16 +45,21 @@ struct ARCalibrationView: UIViewControllerRepresentable {
     var onCancel: () -> Void
 
     func makeUIViewController(context: Context) -> ARCalibrationViewController {
-        let controller = ARCalibrationViewController(capture: capture)
-        controller.mySeatWind = mySeatWind
-        controller.onComplete = onComplete
-        controller.onCalibrationChanged = onCalibrationChanged
-        controller.onCancel = onCancel
+        let controller = capture.coachLiveARSurfaceController()
+        configure(controller)
         return controller
     }
 
     func updateUIViewController(_ uiViewController: ARCalibrationViewController, context: Context) {
-        uiViewController.mySeatWind = mySeatWind
+        configure(uiViewController)
+    }
+
+    private func configure(_ controller: ARCalibrationViewController) {
+        controller.mySeatWind = mySeatWind
+        controller.onComplete = onComplete
+        controller.onCalibrationChanged = onCalibrationChanged
+        controller.onCancel = onCancel
+        controller.setSurfaceMode(mode)
     }
 }
 
@@ -52,7 +71,11 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
     var onComplete: ((WorldTableCalibration) -> Void)?
     var onCalibrationChanged: ((WorldTableCalibration) -> Void)?
     var onCancel: (() -> Void)?
-    private let capture: ARTableCapture
+    /// `ARTableCapture` owns this controller for the duration of Coach Live;
+    /// keeping this reference unowned avoids a capture → controller → capture
+    /// retain cycle after the user exits the table.
+    private unowned let capture: ARTableCapture
+    private var surfaceMode: CoachLiveARSurfaceMode = .marking
 
     /// Internal point-placement substages back the three user-visible steps.
     enum MarkStage: Int {
@@ -86,6 +109,8 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
     /// calibration. Reuses the shared `CameraTorch` (same back camera as live).
     private let flashButton = UIButton(type: .system)
     private var torchOn = false
+    private var tapGesture: UITapGestureRecognizer?
+    private var panGesture: UIPanGestureRecognizer?
 
     private var stage: MarkStage = .handPostA
 
@@ -179,15 +204,19 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         setupCoachingOverlay()
         setupControls()
         refreshUI()
+        // A debug/live route can mount the persistent surface directly in
+        // read-only mode.  Apply that presentation after every view exists;
+        // the earlier representable update may have arrived before loading.
+        if surfaceMode == .liveReadOnly {
+            enterReadOnlyLivePresentation()
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         publishInterfaceOrientation()
         seedCalibrationPlaneFromCurrentFrame()
-        let link = CADisplayLink(target: self, selector: #selector(samplePinchFrame))
-        link.add(to: .main, forMode: .common)
-        pinchDisplayLink = link
+        startPinchSamplingIfNeeded()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -195,6 +224,81 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         if torchOn { CameraTorch.set(false); torchOn = false }
         pinchDisplayLink?.invalidate()
         pinchDisplayLink = nil
+    }
+
+    /// Switches visual/interactivity state without touching ARKit.  This is
+    /// the calibration → Live handoff: world tracking continues in the same
+    /// `ARSCNView` and the exact review polygons remain rooted in its scene.
+    func setSurfaceMode(_ mode: CoachLiveARSurfaceMode) {
+        guard surfaceMode != mode else { return }
+        surfaceMode = mode
+        guard isViewLoaded else { return }
+
+        switch mode {
+        case .marking, .reviewEditable:
+            restoreEditableCalibrationChrome()
+        case .liveReadOnly:
+            enterReadOnlyLivePresentation()
+        }
+    }
+
+    private func startPinchSamplingIfNeeded() {
+        guard surfaceMode != .liveReadOnly, pinchDisplayLink == nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(samplePinchFrame))
+        link.add(to: .main, forMode: .common)
+        pinchDisplayLink = link
+    }
+
+    private func enterReadOnlyLivePresentation() {
+        pinchDisplayLink?.invalidate()
+        pinchDisplayLink = nil
+        hideHover()
+        isPinchEngaged = false
+        grabbedPost = nil
+        grabbedHandle = nil
+        directDragOffset = nil
+        tapGesture?.isEnabled = false
+        panGesture?.isEnabled = false
+
+        // The regions and their labels intentionally remain visible.  Every
+        // other calibration-only affordance becomes invisible and inert.
+        coachingOverlay.isHidden = true
+        cardView.isHidden = true
+        backButton.superview?.isHidden = true
+        playerLegendLabel.isHidden = true
+        playerLegendIcon.isHidden = true
+        flashButton.isHidden = true
+        planeNodes.values.forEach { $0.isHidden = true }
+        handMarkerA?.isHidden = true
+        handMarkerB?.isHidden = true
+        bandNode?.isHidden = true
+        pondMarkerA?.isHidden = true
+        pondMarkerB?.isHidden = true
+        pondRectNode?.isHidden = true
+        pondQuadMarkers.forEach { $0?.isHidden = true }
+        pondQuadFillNode?.isHidden = true
+        seatMarkers.values.forEach { $0.isHidden = true }
+    }
+
+    private func restoreEditableCalibrationChrome() {
+        tapGesture?.isEnabled = true
+        panGesture?.isEnabled = true
+        coachingOverlay.isHidden = false
+        cardView.isHidden = false
+        backButton.superview?.isHidden = false
+        flashButton.isHidden = !CameraTorch.isAvailable
+        planeNodes.values.forEach { $0.isHidden = false }
+        pondQuadFillNode?.isHidden = false
+        if stage == .review {
+            handMarkerA?.isHidden = false
+            handMarkerB?.isHidden = false
+            bandNode?.isHidden = false
+            pondQuadMarkers.indices.forEach { placeQuadMarker($0) }
+            for seat in seatMarkers.keys { placeSeatMarker(seat) }
+            refreshReviewGeometry()
+        }
+        startPinchSamplingIfNeeded()
+        refreshUI()
     }
 
     override func viewDidLayoutSubviews() {
@@ -225,6 +329,8 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         tap.require(toFail: pan)
         sceneView.addGestureRecognizer(tap)
         sceneView.addGestureRecognizer(pan)
+        tapGesture = tap
+        panGesture = pan
     }
 
     private func setupCoachingOverlay() {
@@ -370,6 +476,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
     // MARK: - UI state
 
     private func refreshUI() {
+        guard surfaceMode != .liveReadOnly else { return }
         let plane = calibrationPlaneAnchor != nil
         stepLabel.text = "STEP \(stage.displayStep) OF 3"
 

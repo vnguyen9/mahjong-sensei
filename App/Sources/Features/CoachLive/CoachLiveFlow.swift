@@ -66,6 +66,34 @@ struct CoachLiveFlowView: View {
 
     var body: some View {
         ZStack {
+            // Calibration and Live share one persistent SceneKit renderer.
+            // This stays structurally mounted for the whole calibration/live
+            // portion of the flow; confirmation changes it to read-only
+            // instead of replacing the AR view (or its ARSession).
+            if let capture = session.arCapture,
+               flowState == .calibration || flowState == .live {
+                CoachLiveARSurface(
+                    capture: capture,
+                    mode: flowState == .live && !session.showARCalibration
+                        ? .liveReadOnly : .reviewEditable,
+                    mySeatWind: session.seatWind,
+                    onComplete: { calibration in
+                        session.finishARCalibration(calibration)
+                        withAnimation(.easeInOut(duration: 0.3)) { flowState = .live }
+                    },
+                    onCalibrationChanged: { session.applyARCalibrationDraft($0) },
+                    onCancel: {
+                        if flowState == .calibration {
+                            session.finishARCalibration(nil)
+                            withAnimation(.easeInOut(duration: 0.3)) { flowState = .setup }
+                        } else {
+                            session.finishARCalibration(nil)
+                        }
+                    })
+                .ignoresSafeArea()
+                .transition(.opacity)
+            }
+
             switch flowState {
             case .setup:
                 CoachLiveSetupView(
@@ -90,23 +118,7 @@ struct CoachLiveFlowView: View {
                     })
                 .transition(.opacity)
             case .calibration:
-                if let capture = session.arCapture {
-                    ARCalibrationView(
-                        capture: capture,
-                        mySeatWind: session.seatWind,
-                        onComplete: { calibration in
-                            session.finishARCalibration(calibration)
-                            withAnimation(.easeInOut(duration: 0.3)) { flowState = .live }
-                        },
-                        onCalibrationChanged: { session.applyARCalibrationDraft($0) },
-                        onCancel: {
-                            // Back from the first mark → return to the setup card.
-                            session.finishARCalibration(nil)
-                            withAnimation(.easeInOut(duration: 0.3)) { flowState = .setup }
-                        })
-                    .ignoresSafeArea()
-                    .transition(.opacity)
-                } else {
+                if session.arCapture == nil {
                     ContentUnavailableView(
                         "AR calibration unavailable",
                         systemImage: "arkit",
@@ -114,9 +126,13 @@ struct CoachLiveFlowView: View {
                     )
                 }
             case .live:
-                CoachLiveView(session: session, initialTab: debugInitialTab, initialSheet: debugSheet,
-                             onExit: onExit, onScoreHandoff: onScoreHandoff)
-                .transition(.opacity)
+                // Recalibration reuses the surface above in editable mode;
+                // there is no second AR view or full-screen cover.
+                if !session.showARCalibration {
+                    CoachLiveView(session: session, initialTab: debugInitialTab, initialSheet: debugSheet,
+                                 onExit: onExit, onScoreHandoff: onScoreHandoff)
+                    .transition(.opacity)
+                }
             }
         }
         .environment(session)

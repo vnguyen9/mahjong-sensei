@@ -163,6 +163,17 @@ final class ARTableCapture: NSObject {
     /// Calibration renders and raycasts through this session. ARTableCapture
     /// remains the only owner allowed to run, pause, reset, or delegate it.
     var sharedSession: ARSession { session }
+    /// The sole AR renderer for Coach Live.  It survives the visual transition
+    /// from guided calibration to Live so SceneKit's camera, world nodes and
+    /// the ARKit session are never handed off to a replacement view.
+    @ObservationIgnored private var liveSurfaceController: ARCalibrationViewController?
+
+    func coachLiveARSurfaceController() -> ARCalibrationViewController {
+        if let liveSurfaceController { return liveSurfaceController }
+        let controller = ARCalibrationViewController(capture: self)
+        liveSurfaceController = controller
+        return controller
+    }
     private var planeLockPolicy: PlaneLockPolicy?
     /// Whether the running configuration currently requests horizontal
     /// plane detection — tracked locally because `ARWorldTrackingConfiguration`

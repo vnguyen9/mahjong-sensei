@@ -4,9 +4,8 @@ import DesignSystem
 import MahjongCore
 import Recognition
 
-/// Compression level of the state pane's flexible tab-content region, derived
-/// from its MEASURED height (device-size independent) rather than the
-/// breathing fraction directly (UI plan §8). `LiveSegmentedBar`, `HandStrip`,
+/// Compression level of the gameplay sheet's flexible tab-content region,
+/// derived from its measured height. `LiveSegmentedBar`, `HandStrip`,
 /// and `AdviceLine` are fixed-height rows; the tab-content region is the only
 /// `.frame(maxHeight: .infinity)` member — so the VStack's own math enforces
 /// "map shrinks first, hand + advice never hide".
@@ -41,10 +40,10 @@ enum CoachLiveSheet: Identifiable, Hashable {
     }
 }
 
-/// The split-screen composition: the fixed-preview live-feed pane (camera +
-/// blur + zone brackets + chrome), the breathing seam, the Map ⇄ Counts ⇄
-/// Events state pane, hand strip + advice, and the hand-ended/win overlays (UI
-/// plan §7/§8).
+/// Full-screen AR with a draggable Map ⇄ Counts ⇄ Events gameplay sheet.
+/// The AR surface is mounted by `CoachLiveFlow`; this view supplies only
+/// transparent live chrome and gameplay state, so sheet movement cannot resize
+/// or replace the renderer.
 struct CoachLiveView: View {
     @Environment(AppState.self) private var app
     let session: CoachLiveSession
@@ -53,9 +52,12 @@ struct CoachLiveView: View {
     let onExit: () -> Void
     let onScoreHandoff: () -> Void
 
-    @State private var breathing = BreathingController()
     @State private var tab: LiveTab
     @State private var sheet: CoachLiveSheet?
+    /// Live begins with the table unobscured.  The gameplay surface is a
+    /// bottom sheet, not a second half of the camera renderer, so dragging it
+    /// can never crop/re-layout ARKit's camera or projected geometry.
+    @State private var gameplaySheetExpanded = false
     @State private var showExitConfirm = false
     /// Non-nil while the bracket-reassign confirmation (A3) is up — which
     /// zone chip was tapped, so the dialog's copy and the confirm action
@@ -106,51 +108,30 @@ struct CoachLiveView: View {
 
     var body: some View {
         GeometryReader { geo in
-            // `.ignoresSafeArea(edges: .top)` below expands `geo` to the
-            // physical top, so `geo.size.height` spans physical-top →
-            // safe-bottom and the feed measures from the physical top (§7/§8).
-            let fullH = geo.size.height
-            let feedH = fullH * breathing.fraction
-            let availableStateHeight = max(0, fullH - feedH - BreathingSeam.height)
-            let compression = compression(for: availableStateHeight)
-            VStack(spacing: 0) {
+            ZStack(alignment: .bottom) {
+                // The AR surface is below this transparent overlay.  The
+                // pane supplies Live chrome, region actions and diagnostics;
+                // it intentionally no longer owns/replaces an AR preview.
                 LiveFeedPane(fullSize: geo.size,
                              safeTop: topSafeInset,
                              blursFeed: app.blursLiveFeed,
                              onExit: { showExitConfirm = true },
                              onTapUnresolved: { sheet = .assign },
                              onTapZoneChip: { reassignZone = $0 })
-                    .frame(height: feedH, alignment: .top)
-                    .clipped()
-                BreathingSeam(controller: breathing, paneHeight: fullH)
-                statePane(compression: compression)
-                    .frame(maxHeight: .infinity)
+                    .frame(width: geo.size.width, height: geo.size.height)
+
+                gameplaySheet(height: geo.size.height)
             }
-            .frame(width: geo.size.width, height: fullH, alignment: .top)
-            .environment(\.liveCompression, compression)
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
         }
         .ignoresSafeArea(edges: .top)
-        .background(ScreenBackground(.live).ignoresSafeArea())
-        .environment(session)
-        .sheet(item: $sheet) { sheetContent($0) }
-        // Guided marking renders the same continuous ARSession as Live.
-        .fullScreenCover(isPresented: Binding(
-            get: { session.showARCalibration },
-            set: { if !$0 { session.finishARCalibration(nil) } }
-        )) {
-            if let capture = session.arCapture {
-                ARCalibrationView(
-                    capture: capture,
-                    mySeatWind: session.seatWind,
-                    onComplete: { session.finishARCalibration($0) },
-                    onCalibrationChanged: { session.applyARCalibrationDraft($0) },
-                    onCancel: {
-                        let hasAcceptedCalibration = session.worldTableCalibration != nil
-                        session.finishARCalibration(nil)
-                        if !hasAcceptedCalibration { onExit() }
-                    })
+        .background {
+            if !session.isARCaptureActive {
+                ScreenBackground(.live).ignoresSafeArea()
             }
         }
+        .environment(session)
+        .sheet(item: $sheet) { sheetContent($0) }
         .confirmationDialog("Exit Coach Live?", isPresented: $showExitConfirm, titleVisibility: .visible) {
             Button("Exit and clear table", role: .destructive, action: onExit)
             Button("Keep watching", role: .cancel) {}
@@ -164,6 +145,88 @@ struct CoachLiveView: View {
             }
             Button("Cancel", role: .cancel) { reassignZone = nil }
         }
+    }
+
+    // MARK: - Full-screen AR + gameplay sheet
+
+    private func gameplaySheet(height: CGFloat) -> some View {
+        let collapsedHeight: CGFloat = 132
+        let expandedHeight = min(height * 0.72, max(480, height - 120))
+        let currentHeight = gameplaySheetExpanded ? expandedHeight : collapsedHeight
+
+        return VStack(spacing: 0) {
+            Capsule()
+                .fill(MJColor.cream(0.35))
+                .frame(width: 36, height: 5)
+                .padding(.top, 9)
+                .padding(.bottom, gameplaySheetExpanded ? 7 : 10)
+
+            if gameplaySheetExpanded {
+                statePane(compression: compression(for: expandedHeight - 22))
+                    .environment(\.liveCompression, compression(for: expandedHeight - 22))
+            } else {
+                collapsedSheetSummary
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: currentHeight, maxHeight: currentHeight, alignment: .top)
+        .background(MJColor.deepJade.opacity(0.96))
+        .clipShape(.rect(topLeadingRadius: 24, topTrailingRadius: 24))
+        .overlay(alignment: .top) {
+            Rectangle().fill(MJColor.gold(0.18)).frame(height: 1)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if !gameplaySheetExpanded {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+                    gameplaySheetExpanded = true
+                }
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 8)
+                .onEnded { value in
+                    if value.translation.height < -36 {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+                            gameplaySheetExpanded = true
+                        }
+                    } else if value.translation.height > 36 {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+                            gameplaySheetExpanded = false
+                        }
+                    }
+                }
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(gameplaySheetExpanded ? "Gameplay details" : "Gameplay summary")
+        .accessibilityHint(gameplaySheetExpanded ? "Swipe down to collapse." : "Swipe up for map, counts, and events.")
+    }
+
+    private var collapsedSheetSummary: some View {
+        Button {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+                gameplaySheetExpanded = true
+            }
+        } label: {
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    Circle().fill(MJColor.liveRed).frame(width: 7, height: 7)
+                    Text(session.countSource == .spatialBootstrapping
+                         ? "Tracking table"
+                         : "Tracking live table")
+                        .font(MJFont.ui(13, weight: .semibold))
+                    Spacer()
+                    Text("\(session.diagnostics.worldCensusTracks) physical tiles")
+                        .font(MJFont.ui(13, weight: .bold))
+                }
+                .foregroundStyle(MJColor.creamHeading)
+                Text("Swipe up for map, counts, and events")
+                    .font(MJFont.ui(11, weight: .medium))
+                    .foregroundStyle(MJColor.cream(0.58))
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 16)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Bracket-reassign confirmation (A3)

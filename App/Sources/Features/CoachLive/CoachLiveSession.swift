@@ -924,7 +924,7 @@ final class CoachLiveSession: Identifiable {
                     self.spatialTrackingHealth = .trackingLimited
                     self.cameraMoving = false
                     if now - limitedSince >= 5 {
-                        self.restartSpatialCalibration(
+                        self.returnToEditableCalibration(
                             reason: "tracking-\(arCapture.cameraTrackingReason)"
                         )
                         trackingLimitedSince = nil
@@ -2353,6 +2353,35 @@ final class CoachLiveSession: Identifiable {
         advisorCache = AdvisorCache()
         applyState(.empty, pending: nil, log: [])
         beginARCalibration()
+    }
+
+    /// Five seconds of limited tracking is a calibration-mode transition on
+    /// the existing AR surface, not permission to destroy the session, census,
+    /// or last published snapshot. The user sees the same marks and can adjust
+    /// them in place while ARKit continues attempting to recover its pose.
+    @MainActor
+    private func returnToEditableCalibration(reason: String) {
+        guard calibrationHasBeenFinalized,
+              !showARCalibration,
+              let calibration = worldTableCalibration else { return }
+        let ar = arCapture?.sessionDiagnostics
+        calibrationDraft = CalibrationDraft(
+            acceptedCalibration: calibration,
+            acceptedLegacyGeometry: calibratedTableGeometry,
+            acceptedCountSource: countSource,
+            acceptedHealth: spatialTrackingHealth,
+            isInitialSetup: false,
+            sessionID: ar?.sessionID,
+            pipelineGeneration: spatialPipelineGeneration,
+            resetTrackingRunCount: ar?.resetTrackingRunCount ?? 0,
+            removeExistingAnchorsRunCount: ar?.removeExistingAnchorsRunCount ?? 0
+        )
+        calibrationDecision = "TRACKING_LIMITED"
+        showARCalibration = true
+        refreshSpatialContinuityDiagnostics()
+        Self.logger.notice(
+            "spatial tracking limited for 5s; returning to same editable AR surface reason=\(reason, privacy: .public)"
+        )
     }
 
     @MainActor
