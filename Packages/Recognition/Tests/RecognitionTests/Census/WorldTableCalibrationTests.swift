@@ -158,6 +158,38 @@ final class WorldTableCalibrationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(clamped.length, RevealedZoneMark.minimumLength)
     }
 
+    func testTranslationClampPreservesCompleteStripShapeAtExtentEdge() throws {
+        let mark = RevealedZoneMark(
+            start: SIMD2(-0.18, -0.12),
+            end: SIMD2(0.18, 0.12)
+        )
+        let moved = try XCTUnwrap(mark.translated(
+            to: SIMD2(1.0, 1.0),
+            within: SIMD2(0.80, 0.70)
+        ))
+        let polygon = try XCTUnwrap(moved.polygon())
+
+        XCTAssertEqual(moved.length, mark.length, accuracy: 0.000_001)
+        XCTAssertEqual(moved.depth, mark.depth, accuracy: 0.000_001)
+        XCTAssertEqual(moved.longAxis?.x ?? 0, mark.longAxis?.x ?? 1, accuracy: 0.000_001)
+        XCTAssertEqual(moved.longAxis?.y ?? 0, mark.longAxis?.y ?? 1, accuracy: 0.000_001)
+        for point in polygon {
+            XCTAssertLessThanOrEqual(abs(point.x), 0.400_1)
+            XCTAssertLessThanOrEqual(abs(point.y), 0.350_1)
+        }
+    }
+
+    func testTranslationRejectsStripThatCannotFitWithoutResizing() {
+        let mark = RevealedZoneMark(
+            start: SIMD2(-0.30, 0),
+            end: SIMD2(0.30, 0)
+        )
+        XCTAssertNil(mark.translated(
+            to: .zero,
+            within: SIMD2(0.40, 0.40)
+        ))
+    }
+
     func testMineMeldStripIsParallelAndSeparatedInwardFromHand() throws {
         let calibration = try calibration()
         let mineMeld = try XCTUnwrap(calibration.revealedZonePolygons[.mineMeld])

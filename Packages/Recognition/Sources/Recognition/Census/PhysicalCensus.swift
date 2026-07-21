@@ -205,6 +205,26 @@ public final class PhysicalCensus {
         tracks[index].bucket = OwnershipResolver.bucket(for: zone)
     }
 
+    /// Applies the two user-editable properties to one physical identity in a
+    /// single census operation. A nil value leaves that property unchanged;
+    /// this lets presentation layers stage face and ownership edits together
+    /// without ever constructing an intermediate mixed correction.
+    public func correct(
+        trackID: CensusTrackID,
+        face: TileFace? = nil,
+        semanticZone: SemanticZoneID? = nil
+    ) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { return }
+        if let face {
+            FaceFusion.pin(face, on: &tracks[index])
+        }
+        if let semanticZone {
+            tracks[index].semanticZoneOverride = semanticZone
+            tracks[index].semanticZone = semanticZone
+            tracks[index].bucket = OwnershipResolver.bucket(for: semanticZone)
+        }
+    }
+
     public func reassignZones(_ zones: [SemanticZoneID: [SIMD2<Float>]],
                               worldToTable: simd_float4x4) {
         for i in tracks.indices {

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine
 import DesignSystem
 import MahjongCore
 import Recognition
@@ -83,7 +84,7 @@ enum CoachLiveSheet: Identifiable, Hashable {
     case adjustCount(Tile)
     case fixEvent(UUID)
     case pickHandTile(TrackID)
-    case pickUnknownTile(TrackID)
+    case editSpatialTrack(TrackID)
     case adviceDetail
 
     var id: String {
@@ -92,7 +93,7 @@ enum CoachLiveSheet: Identifiable, Hashable {
         case let .adjustCount(tile):  return "adjust-\(tile.classIndex)"
         case let .fixEvent(id):       return "fix-\(id)"
         case let .pickHandTile(id):   return "pick-\(id.raw)"
-        case let .pickUnknownTile(id): return "unknown-\(id.raw)"
+        case let .editSpatialTrack(id): return "spatial-\(id.raw)"
         case .adviceDetail:           return "advice"
         }
     }
@@ -198,6 +199,11 @@ struct CoachLiveView: View {
                              onTapUnresolved: { sheet = .assign },
                              onTapZoneChip: { reassignZone = $0 })
                     .frame(width: geo.size.width, height: geo.size.height)
+
+                LiveTrackIndicatorOverlay(session: session) { trackID in
+                    sheet = .editSpatialTrack(trackID)
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
 
                 gameplaySheet(height: geo.size.height)
             }
@@ -354,8 +360,8 @@ struct CoachLiveView: View {
                        minHeight: gameplayDrawerDetent == .small ? 44 : 84,
                        maxHeight: .infinity)
             HandStrip(
-                onTapTile: { id in sheet = .pickHandTile(id) },
-                onTapUnknown: { id in sheet = .pickUnknownTile(id) }
+                onTapTile: openHandTileEditor,
+                onTapUnknown: { id in sheet = .editSpatialTrack(id) }
             )
         }
         .padding(.horizontal, 16)
@@ -430,8 +436,8 @@ struct CoachLiveView: View {
             tabContent
                 .frame(maxWidth: .infinity, minHeight: 84, maxHeight: .infinity)
             HandStrip(
-                onTapTile: { id in sheet = .pickHandTile(id) },
-                onTapUnknown: { id in sheet = .pickUnknownTile(id) }
+                onTapTile: openHandTileEditor,
+                onTapUnknown: { id in sheet = .editSpatialTrack(id) }
             )
             if compression != .minimal {
                 AdviceLine { sheet = .adviceDetail }
@@ -486,7 +492,7 @@ struct CoachLiveView: View {
         case .map:
             MapTab(
                 onTapUnresolved: { sheet = .assign },
-                onTapUnknown: { id in sheet = .pickUnknownTile(id) }
+                onTapUnknown: { id in sheet = .editSpatialTrack(id) }
             )
         case .counts: CountsTab { tile in sheet = .adjustCount(tile) }
         case .events: EventsTab { id in sheet = .fixEvent(id) }
@@ -520,18 +526,27 @@ struct CoachLiveView: View {
                     .presentationBackground(.clear)
             }
         case let .pickHandTile(id):
-            CorrectionPicker(current: currentHandFace(id), confirmVerb: "Use", onConfirm: { tile in
-                session.overrideHandTile(id, as: tile)
-                sheet = nil
-            }, onRemove: nil)
-            .presentationDetents([.height(460)])
+            NavigationStack {
+                CoachLiveFacePicker(
+                    current: currentHandFace(id),
+                    statistics: { tile in
+                        session.fallbackTileStatistics(
+                            for: tile,
+                            replacingHandTrack: id
+                        )
+                    },
+                    onUse: { tile in
+                        session.overrideHandTile(id, as: tile)
+                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                        sheet = nil
+                    }
+                )
+            }
+            .presentationDetents([.medium, .large])
             .presentationBackground(.clear)
-        case let .pickUnknownTile(id):
-            CorrectionPicker(current: nil, confirmVerb: "Set tile", onConfirm: { tile in
-                session.overrideSpatialUnknownTile(id, as: tile)
-                sheet = nil
-            }, onRemove: nil)
-            .presentationDetents([.height(460)])
+        case let .editSpatialTrack(id):
+            SpatialTrackEditorSheet(session: session, trackID: id)
+            .presentationDetents([.medium, .large])
             .presentationBackground(.clear)
         case .adviceDetail:
             AdviceDetailSheet()
@@ -545,5 +560,551 @@ struct CoachLiveView: View {
         if let match = session.handTiles.first(where: { $0.id == id }) { return match.face }
         if session.drawnTile?.id == id { return session.drawnTile?.face }
         return nil
+    }
+
+    private func openHandTileEditor(_ id: TrackID) {
+        sheet = session.spatialTrackSnapshot(id) == nil
+            ? .pickHandTile(id)
+            : .editSpatialTrack(id)
+    }
+}
+
+/// Compact, tappable production markers for the authoritative LiDAR census.
+/// `TimelineView` drives display-cadence reprojection only; the recognizer and
+/// census continue running at their existing cadence.
+private struct LiveTrackIndicatorOverlay: View {
+    let session: CoachLiveSession
+    let onSelect: (TrackID) -> Void
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { _ in
+            GeometryReader { proxy in
+                ZStack {
+                    ForEach(session.liveSpatialIndicatorTracks, id: \.id) { track in
+                        if let point = session.projectSpatialTrack(
+                            track,
+                            viewportSize: proxy.size
+                        ) {
+                            Button {
+                                UISelectionFeedbackGenerator().selectionChanged()
+                                onSelect(TrackID(raw: track.id.value))
+                            } label: {
+                                SpatialTrackMarker(track: track)
+                            }
+                            .buttonStyle(.plain)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                            .position(point)
+                            .accessibilityLabel(track.accessibilityLabel)
+                            .accessibilityHint("Opens face, region, and removal controls for this physical tile.")
+                        }
+                    }
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height)
+            }
+        }
+    }
+}
+
+private struct SpatialTrackMarker: View {
+    let track: CensusTrackSnapshot
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color.black.opacity(0.48))
+                .frame(width: 23, height: 23)
+            Circle()
+                .stroke(track.semanticZone.indicatorColor, lineWidth: 3)
+                .frame(width: 21, height: 21)
+            if track.face == nil {
+                Text("?")
+                    .font(.caption2.bold())
+                    .foregroundStyle(Color(uiColor: .systemOrange))
+            } else {
+                Circle()
+                    .fill(Color(uiColor: .systemBlue))
+                    .frame(width: 9, height: 9)
+            }
+        }
+        .opacity(track.lifecycle == .confirmed ? 1 : 0.45)
+        .shadow(color: .black.opacity(0.45), radius: 2, y: 1)
+    }
+}
+
+/// One transaction-oriented editor for a census identity. The top-right Save
+/// commits region-only edits; choosing a face with Use commits that face and
+/// the currently selected region in the same publication.
+private struct SpatialTrackEditorSheet: View {
+    let session: CoachLiveSession
+    let trackID: TrackID
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedZone: SemanticZoneID = .boundaryUnresolved
+    @State private var didLoadTrack = false
+    @State private var showRemoveConfirmation = false
+    private let retirementCheck = Timer.publish(
+        every: 0.25,
+        on: .main,
+        in: .common
+    ).autoconnect()
+
+    private var track: CensusTrackSnapshot? {
+        session.spatialTrackSnapshot(trackID)
+    }
+
+    private var originalFace: Tile? {
+        guard case let .tile(tile)? = track?.face else { return nil }
+        return tile
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                ScreenBackground(.content)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        faceCard
+                        removeTrackButton
+                        zoneCard
+                        statisticsSection
+                    }
+                    .padding(20)
+                    .padding(.bottom, 24)
+                }
+            }
+            .navigationTitle("Physical tile")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { commit(face: nil) }
+                        .disabled(track == nil)
+                }
+            }
+            .navigationDestination(for: SpatialEditorRoute.self) { _ in
+                CoachLiveFacePicker(
+                    current: originalFace,
+                    statistics: { tile in
+                        session.censusTileStatistics(
+                            for: tile,
+                            applying: CensusTrackCorrectionDraft(
+                                trackID: CensusTrackID(trackID.raw),
+                                face: tile,
+                                semanticZone: selectedZone
+                            )
+                        )
+                    },
+                    onUse: { tile in
+                        // "Use" confirms the face and region immediately and
+                        // closes the complete editor, not just this route.
+                        commit(face: tile)
+                    }
+                )
+            }
+        }
+        .preferredColorScheme(.dark)
+        .onAppear {
+            guard !didLoadTrack, let track else { return }
+            selectedZone = track.semanticZone
+            didLoadTrack = true
+        }
+        .onReceive(retirementCheck) { _ in
+            guard session.spatialTrackSnapshot(trackID) != nil else {
+                dismiss()
+                return
+            }
+        }
+        .confirmationDialog(
+            "Remove this physical tile?",
+            isPresented: $showRemoveConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Remove track", role: .destructive) {
+                session.removeSpatialTrack(trackID)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The tile disappears from Coach Live immediately. It can be detected again if it remains on the table.")
+        }
+    }
+
+    private var faceCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Face")
+                .font(MJFont.ui(13, weight: .semibold))
+                .foregroundStyle(MJColor.creamHeading)
+            HStack(spacing: 14) {
+                if let face = originalFace {
+                    MahjongTileView(face, theme: .jade, width: 46)
+                } else {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Color(uiColor: .systemOrange), style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
+                        .frame(width: 46, height: 62)
+                        .overlay {
+                            Text("?")
+                                .font(.title2.bold())
+                                .foregroundStyle(Color(uiColor: .systemOrange))
+                        }
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(originalFace == nil ? "Face needed" : "Face resolved")
+                        .font(MJFont.ui(14, weight: .semibold))
+                        .foregroundStyle(MJColor.creamHeading)
+                    Text("Choose the physical tile face without changing its AR identity.")
+                        .font(MJFont.ui(12))
+                        .foregroundStyle(MJColor.cream(0.62))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            NavigationLink(value: SpatialEditorRoute.face) {
+                SettingLikeAction(title: "Change face", systemImage: "square.grid.3x3")
+            }
+            .buttonStyle(.plain)
+        }
+        .mjCard()
+    }
+
+    private var removeTrackButton: some View {
+        Button(role: .destructive) {
+            showRemoveConfirmation = true
+        } label: {
+            Label("Remove track", systemImage: "trash")
+                .font(MJFont.ui(14, weight: .semibold))
+                .foregroundStyle(Color(uiColor: .systemRed))
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color(uiColor: .systemRed).opacity(0.55))
+                }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func commit(face: Tile?) {
+        guard track != nil else { return }
+        session.correctSpatialTrack(trackID, face: face, zone: selectedZone)
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        dismiss()
+    }
+
+    private var zoneCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Table region")
+                .font(MJFont.ui(13, weight: .semibold))
+                .foregroundStyle(MJColor.creamHeading)
+                .padding(.horizontal, 4)
+            ForEach(SemanticZoneID.allCases, id: \.self) { zone in
+                Button {
+                    selectedZone = zone
+                    UISelectionFeedbackGenerator().selectionChanged()
+                } label: {
+                    HStack(spacing: 12) {
+                        Circle()
+                            .fill(zone.indicatorColor)
+                            .frame(width: 12, height: 12)
+                        Text(zone.editorName)
+                            .font(MJFont.ui(14, weight: .medium))
+                            .foregroundStyle(MJColor.creamHeading)
+                        Spacer()
+                        if selectedZone == zone {
+                            Image(systemName: "checkmark")
+                                .font(.body.bold())
+                                .foregroundStyle(MJColor.gold)
+                        }
+                    }
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue(selectedZone == zone ? "Selected" : "Not selected")
+                if zone != SemanticZoneID.allCases.last {
+                    Divider().overlay(MJColor.gold(0.12))
+                }
+            }
+        }
+        .mjCard(padding: 8)
+    }
+
+    @ViewBuilder
+    private var statisticsSection: some View {
+        if let originalFace {
+            CoachLiveTileStatsView(
+                statistics: session.censusTileStatistics(
+                    for: originalFace,
+                    applying: CensusTrackCorrectionDraft(
+                        trackID: CensusTrackID(trackID.raw),
+                        face: originalFace,
+                        semanticZone: selectedZone
+                    )
+                )
+            )
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Tile statistics")
+                    .font(MJFont.ui(13, weight: .semibold))
+                    .foregroundStyle(MJColor.creamHeading)
+                Text("Choose a face to preview its live copies, draw odds, combinations, and pattern examples before using it.")
+                    .font(MJFont.ui(12))
+                    .foregroundStyle(MJColor.cream(0.66))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let inventory = session.censusGameplayInventory(),
+                   inventory.unknownFaceTrackCount > 0 {
+                    unknownFaceDisclosure(inventory.unknownFaceTrackCount)
+                }
+            }
+            .mjCard()
+        }
+    }
+}
+
+private enum SpatialEditorRoute: Hashable { case face }
+
+/// The UI-ready slice of either a census inventory or the explicit mock/debug
+/// fallback. Counts are values only: no editor control can step or mutate
+/// them directly.
+private struct CoachLiveTileStatistics {
+    let tile: Tile
+    let table: Int
+    let yours: Int
+    let unassigned: Int
+    let unknownFaceCount: Int
+    let resolvedCounts: [Tile: Int]
+
+    var insight: LiveTileInsight {
+        LiveTileInsight(tile: tile, resolvedCounts: resolvedCounts)
+    }
+}
+
+/// Scrollable face selection with a continuously recomputed draft preview.
+/// The navigation-bar Use action is the only face confirmation control.
+private struct CoachLiveFacePicker: View {
+    let current: Tile?
+    let statistics: (Tile) -> CoachLiveTileStatistics
+    let onUse: (Tile) -> Void
+
+    @State private var suit: SuitTab
+    @State private var selection: Tile
+
+    init(
+        current: Tile?,
+        statistics: @escaping (Tile) -> CoachLiveTileStatistics,
+        onUse: @escaping (Tile) -> Void
+    ) {
+        let initial = current ?? .m(1)
+        self.current = current
+        self.statistics = statistics
+        self.onUse = onUse
+        _suit = State(initialValue: SuitTab(for: initial))
+        _selection = State(initialValue: initial)
+    }
+
+    var body: some View {
+        ZStack {
+            ScreenBackground(.content)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    TileFaceSelectionGrid(suit: $suit, selection: $selection)
+                    CoachLiveTileStatsView(statistics: statistics(selection))
+                }
+                .padding(20)
+                .padding(.bottom, 28)
+            }
+        }
+        .navigationTitle("Choose face")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Use") { onUse(selection) }
+                    .fontWeight(.semibold)
+                    .accessibilityHint("Saves this face and the selected table region")
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+private struct CoachLiveTileStatsView: View {
+    let statistics: CoachLiveTileStatistics
+
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: 92), spacing: 10)]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Resolved copies")
+                    .font(MJFont.ui(11, weight: .semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(MJColor.gold(0.9))
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+                    readOnlyCount(statistics.table, label: "Table")
+                    readOnlyCount(statistics.yours, label: "Yours")
+                    if statistics.unassigned > 0 {
+                        readOnlyCount(statistics.unassigned, label: "Unassigned")
+                    }
+                    readOnlyCount(statistics.insight.liveCopies, label: "Live")
+                }
+                if statistics.unknownFaceCount > 0 {
+                    unknownFaceDisclosure(statistics.unknownFaceCount)
+                }
+            }
+            .mjCard()
+
+            LiveTileStatsView(insight: statistics.insight)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func readOnlyCount(_ value: Int, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("\(value)")
+                .font(MJFont.serif(20, weight: .bold))
+                .foregroundStyle(MJColor.lightGold)
+            Text(label)
+                .font(MJFont.ui(11, weight: .medium))
+                .foregroundStyle(MJColor.cream(0.58))
+        }
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label), \(value) resolved copies")
+    }
+}
+
+private func unknownFaceDisclosure(_ count: Int) -> some View {
+    Label(
+        "Based on resolved faces · \(count) physical tiles still need faces",
+        systemImage: "questionmark.diamond"
+    )
+    .font(MJFont.ui(11, weight: .medium))
+    .foregroundStyle(Color(uiColor: .systemOrange))
+    .fixedSize(horizontal: false, vertical: true)
+    .accessibilityLabel(
+        "Statistics based on resolved faces. \(count) physical tiles still need faces."
+    )
+}
+
+private extension CoachLiveSession {
+    @MainActor
+    func censusTileStatistics(
+        for tile: Tile,
+        applying draft: CensusTrackCorrectionDraft? = nil
+    ) -> CoachLiveTileStatistics {
+        guard let inventory = censusGameplayInventory(applying: draft) else {
+            return fallbackTileStatistics(for: tile, replacingHandTrack: nil)
+        }
+        return CoachLiveTileStatistics(
+            tile: tile,
+            table: inventory.tableCount(for: tile),
+            yours: inventory.yoursCount(for: tile),
+            unassigned: inventory.unassignedCount(for: tile),
+            unknownFaceCount: inventory.unknownFaceTrackCount,
+            resolvedCounts: inventory.resolvedCounts
+        )
+    }
+
+    /// Face-only statistics for mock/debug sessions where a hand tile has no
+    /// physical census identity. The draft replaces exactly one current hand
+    /// face so candidate odds never double-count the edited tile.
+    func fallbackTileStatistics(
+        for tile: Tile,
+        replacingHandTrack trackID: TrackID?
+    ) -> CoachLiveTileStatistics {
+        var tableCounts: [Tile: Int] = [:]
+        var yoursCounts: [Tile: Int] = [:]
+        var unassignedCounts: [Tile: Int] = [:]
+
+        for entry in pond { tableCounts[entry.tile, default: 0] += 1 }
+        for melds in opponentMelds.values {
+            for face in melds.flatMap(\.tiles) { tableCounts[face, default: 0] += 1 }
+        }
+        for tracked in handTiles { yoursCounts[tracked.face, default: 0] += 1 }
+        if let drawnTile { yoursCounts[drawnTile.face, default: 0] += 1 }
+        for face in myMelds.flatMap(\.tiles) { yoursCounts[face, default: 0] += 1 }
+        for item in unresolved {
+            if let face = item.tile { unassignedCounts[face, default: 0] += 1 }
+        }
+
+        if let trackID {
+            let oldFace = handTiles.first(where: { $0.id == trackID })?.face
+                ?? (drawnTile?.id == trackID ? drawnTile?.face : nil)
+            if let oldFace {
+                yoursCounts[oldFace] = max(0, yoursCounts[oldFace, default: 0] - 1)
+                if yoursCounts[oldFace] == 0 { yoursCounts.removeValue(forKey: oldFace) }
+            }
+            yoursCounts[tile, default: 0] += 1
+        }
+
+        let resolvedCounts = tableCounts
+            .merging(yoursCounts, uniquingKeysWith: +)
+            .merging(unassignedCounts, uniquingKeysWith: +)
+        return CoachLiveTileStatistics(
+            tile: tile,
+            table: tableCounts[tile, default: 0],
+            yours: yoursCounts[tile, default: 0],
+            unassigned: unassignedCounts[tile, default: 0],
+            unknownFaceCount: spatialUnknownTiles.count + unresolved.filter { $0.tile == nil }.count,
+            resolvedCounts: resolvedCounts
+        )
+    }
+}
+
+private struct SettingLikeAction: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        HStack {
+            Label(title, systemImage: systemImage)
+                .font(MJFont.ui(14, weight: .semibold))
+                .foregroundStyle(MJColor.creamHeading)
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption.bold())
+                .foregroundStyle(MJColor.cream(0.5))
+        }
+        .frame(minHeight: 44)
+        .contentShape(Rectangle())
+    }
+}
+
+private extension CensusTrackSnapshot {
+    var accessibilityLabel: String {
+        let state = face == nil ? "Face needed" : "Recognized tile"
+        let held = lifecycle == .confirmed ? "" : ", temporarily held"
+        return "\(state), \(semanticZone.editorName)\(held)"
+    }
+}
+
+private extension SemanticZoneID {
+    var editorName: String {
+        switch self {
+        case .mineHand: return "My hand"
+        case .mineMeld: return "My revealed tiles"
+        case .tablePond: return "Pond"
+        case .tableRevealedLeft: return "Left player revealed tiles"
+        case .tableRevealedFar: return "Far player revealed tiles"
+        case .tableRevealedRight: return "Right player revealed tiles"
+        case .boundaryUnresolved: return "Unresolved"
+        case .ignoredWall: return "Ignore wall or tile back"
+        }
+    }
+
+    var indicatorColor: Color {
+        switch self {
+        case .mineHand: return Color(uiColor: .systemYellow)
+        case .mineMeld: return Color(uiColor: .systemOrange)
+        case .tablePond: return Color(uiColor: .systemCyan)
+        case .tableRevealedLeft: return Color(uiColor: .systemPurple)
+        case .tableRevealedFar: return Color(uiColor: .systemTeal)
+        case .tableRevealedRight: return Color(uiColor: .systemPink)
+        case .boundaryUnresolved: return Color(uiColor: .systemOrange)
+        case .ignoredWall: return Color(uiColor: .systemGray)
+        }
     }
 }

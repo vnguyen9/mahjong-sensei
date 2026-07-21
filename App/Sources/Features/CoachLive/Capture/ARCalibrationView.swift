@@ -67,7 +67,16 @@ struct CoachLiveARSurface: UIViewControllerRepresentable {
 /// a SwiftUI `View`) because it owns an `ARSCNView` + `ARCoachingOverlayView` +
 /// tap gesture + `ARSCNViewDelegate`/`ARSessionDelegate`.
 final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
-    var mySeatWind: Wind = .east
+    var mySeatWind: Wind = .east {
+        didSet {
+            guard oldValue != mySeatWind, isViewLoaded else { return }
+            seatMoveMarkers.values.forEach { $0.removeFromParentNode() }
+            seatMoveMarkers.removeAll()
+            if stage == .review, surfaceMode != .liveReadOnly {
+                for seat in revealedZoneMarks.keys { placeSeatEndpointMarkers(seat) }
+            }
+        }
+    }
     var onComplete: ((WorldTableCalibration) -> Void)?
     var onCalibrationChanged: ((WorldTableCalibration) -> Void)?
     var onCancel: (() -> Void)?
@@ -147,6 +156,9 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         case end(RelativeSeat)
     }
     private var seatEndpointMarkers: [SeatEndpoint: SCNNode] = [:]
+    /// A wind-faced tile at each strip center is the primary move affordance.
+    /// Endpoint rings remain dedicated to resizing and rotation.
+    private var seatMoveMarkers: [RelativeSeat: SCNNode] = [:]
     private var seatEndpointAccessibility: [SeatEndpoint: UIAccessibilityElement] = [:]
     private var seatBodyAccessibility: [RelativeSeat: UIAccessibilityElement] = [:]
     private let minimumProjectedHandleHitTarget: CGFloat = 44
@@ -287,6 +299,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         pondQuadMarkers.forEach { $0?.isHidden = true }
         pondQuadFillNode?.isHidden = true
         seatEndpointMarkers.values.forEach { $0.isHidden = true }
+        seatMoveMarkers.values.forEach { $0.isHidden = true }
         sceneView.accessibilityElements = []
     }
 
@@ -424,16 +437,16 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         playerLegendLabel.textColor = UIColor(MJColor.creamHeading)
         playerLegendLabel.font = .preferredFont(forTextStyle: .footnote)
         playerLegendLabel.adjustsFontForContentSizeCategory = true
-        playerLegendLabel.text = "Player regions — drag a strip to move it. Drag either round end to resize or rotate it."
+        playerLegendLabel.text = "Drag a wind tile to move a player region. Drag either end to resize or rotate."
         playerLegendLabel.backgroundColor = UIColor(MJColor.sheetGlass)
         playerLegendLabel.layer.cornerRadius = 12
         playerLegendLabel.layer.masksToBounds = true
         playerLegendLabel.isHidden = true
         playerLegendLabel.translatesAutoresizingMaskIntoConstraints = false
-        playerLegendLabel.accessibilityLabel = "Player regions. Drag a strip to move it. Drag either endpoint to resize or rotate it. Left player revealed tiles start, end, and body. Far player revealed tiles start, end, and body. Right player revealed tiles start, end, and body."
+        playerLegendLabel.accessibilityLabel = "Player regions. Drag a wind tile to move a player region. Drag either endpoint to resize or rotate it."
         view.addSubview(playerLegendLabel)
 
-        playerLegendIcon.image = UIImage(systemName: "person.fill")
+        playerLegendIcon.image = UIImage(systemName: "move.3d")
         playerLegendIcon.tintColor = .systemOrange
         playerLegendIcon.contentMode = .scaleAspectFit
         playerLegendIcon.isAccessibilityElement = false
@@ -622,8 +635,8 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         // or player-region endpoint) to it — tap fallback for the pinch-drag, allowed beyond
         // `grabRadius` since a tap is deliberate.
         if stage == .review {
-            if let h = reviewRegionHandle(containing: tablePoint)
-                ?? nearestEditHandle(at: screenPoint)
+            if let h = nearestEditHandle(at: screenPoint)
+                ?? reviewRegionHandle(containing: tablePoint)
                 ?? nearestEditHandle(to: tablePoint, withinRadius: false) {
                 moveEditHandle(h, to: tablePoint)
                 lightImpact()
@@ -643,8 +656,11 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         switch gesture.state {
         case .began:
             guard let (tablePoint, _) = hit else { return }
-            let handle = reviewRegionHandle(containing: tablePoint)
-                ?? nearestEditHandle(at: screenPoint)
+            // Visible center/endpoint controls win over their filled strip.
+            // Otherwise an endpoint lies inside its own polygon and can never
+            // be grabbed to rotate or resize it.
+            let handle = nearestEditHandle(at: screenPoint)
+                ?? reviewRegionHandle(containing: tablePoint)
                 ?? nearestEditHandle(to: tablePoint, withinRadius: true)
             guard let handle, let anchor = reviewHandleAnchor(handle) else { return }
             grabbedHandle = handle
@@ -807,6 +823,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         clearReviewGeometry()
         for i in pondQuadMarkers.indices { pondQuadMarkers[i]?.isHidden = true }
         seatEndpointMarkers.values.forEach { $0.isHidden = true }
+        seatMoveMarkers.values.forEach { $0.isHidden = true }
         sceneView.accessibilityElements = []
         pondMarkerA?.isHidden = false
         pondMarkerB?.isHidden = false
@@ -887,6 +904,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         for (seat, mark) in revealedZoneMarks {
             points.append((.seatStart(seat), SIMD2(Double(mark.start.x), Double(mark.start.y))))
             points.append((.seatEnd(seat), SIMD2(Double(mark.end.x), Double(mark.end.y))))
+            points.append((.seatRegion(seat), SIMD2(Double(mark.center.x), Double(mark.center.y))))
         }
         return points
     }
@@ -920,7 +938,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             let deltaX = CGFloat(projected.x) - screenPoint.x
             let deltaY = CGFloat(projected.y) - screenPoint.y
             let distance = hypot(deltaX, deltaY)
-            guard distance <= minimumProjectedHandleHitTarget else { continue }
+            guard distance <= minimumProjectedHandleHitTarget / 2 else { continue }
             if best == nil || distance < best!.1 { best = (handle, distance) }
         }
         return best?.0
@@ -1076,7 +1094,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             end: old.end + SIMD2(Float(delta.x), Float(delta.y)),
             depth: RevealedZoneMark.fixedDepth
         )
-        guard let clamped = clampSeatMarkToCalibratedExtent(moved) else { return }
+        guard let clamped = clampSeatTranslationToCalibratedExtent(moved) else { return }
         revealedZoneMarks[seat] = clamped
         placeSeatEndpointMarkers(seat)
     }
@@ -1135,6 +1153,43 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         )
     }
 
+    /// Region translation has a stricter contract than endpoint editing: it
+    /// may clamp the requested center, but it must preserve the complete
+    /// strip's length, yaw, and fixed 40 mm depth.
+    private func clampSeatTranslationToCalibratedExtent(
+        _ planeMark: RevealedZoneMark
+    ) -> RevealedZoneMark? {
+        guard let planeAnchor = calibrationPlaneAnchor,
+              let calibration = baseCalibrationForSeatEditing() else { return nil }
+        let worldToTable = simd_inverse(calibration.tableToWorld)
+        let planeToWorld = planeAnchor.transform
+        let worldToPlane = simd_inverse(planeToWorld)
+        func tablePoint(_ planePoint: SIMD2<Float>) -> SIMD2<Float> {
+            let world = planeToWorld * SIMD4(planePoint.x, 0, planePoint.y, 1)
+            let table = worldToTable * world
+            return SIMD2(table.x, table.z)
+        }
+        func planePoint(_ tablePoint: SIMD2<Float>) -> SIMD2<Float> {
+            let world = calibration.tableToWorld * SIMD4(tablePoint.x, 0, tablePoint.y, 1)
+            let plane = worldToPlane * world
+            return SIMD2(plane.x, plane.z)
+        }
+        let canonical = RevealedZoneMark(
+            start: tablePoint(planeMark.start),
+            end: tablePoint(planeMark.end),
+            depth: RevealedZoneMark.fixedDepth
+        )
+        guard let translated = canonical.translated(
+            to: canonical.center,
+            within: calibration.extent
+        ) else { return nil }
+        return RevealedZoneMark(
+            start: planePoint(translated.start),
+            end: planePoint(translated.end),
+            depth: RevealedZoneMark.fixedDepth
+        )
+    }
+
     /// An amber endpoint ring makes it clear the orange player strip is an
     /// editable revealed-tile region, not a distant "player dot".
     private func makeSeatEndpointMarkerNode() -> SCNNode {
@@ -1149,7 +1204,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
 
         let icon = SCNPlane(width: 0.035, height: 0.035)
         let iconMaterial = SCNMaterial()
-        iconMaterial.diffuse.contents = UIImage(systemName: "arrow.left.and.right.circle.fill")?
+        iconMaterial.diffuse.contents = UIImage(systemName: "arrow.up.left.and.arrow.down.right.circle.fill")?
             .withTintColor(.systemOrange, renderingMode: .alwaysOriginal)
         iconMaterial.lightingModel = .constant
         iconMaterial.isDoubleSided = true
@@ -1161,6 +1216,28 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         billboard.freeAxes = .Y
         iconNode.constraints = [billboard]
         root.addChildNode(iconNode)
+        return root
+    }
+
+    private func makeSeatMoveMarkerNode(for seat: RelativeSeat) -> SCNNode {
+        let root = SCNNode()
+        let halo = SCNTorus(ringRadius: 0.024, pipeRadius: 0.003)
+        let haloMaterial = SCNMaterial()
+        haloMaterial.diffuse.contents = UIColor.systemOrange
+        haloMaterial.lightingModel = .constant
+        halo.materials = [haloMaterial]
+        root.addChildNode(SCNNode(geometry: halo))
+
+        let wind = seat.wind(mySeatWind: mySeatWind)
+        let tile = makeTileNode(
+            tile: .wind(wind),
+            theme: .jade,
+            body: UIColor(MJColor.jadeAccent),
+            key: "seat-wind-\(wind.rawValue)",
+            standing: false
+        )
+        tile.position = SCNVector3(0, 0.014, 0)
+        root.addChildNode(tile)
         return root
     }
 
@@ -1188,6 +1265,18 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             node.position = position
             node.isHidden = false
         }
+        let centerWorld = worldFromLocal(SIMD2(Double(mark.center.x), Double(mark.center.y)))
+        let moveNode: SCNNode
+        if let existing = seatMoveMarkers[seat] {
+            moveNode = existing
+        } else {
+            moveNode = makeSeatMoveMarkerNode(for: seat)
+            moveNode.name = "player-region-\(seat)-move"
+            sceneView.scene.rootNode.addChildNode(moveNode)
+            seatMoveMarkers[seat] = moveNode
+        }
+        moveNode.position = SCNVector3(centerWorld.x, centerWorld.y + 0.012, centerWorld.z)
+        moveNode.isHidden = false
         updateSeatAccessibilityElements()
     }
 
@@ -1202,6 +1291,14 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             case .across: return "Far player"
             case .right: return "Right player"
             case .me: return "Your"
+            }
+        }
+        func windName(_ wind: Wind) -> String {
+            switch wind {
+            case .east: return "East"
+            case .south: return "South"
+            case .west: return "West"
+            case .north: return "North"
             }
         }
         func element(for endpoint: SeatEndpoint, at planePoint: SIMD2<Float>, label: String) {
@@ -1236,8 +1333,8 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
                 width: 60,
                 height: 44
             )
-            body.accessibilityLabel = "\(name) revealed tiles body"
-            body.accessibilityHint = "Drag to move this revealed-tile region."
+            body.accessibilityLabel = "\(windName(seat.wind(mySeatWind: mySeatWind))) wind, \(name) revealed tiles move handle"
+            body.accessibilityHint = "Drag the wind tile to move the complete revealed-tile region without resizing it."
             body.accessibilityTraits = .button
             seatBodyAccessibility[seat] = body
         }
@@ -1521,7 +1618,13 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         if hoverNode == nil || hoverStyleKey != key {
             hoverNode?.removeFromParentNode()
             let body = standing ? UIColor(MJColor.cream(0.9)) : UIColor(MJColor.jadeAccent)
-            let node = makeTileNode(theme: standing ? .ivory : .jade, body: body, key: key, standing: standing)
+            let node = makeTileNode(
+                tile: markerTile,
+                theme: standing ? .ivory : .jade,
+                body: body,
+                key: key,
+                standing: standing
+            )
             node.opacity = 0.35
             sceneView.scene.rootNode.addChildNode(node)
             hoverNode = node
@@ -1601,7 +1704,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         if let existing = node {
             existing.position = position
         } else {
-            let markerNode = makeTileNode(theme: theme, body: body, key: key, standing: standing)
+            let markerNode = makeTileNode(tile: markerTile, theme: theme, body: body, key: key, standing: standing)
             markerNode.position = position
             sceneView.scene.rootNode.addChildNode(markerNode)
             node = markerNode
@@ -1612,12 +1715,12 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
     /// from the same `MahjongTileView` the app draws. `standing` tiles stand on
     /// edge with the face toward the user (a billboard keeps them upright and
     /// facing the camera); flat tiles lie face-up (used for the pond).
-    private func makeTileNode(theme: TileTheme, body: UIColor, key: String, standing: Bool) -> SCNNode {
+    private func makeTileNode(tile: Tile, theme: TileTheme, body: UIColor, key: String, standing: Bool) -> SCNNode {
         let bodyMat = SCNMaterial()
         bodyMat.diffuse.contents = body
         bodyMat.lightingModel = .constant
         let faceMat = SCNMaterial()
-        faceMat.diffuse.contents = markerTexture(theme: theme, key: key) ?? body
+        faceMat.diffuse.contents = markerTexture(tile: tile, theme: theme, key: key) ?? body
         faceMat.lightingModel = .constant
 
         let box: SCNBox
@@ -1644,9 +1747,9 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
 
     /// Renders the existing procedural `MahjongTileView` to a `UIImage` once
     /// per theme and caches it — the tile's face texture.
-    private func markerTexture(theme: TileTheme, key: String) -> UIImage? {
+    private func markerTexture(tile: Tile, theme: TileTheme, key: String) -> UIImage? {
         if let cached = Self.tileTextureCache[key] { return cached }
-        let renderer = ImageRenderer(content: MahjongTileView(markerTile, theme: theme, width: 240, showsBadge: false))
+        let renderer = ImageRenderer(content: MahjongTileView(tile, theme: theme, width: 240, showsBadge: false))
         renderer.scale = 3
         let image = renderer.uiImage
         if let image { Self.tileTextureCache[key] = image }

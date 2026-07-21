@@ -34,7 +34,7 @@ Requires **Xcode 26+** and [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 (`brew install xcodegen`).
 
 ```bash
-# 1. Generate the Xcode project (the .xcodeproj is git-ignored)
+# 1. Regenerate the checked-in Xcode project after changing project.yml
 xcodegen generate
 
 # 2. Build & run for the iOS 26 simulator

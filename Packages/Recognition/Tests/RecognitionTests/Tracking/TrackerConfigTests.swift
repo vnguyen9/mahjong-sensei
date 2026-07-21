@@ -119,14 +119,22 @@ final class TrackerConfigTests: XCTestCase {
     }
 
     func testSeatWindFormula() {
-        // My seat is East: right = South, across = West, left = North.
-        XCTAssertEqual(RelativeSeat.me.wind(mySeatWind: .east), .east)
-        XCTAssertEqual(RelativeSeat.right.wind(mySeatWind: .east), .south)
-        XCTAssertEqual(RelativeSeat.across.wind(mySeatWind: .east), .west)
-        XCTAssertEqual(RelativeSeat.left.wind(mySeatWind: .east), .north)
-        // Rotate my seat wind to South: right becomes West, wrap-around holds.
-        XCTAssertEqual(RelativeSeat.right.wind(mySeatWind: .south), .west)
-        XCTAssertEqual(RelativeSeat.left.wind(mySeatWind: .south), .east)
+        let winds: [Wind] = [.east, .south, .west, .north]
+        for myWind in winds {
+            XCTAssertEqual(RelativeSeat.me.wind(mySeatWind: myWind), myWind)
+            XCTAssertEqual(
+                RelativeSeat.right.wind(mySeatWind: myWind),
+                winds[(myWind.rawValue + 1) % winds.count]
+            )
+            XCTAssertEqual(
+                RelativeSeat.across.wind(mySeatWind: myWind),
+                winds[(myWind.rawValue + 2) % winds.count]
+            )
+            XCTAssertEqual(
+                RelativeSeat.left.wind(mySeatWind: myWind),
+                winds[(myWind.rawValue + 3) % winds.count]
+            )
+        }
     }
 
     // MARK: - TrackID (§2.1)

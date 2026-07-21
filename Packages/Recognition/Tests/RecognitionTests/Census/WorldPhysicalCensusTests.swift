@@ -162,6 +162,33 @@ final class WorldPhysicalCensusTests: XCTestCase {
         XCTAssertTrue(census.snapshot(at: 2).tracks.isEmpty)
     }
 
+    func testCombinedFaceAndZoneCorrectionSupportsIgnoredAndUnresolvedDestinations() throws {
+        let census = PhysicalCensus()
+        for frame in 0..<3 {
+            ingest(
+                [observation(SIMD3(0.1, 0, 0.1), frame: frame)],
+                into: census,
+                frame: frame,
+                time: Double(frame) * 0.1
+            )
+        }
+
+        let id = CensusTrackID(0)
+        census.correct(
+            trackID: id,
+            face: .tile(.p(7)),
+            semanticZone: .ignoredWall
+        )
+        var track = try XCTUnwrap(census.snapshot(at: 1).tracks.first)
+        XCTAssertEqual(track.face, .tile(.p(7)))
+        XCTAssertEqual(track.semanticZone, .ignoredWall)
+
+        census.correct(trackID: id, semanticZone: .boundaryUnresolved)
+        track = try XCTUnwrap(census.snapshot(at: 1).tracks.first)
+        XCTAssertEqual(track.face, .tile(.p(7)), "A zone-only edit must retain the pinned face")
+        XCTAssertEqual(track.semanticZone, .boundaryUnresolved)
+    }
+
     /// `WorldCensusController.apply` is intentionally a thin app-side
     /// wrapper over this operation. Keep this characterization here, where it
     /// can run without ARKit: accepting a new calibration must re-zone the

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import DesignSystem
 
 /// Lane 5 · Settings (spec screen 22). Wrapped in its own `NavigationStack`; the
@@ -32,30 +33,13 @@ struct SettingsView: View {
                         }
                         .mjCard(padding: 4)
 
-                        // Debug builds swap the production "Higher accuracy" toggle for a
-                        // full detector-model picker (a pushed screen); Release keeps the toggle.
-                        #if DEBUG
                         VStack(spacing: 0) {
-                            NavigationLink { ModelPickerView() } label: {
-                                SettingRow(name: "Detector model", value: app.devDetectorModel.label)
-                            }
-                            .buttonStyle(.plain)
-                            Divider().overlay(MJColor.gold(0.12))
-                            NavigationLink { GameLauncherView() } label: {
-                                SettingRow(name: "Mahjong game · Experimental", value: "")
+                            NavigationLink { AdvancedSettingsView() } label: {
+                                SettingRow(name: "Advanced", value: "")
                             }
                             .buttonStyle(.plain)
                         }
                         .mjCard(padding: 4)
-                        #else
-                        VStack(spacing: 0) {
-                            SettingToggleRow(
-                                name: "Higher accuracy",
-                                subtitle: "Reads tiles more precisely. A little slower.",
-                                isOn: $app.prefersHighAccuracy)
-                        }
-                        .mjCard(padding: 4)
-                        #endif
 
                         VStack(spacing: 0) {
                             SettingToggleRow(
@@ -87,8 +71,152 @@ struct SettingsView: View {
     }
 }
 
+/// Advanced remains discoverable in every build. Experimental gameplay stays
+/// Debug-only until it is ready to become a supported user-facing feature.
+struct AdvancedSettingsView: View {
+    @Environment(AppState.self) private var app
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            ScreenBackground(.content)
+            VStack(spacing: 0) {
+                MJBackHeader(title: "Advanced") { dismiss() }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        VStack(spacing: 0) {
+                            NavigationLink { DetectionSettingsView() } label: {
+                                SettingRow(
+                                    name: "Detection settings",
+                                    value: detectionSummary
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            #if DEBUG
+                            Divider().overlay(MJColor.gold(0.12))
+                            NavigationLink { GameLauncherView() } label: {
+                                SettingRow(name: "Mahjong game · Experimental", value: "")
+                            }
+                            .buttonStyle(.plain)
+                            #endif
+                        }
+                        .mjCard(padding: 4)
+
+                        Text("Advanced options affect on-device detection and experimental tools.")
+                            .font(MJFont.ui(12))
+                            .foregroundStyle(MJColor.cream(0.55))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(20)
+                    .padding(.bottom, 100)
+                }
+            }
+        }
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private var detectionSummary: String {
+        #if DEBUG
+        app.devDetectorModel.label
+        #else
+        app.prefersHighAccuracy ? "Higher accuracy" : "Standard"
+        #endif
+    }
+}
+
+struct DetectionSettingsView: View {
+    @Environment(AppState.self) private var app
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        @Bindable var app = app
+        return ZStack {
+            ScreenBackground(.content)
+            VStack(spacing: 0) {
+                MJBackHeader(title: "Detection settings") { dismiss() }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        #if DEBUG
+                        Text("Detector model")
+                            .font(MJFont.ui(13, weight: .semibold))
+                            .foregroundStyle(MJColor.creamHeading)
+                        Text("Choose which bundled detector loads on the next scan. This direct model control is available in Debug builds.")
+                            .font(MJFont.ui(12))
+                            .foregroundStyle(MJColor.cream(0.6))
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        VStack(spacing: 0) {
+                            ForEach(Array(DetectorModel.allCases.enumerated()), id: \.element.id) { index, model in
+                                if index > 0 { Divider().overlay(MJColor.gold(0.12)) }
+                                Button {
+                                    app.devDetectorModel = model
+                                    UISelectionFeedbackGenerator().selectionChanged()
+                                } label: {
+                                    DetectorModelSettingRow(
+                                        model: model,
+                                        selected: model == app.devDetectorModel
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityValue(model == app.devDetectorModel ? "Selected" : "Not selected")
+                            }
+                        }
+                        .mjCard(padding: 4)
+                        #else
+                        VStack(spacing: 0) {
+                            SettingToggleRow(
+                                name: "Higher accuracy",
+                                subtitle: "Reads tiles more precisely. A little slower.",
+                                isOn: $app.prefersHighAccuracy
+                            )
+                        }
+                        .mjCard(padding: 4)
+                        #endif
+                    }
+                    .padding(20)
+                    .padding(.bottom, 100)
+                }
+            }
+        }
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
+    }
+}
+
+#if DEBUG
+private struct DetectorModelSettingRow: View {
+    let model: DetectorModel
+    let selected: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(model.label)
+                    .font(MJFont.ui(14, weight: .medium))
+                    .foregroundStyle(MJColor.creamHeading)
+                Text(model.subtitle)
+                    .font(MJFont.ui(11))
+                    .foregroundStyle(MJColor.cream(0.5))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            if selected {
+                Image(systemName: "checkmark")
+                    .font(.body.bold())
+                    .foregroundStyle(MJColor.gold)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(minHeight: 44)
+        .contentShape(Rectangle())
+    }
+}
+#endif
+
 /// A settings row with a trailing switch and an optional explanatory subtitle.
-private struct SettingToggleRow: View {
+struct SettingToggleRow: View {
     let name: String
     let subtitle: String
     @Binding var isOn: Bool
@@ -111,11 +239,12 @@ private struct SettingToggleRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 11)
+        .frame(minHeight: 44)
         .contentShape(Rectangle())
     }
 }
 
-private struct SettingRow: View {
+struct SettingRow: View {
     let name: String
     let value: String
 
@@ -136,6 +265,7 @@ private struct SettingRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 13)
+        .frame(minHeight: 44)
         .contentShape(Rectangle())
     }
 }

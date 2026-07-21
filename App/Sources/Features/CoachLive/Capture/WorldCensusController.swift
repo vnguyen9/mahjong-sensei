@@ -441,6 +441,24 @@ final class WorldCensusController {
         revision += 1
     }
 
+    /// Applies the user's complete spatial correction as one controller
+    /// revision. The underlying census still owns face pinning and semantic
+    /// overrides; this merely prevents two intermediate UI publications when
+    /// a user changes both fields in the same editor transaction.
+    func correct(
+        trackID: TrackID,
+        face: MahjongCore.Tile?,
+        zone: SemanticZoneID?
+    ) {
+        guard face != nil || zone != nil else { return }
+        census.correct(
+            trackID: CensusTrackID(trackID.raw),
+            face: face.map(TileFace.tile),
+            semanticZone: zone
+        )
+        revision += 1
+    }
+
     func remove(trackID: TrackID) {
         census.removeTrack(id: CensusTrackID(trackID.raw))
         revision += 1

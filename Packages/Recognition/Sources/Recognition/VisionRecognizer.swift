@@ -16,12 +16,20 @@ import MahjongCore
 /// Swapping in a bigger/better model is just replacing the bundled `.mlpackage`;
 /// the 43-class label contract is fixed (see ``HKDetectorLabels``).
 public struct VisionRecognizer: Recognizer {
+    /// Conservative product-wide detector gate. Low-light wood grain and
+    /// shadows frequently score in the former 0.30-0.49 band, so an editable
+    /// unknown tile is preferable to a confident-looking false face.
+    public static let defaultConfidenceThreshold = 0.50
+
     private let model: VNCoreMLModel
-    /// Detections below this score are dropped (Ultralytics default start ≈ 0.25–0.35).
+    /// Detections below this score are dropped.
     public var confidenceThreshold: Double
 
     /// Wrap an already-loaded `MLModel`.
-    public init(model mlModel: MLModel, confidenceThreshold: Double = 0.30) throws {
+    public init(
+        model mlModel: MLModel,
+        confidenceThreshold: Double = VisionRecognizer.defaultConfidenceThreshold
+    ) throws {
         self.model = try VNCoreMLModel(for: mlModel)
         self.confidenceThreshold = confidenceThreshold
     }
@@ -31,7 +39,7 @@ public struct VisionRecognizer: Recognizer {
     /// use `try?` to fall back to ``MockRecognizer`` before the model is bundled.
     public init(bundledModelNamed name: String = "MahjongTileDetectorNanoV3",
                 in bundle: Bundle = .main,
-                confidenceThreshold: Double = 0.30) throws {
+                confidenceThreshold: Double = VisionRecognizer.defaultConfidenceThreshold) throws {
         guard let url = bundle.url(forResource: name, withExtension: "mlmodelc") else {
             throw RecognizerError.modelNotFound(name)
         }

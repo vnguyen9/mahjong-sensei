@@ -12,6 +12,12 @@ xcuserdata/
 *.xcodeproj/
 *.xcworkspace/
 
+# Xcode Cloud requires the shared application project in source control.
+!MahjongSensei.xcodeproj/
+!MahjongSensei.xcodeproj/project.pbxproj
+!MahjongSensei.xcodeproj/project.xcworkspace/
+!MahjongSensei.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+
 # Swift Package Manager
 .build/
 .swiftpm/

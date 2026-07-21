@@ -360,37 +360,10 @@ struct CorrectionPicker: View {
                 .padding(.top, 8)
                 .padding(.bottom, 6)
             VStack(spacing: 14) {
-                Text(onRemove == nil ? "Add a tile" : "Replace tile")
+                Text(current == nil ? "Add a tile" : "Replace tile")
                     .font(MJFont.serif(15, weight: .bold)).foregroundStyle(MJColor.creamHeading)
 
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(SuitTab.allCases, id: \.self) { tab in
-                            FilterChip(tab.label, active: suit == tab) {
-                                suit = tab
-                                if !tab.options.contains(selection) { selection = tab.options[0] }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 2)
-                }
-
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5), spacing: 10) {
-                    ForEach(suit.options, id: \.self) { tile in
-                        Button { selection = tile } label: {
-                            MahjongTileView(tile, theme: .jade, width: 44)
-                                .overlay {
-                                    if tile == selection {
-                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                            .strokeBorder(MJColor.gold, lineWidth: 2.5).padding(-3)
-                                            .shadow(color: MJColor.gold(0.5), radius: 6)
-                                    }
-                                }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 4)
+                TileFaceSelectionGrid(suit: $suit, selection: $selection)
 
                 GoldButton("\(confirmVerb) \(MahjongData.name(for: selection).traditional) →") { onConfirm(selection) }
 
@@ -420,7 +393,7 @@ struct CorrectionPicker: View {
     }
 }
 
-private enum SuitTab: CaseIterable, Hashable {
+enum SuitTab: CaseIterable, Hashable {
     case man, pin, sou, honor, bonus
 
     var label: String {
@@ -451,6 +424,58 @@ private enum SuitTab: CaseIterable, Hashable {
         case .suited(.bamboo, _):     self = .sou
         case .wind, .dragon:          self = .honor
         case .flower, .season:        self = .bonus
+        }
+    }
+}
+
+/// Reusable face chooser used by the compact correction sheet and Coach
+/// Live's statistics-preview picker. The caller owns confirmation placement.
+struct TileFaceSelectionGrid: View {
+    @Binding var suit: SuitTab
+    @Binding var selection: Tile
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(SuitTab.allCases, id: \.self) { tab in
+                        FilterChip(tab.label, active: suit == tab) {
+                            suit = tab
+                            if !tab.options.contains(selection), let first = tab.options.first {
+                                selection = first
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 2)
+            }
+
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5),
+                spacing: 10
+            ) {
+                ForEach(suit.options, id: \.self) { tile in
+                    Button {
+                        selection = tile
+                        UISelectionFeedbackGenerator().selectionChanged()
+                    } label: {
+                        MahjongTileView(tile, theme: .jade, width: 44)
+                            .frame(minWidth: 44, minHeight: 54)
+                            .overlay {
+                                if tile == selection {
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .strokeBorder(MJColor.gold, lineWidth: 2.5)
+                                        .padding(-3)
+                                        .shadow(color: MJColor.gold(0.5), radius: 6)
+                                }
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(MahjongData.name(for: tile).english)
+                    .accessibilityValue(tile == selection ? "Selected" : "Not selected")
+                }
+            }
+            .padding(.horizontal, 4)
         }
     }
 }

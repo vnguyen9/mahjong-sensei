@@ -2,15 +2,12 @@ import Foundation
 import MahjongCore
 import EfficiencyEngine
 
-/// Live (wall-aware) insight for one tile in Tracker mode — remaining copies
-/// after the table histogram + hand, with finish odds for pair / chow / pung.
-/// Educational `TileInsight` stays fresh-set-only for Learn / What’s this.
-struct TrackerLiveInsight {
+/// Source-neutral, wall-aware insight for one tile. Tracker and Coach Live
+/// both provide their complete resolved gameplay inventory; this type owns
+/// only the shared probability and combination calculations.
+struct LiveTileInsight {
     let tile: Tile
-    /// Draft table-seen count for `tile` (stepper value before Apply).
-    let draftSeen: Int
-    let hand: [Tile]
-    let seenHistogram: [Int]
+    let resolvedCounts: [Tile: Int]
 
     struct Combo: Identifiable {
         enum Kind: String { case pair = "Pair", chow = "Run", pung = "Triplet" }
@@ -21,27 +18,18 @@ struct TrackerLiveInsight {
         var id: String { kind.rawValue + tiles.map(\.code).joined() }
     }
 
-    /// Effective seen count per base face, substituting `draftSeen` for `tile`.
-    private var effectiveSeen: [Int] {
-        var h = seenHistogram
-        while h.count < Tile.baseClassCount { h.append(0) }
-        if (0..<Tile.baseClassCount).contains(tile.classIndex) {
-            h[tile.classIndex] = min(4, max(0, draftSeen))
-        }
-        return h
-    }
-
-    private var inHandCount: Int { hand.filter { $0 == tile }.count }
-
-    /// Copies of this face still in the wall (after draft seen + hand).
+    /// Copies of this face still live after every resolved gameplay copy.
     var liveCopies: Int {
-        max(0, 4 - min(4, max(0, draftSeen)) - inHandCount)
+        max(0, copyLimit(for: tile) - resolvedCounts[tile, default: 0])
     }
 
-    /// Wall size after draft table counts + hand.
+    /// Base-tile wall size after all resolved base-tile copies. Bonus tiles
+    /// are excluded from the draw pool because they are replacement draws.
     var unseen: Int {
-        let table = effectiveSeen.reduce(0, +)
-        return max(1, 136 - table - hand.count)
+        let resolvedBase = resolvedCounts.reduce(into: 0) { partial, item in
+            if !item.key.isBonus { partial += item.value }
+        }
+        return max(1, 136 - resolvedBase)
     }
 
     var drawChance: Double { EfficiencyEngine.winOdds(liveOuts: liveCopies, unseen: unseen) }
@@ -49,12 +37,10 @@ struct TrackerLiveInsight {
     var pungPossible: Bool { liveCopies >= 3 }
     var kongPossible: Bool { liveCopies >= 4 }
 
-    /// Remaining wall copies of a face (after draft + hand).
+    /// Remaining live copies of a face after the same source inventory.
     func remaining(_ face: Tile) -> Int {
-        guard !face.isBonus, (0..<Tile.baseClassCount).contains(face.classIndex) else { return 0 }
-        let seen = effectiveSeen[face.classIndex]
-        let held = hand.filter { $0 == face }.count
-        return max(0, 4 - seen - held)
+        guard !face.isBonus else { return 0 }
+        return max(0, copyLimit(for: face) - resolvedCounts[face, default: 0])
     }
 
     /// Pair / runs containing this rank / pung, with live finish odds over ~17 draws.
@@ -87,4 +73,6 @@ struct TrackerLiveInsight {
                          moreNeeded: 2))
         return out
     }
+
+    private func copyLimit(for tile: Tile) -> Int { tile.isBonus ? 1 : 4 }
 }

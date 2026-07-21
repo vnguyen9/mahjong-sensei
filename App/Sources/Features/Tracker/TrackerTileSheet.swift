@@ -15,12 +15,17 @@ struct TrackerTileSheet: View {
     private var tableCount: Int { tracker.tableSeen(tile) }
     private var handCopies: Int { tracker.handCount(tile) }
 
-    private var insight: TrackerLiveInsight {
-        TrackerLiveInsight(tile: tile, draftSeen: tableCount, hand: tracker.hand,
-                           seenHistogram: tracker.seenHistogram)
+    private var insight: LiveTileInsight {
+        var counts: [Tile: Int] = [:]
+        for (index, count) in tracker.seenHistogram.enumerated() where count > 0 {
+            guard let face = Tile(classIndex: index) else { continue }
+            counts[face, default: 0] += count
+        }
+        for face in tracker.hand {
+            counts[face, default: 0] += 1
+        }
+        return LiveTileInsight(tile: tile, resolvedCounts: counts)
     }
-
-    private var educational: TileInsight { TileInsight(tile) }
 
     var body: some View {
         let name = MahjongData.name(for: tile)
@@ -35,9 +40,7 @@ struct TrackerTileSheet: View {
                     VStack(alignment: .leading, spacing: 18) {
                         header(name)
                         dualCountRow
-                        liveSetSection
-                        combinationsSection
-                        notableSection
+                        LiveTileStatsView(insight: insight)
                     }
                     .padding(20)
                     .padding(.bottom, 28)
@@ -141,20 +144,51 @@ struct TrackerTileSheet: View {
         .disabled(!enabled)
     }
 
-    // MARK: Live set
+    private func sectionTitle(_ t: String) -> some View {
+        Text(t)
+            .font(MJFont.ui(11, weight: .semibold))
+            .tracking(0.6)
+            .foregroundStyle(MJColor.gold(0.9))
+    }
+}
+
+/// Shared expanded insight used by both Tracker and Coach Live. Editable
+/// count controls deliberately stay with Tracker; everything here is
+/// read-only and can be driven by either tracking source.
+struct LiveTileStatsView: View {
+    let insight: LiveTileInsight
+
+    private var educational: TileInsight { TileInsight(insight.tile) }
+    private var copyLimit: Int { insight.tile.isBonus ? 1 : 4 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            liveSetSection
+            combinationsSection
+            notableSection
+        }
+    }
 
     private var liveSetSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             sectionTitle("Still live")
-            HStack(spacing: 18) {
-                stat("\(insight.liveCopies) of 4", "copies left")
-                Divider().frame(height: 34).overlay(MJColor.gold(0.15))
-                stat(TileInsight.percent(insight.drawChance), "next-draw odds")
-                Spacer(minLength: 0)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 18) {
+                    stat("\(insight.liveCopies) of \(copyLimit)", "copies left")
+                    Divider().frame(height: 34).overlay(MJColor.gold(0.15))
+                    stat(TileInsight.percent(insight.drawChance), "next-draw odds")
+                    Spacer(minLength: 0)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    stat("\(insight.liveCopies) of \(copyLimit)", "copies left")
+                    stat(TileInsight.percent(insight.drawChance), "next-draw odds")
+                }
             }
-            HStack(spacing: 10) {
-                feasibilityTag(insight.pungPossible ? "Pung possible" : "Pung gone", ok: insight.pungPossible)
-                feasibilityTag(insight.kongPossible ? "Kong possible" : "Kong gone", ok: insight.kongPossible)
+            if !insight.tile.isBonus {
+                HStack(spacing: 10) {
+                    feasibilityTag(insight.pungPossible ? "Pung possible" : "Pung gone", ok: insight.pungPossible)
+                    feasibilityTag(insight.kongPossible ? "Kong possible" : "Kong gone", ok: insight.kongPossible)
+                }
             }
         }
     }
@@ -176,9 +210,8 @@ struct TrackerTileSheet: View {
                 .font(MJFont.ui(11))
                 .foregroundStyle(MJColor.cream(0.55))
         }
+        .accessibilityElement(children: .combine)
     }
-
-    // MARK: Combinations
 
     private var combinationsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -199,7 +232,7 @@ struct TrackerTileSheet: View {
         }
     }
 
-    private func comboRow(_ combo: TrackerLiveInsight.Combo) -> some View {
+    private func comboRow(_ combo: LiveTileInsight.Combo) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text(combo.kind.rawValue)
@@ -217,16 +250,15 @@ struct TrackerTileSheet: View {
                     .foregroundStyle(MJColor.cream(0.4))
             }
             HStack(spacing: 6) {
-                ForEach(Array(combo.tiles.enumerated()), id: \.offset) { _, t in
-                    MahjongTileView(t, theme: .ivory, width: 28, showsBadge: false)
+                ForEach(Array(combo.tiles.enumerated()), id: \.offset) { _, tile in
+                    MahjongTileView(tile, theme: .ivory, width: 28, showsBadge: false)
                 }
                 Spacer(minLength: 0)
             }
         }
         .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
     }
-
-    // MARK: Notable
 
     private var notableSection: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -239,8 +271,8 @@ struct TrackerTileSheet: View {
                     .font(MJFont.ui(12))
                     .foregroundStyle(MJColor.cream(0.55))
             } else {
-                ForEach(educational.notableFaan, id: \.self) { cat in
-                    notableRow(cat, example: educational.example(for: cat))
+                ForEach(educational.notableFaan, id: \.self) { category in
+                    notableRow(category, example: educational.example(for: category))
                 }
             }
         }
@@ -259,8 +291,8 @@ struct TrackerTileSheet: View {
             }
             if !example.isEmpty {
                 HStack(spacing: 3) {
-                    ForEach(Array(example.enumerated()), id: \.offset) { _, t in
-                        MahjongTileView(t, theme: .ivory, width: 20, showsBadge: false)
+                    ForEach(Array(example.enumerated()), id: \.offset) { _, tile in
+                        MahjongTileView(tile, theme: .ivory, width: 20, showsBadge: false)
                     }
                 }
             }
@@ -268,10 +300,11 @@ struct TrackerTileSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(MJColor.cardRaised))
+        .accessibilityElement(children: .combine)
     }
 
-    private func sectionTitle(_ t: String) -> some View {
-        Text(t)
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title)
             .font(MJFont.ui(11, weight: .semibold))
             .tracking(0.6)
             .foregroundStyle(MJColor.gold(0.9))

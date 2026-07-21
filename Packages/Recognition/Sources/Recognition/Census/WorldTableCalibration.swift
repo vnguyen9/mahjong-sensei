@@ -119,6 +119,37 @@ public struct RevealedZoneMark: Sendable, Equatable {
             depth: mark.depth
         )
     }
+
+    /// Translates the complete strip inside a calibrated rectangular extent
+    /// without changing its length, yaw, or depth. This is intentionally
+    /// separate from ``clamped(to:minimumLength:)``: endpoint editing may
+    /// shorten an overlong strip, but dragging a region body must never make
+    /// the user's carefully sized mark change shape near a table edge.
+    public func translated(
+        to requestedCenter: SIMD2<Float>,
+        within extent: SIMD2<Float>
+    ) -> RevealedZoneMark? {
+        guard requestedCenter.x.isFinite, requestedCenter.y.isFinite,
+              extent.x.isFinite, extent.y.isFinite,
+              extent.x > 0, extent.y > 0,
+              let mark = enforcingMinimumLength(),
+              let axis = mark.longAxis else { return nil }
+
+        let crossAxis = SIMD2(-axis.y, axis.x)
+        let requiredHalfExtent =
+            SIMD2(abs(axis.x), abs(axis.y)) * (mark.length * 0.5)
+            + SIMD2(abs(crossAxis.x), abs(crossAxis.y)) * (mark.depth * 0.5)
+        let centerBounds = extent * 0.5 - requiredHalfExtent
+        guard centerBounds.x >= 0, centerBounds.y >= 0 else { return nil }
+
+        let center = simd_min(centerBounds, simd_max(-centerBounds, requestedCenter))
+        let halfLength = mark.length * 0.5
+        return RevealedZoneMark(
+            start: center - axis * halfLength,
+            end: center + axis * halfLength,
+            depth: mark.depth
+        )
+    }
 }
 
 /// The raw marks collected during guided calibration. Every point is in the

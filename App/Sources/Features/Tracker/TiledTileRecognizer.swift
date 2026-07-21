@@ -25,9 +25,8 @@ enum TiledTileRecognizer {
     /// AR zone rects. This is what makes adjacent crops overlap, so a tile
     /// straddling a cell boundary still lands whole in at least one of them.
     static let overlap = 0.15
-    /// Same bar as What’s-this? lookup — whole-table FOV + dense tiling needs
-    /// a higher gate than the detector’s raw 0.30 default or wood/shadow FPs
-    /// flood the count grid.
+    /// Same conservative bar as the detector default so low-light wood and
+    /// shadow false positives do not flood the count grid.
     static let confidenceThreshold = 0.5
     /// Normalized oriented-frame area band for a plausible single tile.
     static let minBoxArea = 0.0008
@@ -48,13 +47,8 @@ enum TiledTileRecognizer {
     /// `recognize` per crop, and merging + deduping the results. `recognize`
     /// is injected so this file has no `VisionRecognizer`/loader dependency —
     /// `ScanCoordinator` supplies the shared recognizer.
-    /// - Parameter minConfidence: acceptance floor for the final tiles. Defaults
-    ///   to `confidenceThreshold` (0.5) for the Scan/Record photo path. Coach
-    ///   Live passes the recognizer's own 0.30 so the tiled REFRESH pass gates
-    ///   identically to its per-zone crop path (which passes raw 0.30) — a
-    ///   mismatch there made the tiled pass return far fewer tiles, flipping
-    ///   unmatched tracks live→missing and churning the count. The live
-    ///   tracker's own birth/confirm gates reject wood/shadow FPs downstream.
+    /// - Parameter minConfidence: acceptance floor for the final tiles. Coach
+    ///   Live and Scan both use 0.5 so tiled refreshes and per-zone crops agree.
     static func recognize(buffer: CVPixelBuffer, roi: TileBoundingBox?,
                            minConfidence: Double = confidenceThreshold,
                            imageOrientation: CGImagePropertyOrientation = .right,

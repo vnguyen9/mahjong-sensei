@@ -7,6 +7,10 @@ import MahjongCore
 
 final class RecognitionTests: XCTestCase {
 
+    func testDefaultDetectorConfidenceThresholdRejectsLowLightFalsePositives() {
+        XCTAssertEqual(VisionRecognizer.defaultConfidenceThreshold, 0.5)
+    }
+
     // MARK: - Helpers
 
     /// A detection at a given normalized box (x/y are the box origin, top-left).

@@ -14,7 +14,7 @@ struct ModelPickerView: View {
         ZStack {
             ScreenBackground(.content)
             VStack(spacing: 0) {
-                MJBackHeader(title: "Detector model") { dismiss() }
+                MJBackHeader(title: "Detection settings") { dismiss() }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Which bundled detector the scanner loads. Dev only — overrides “Higher accuracy” in this build; the change takes effect on the next scan.")

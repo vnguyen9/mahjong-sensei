@@ -256,6 +256,10 @@ final class CoachLiveSession: Identifiable {
     /// Authoritative LiDAR census. It receives the exact detections already
     /// produced by Coach Live and never schedules model work of its own.
     private(set) var worldCensusController: WorldCensusController?
+    /// Observable publication token for editor statistics. The controller is
+    /// a reference type, so its internal revision cannot invalidate SwiftUI
+    /// views observing this session by itself.
+    private(set) var censusStatisticsRevision = 0
     private var lastARImageOrientation: CGImagePropertyOrientation?
     /// `tracker.diagnostics` passthrough for the HUD — `nil` tracker (mock
     /// path) reads as all-zero rather than requiring the HUD to unwrap.
@@ -1270,7 +1274,9 @@ final class CoachLiveSession: Identifiable {
                             var tiledRecognizerFailed = false
                             self.diagnostics.inferencesRun += TiledTileRecognizer.gridCols * TiledTileRecognizer.gridRows
                             fullTiles = await TiledTileRecognizer.recognize(
-                                buffer: frame.pixelBuffer, roi: nil, minConfidence: 0.30,
+                                buffer: frame.pixelBuffer,
+                                roi: nil,
+                                minConfidence: VisionRecognizer.defaultConfidenceThreshold,
                                 imageOrientation: frame.imageOrientation,
                                 using: { f in
                                     do {
@@ -1890,6 +1896,81 @@ final class CoachLiveSession: Identifiable {
             return true
         }
         guard handledByCensus else { return }
+        publishAfterCorrection()
+    }
+
+    // MARK: - Production spatial track overlay/editor
+
+    /// The exact census tracks eligible for production AR indicators. This is
+    /// a presentation read only: it never schedules recognition and it never
+    /// creates per-tile AR anchors.
+    @MainActor
+    var liveSpatialIndicatorTracks: [CensusTrackSnapshot] {
+        guard countSource == .worldCensus,
+              spatialTrackingHealth == .healthy,
+              !showARCalibration,
+              !isRecenterPondActive,
+              !isRelocalizing,
+              let controller = worldCensusController else { return [] }
+        return controller.snapshot.tracks.filter {
+            $0.worldPosition != nil && (
+                $0.lifecycle == .confirmed
+                    || $0.lifecycle == .stale
+                    || $0.lifecycle == .temporarilyMissing
+            )
+        }
+    }
+
+    @MainActor
+    func spatialTrackSnapshot(_ id: TrackID) -> CensusTrackSnapshot? {
+        worldCensusController?.snapshot.tracks.first {
+            $0.id.value == id.raw && $0.lifecycle != .retired
+        }
+    }
+
+    /// Read-only statistics inventory for Coach Live editors. Applying a
+    /// draft never calls the recognizer, mutates a track, or publishes state.
+    @MainActor
+    func censusGameplayInventory(
+        applying draft: CensusTrackCorrectionDraft? = nil
+    ) -> CensusGameplayInventory? {
+        _ = censusStatisticsRevision
+        guard countSource == .worldCensus,
+              let snapshot = worldCensusController?.snapshot else { return nil }
+        return CensusGameplayInventory(snapshot: snapshot, applying: draft)
+    }
+
+    @MainActor
+    func projectSpatialTrack(
+        _ track: CensusTrackSnapshot,
+        viewportSize: CGSize
+    ) -> CGPoint? {
+        guard let world = track.worldPosition else { return nil }
+        return arCapture?.projectWorldPoint(world, viewportSize: viewportSize)
+    }
+
+    /// Commits the editor's staged face and zone as one census/UI
+    /// publication. A nil face means the user left the current face unchanged.
+    @MainActor
+    func correctSpatialTrack(
+        _ id: TrackID,
+        face: Tile?,
+        zone: SemanticZoneID
+    ) {
+        guard countSource == .worldCensus,
+              let controller = worldCensusController,
+              controller.snapshot.tracks.contains(where: {
+                  $0.id.value == id.raw && $0.lifecycle != .retired
+              }) else { return }
+        controller.correct(trackID: id, face: face, zone: zone)
+        publishAfterCorrection()
+    }
+
+    @MainActor
+    func removeSpatialTrack(_ id: TrackID) {
+        guard countSource == .worldCensus,
+              let controller = worldCensusController else { return }
+        controller.remove(trackID: id)
         publishAfterCorrection()
     }
 
@@ -2582,6 +2663,7 @@ final class CoachLiveSession: Identifiable {
     private func applyState(_ state: TrackedTableState, pending: HandEndProposal?, log: [GameEvent]) {
         lastPublishedRevision = state.revision
         lastPublishTime = CACurrentMediaTime()
+        censusStatisticsRevision &+= 1
 
         seatWind = state.mySeatWind
         roundWind = state.roundWind
