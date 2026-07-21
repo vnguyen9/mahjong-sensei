@@ -137,16 +137,25 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
     private var pondQuadMarkers: [SCNNode?] = [nil, nil, nil, nil]
     private var pondQuadFillNode: SCNNode?
 
-    /// Opponent seat midpoints (anchor-local metres, `.left`/`.right`/`.across`
-    /// only — the user's own `.me` seat is the hand row) draggable during
-    /// review, and their 3D marker nodes.
-    private var seatMidpoints: [RelativeSeat: SIMD2<Double>] = [:]
-    private var seatMarkers: [RelativeSeat: SCNNode] = [:]
+    /// Endpoint-defined opponent revealed-tile strips in locked-plane local
+    /// metres.  These are deliberately not "player dots": each mark has a
+    /// real length, yaw and fixed tile-depth, and is the source of the exact
+    /// polygon used by Live zoning and ROI planning.
+    private var revealedZoneMarks: [RelativeSeat: RevealedZoneMark] = [:]
+    private enum SeatEndpoint: Hashable {
+        case start(RelativeSeat)
+        case end(RelativeSeat)
+    }
+    private var seatEndpointMarkers: [SeatEndpoint: SCNNode] = [:]
+    private var seatEndpointAccessibility: [SeatEndpoint: UIAccessibilityElement] = [:]
+    private var seatBodyAccessibility: [RelativeSeat: UIAccessibilityElement] = [:]
+    private let minimumProjectedHandleHitTarget: CGFloat = 44
 
     /// A single draggable review handle — either hand post, a pond
-    /// quad corner (by index), or an opponent seat.
+    /// quad corner (by index), or an opponent region/endpoint.
     private enum EditHandle: Equatable {
-        case handA, handB, handRegion, pond(Int), pondRegion, seat(RelativeSeat)
+        case handA, handB, handRegion, pond(Int), pondRegion
+        case seatStart(RelativeSeat), seatEnd(RelativeSeat), seatRegion(RelativeSeat)
     }
     private var grabbedHandle: EditHandle?
     /// The table-local difference between a finger and the grabbed handle's
@@ -277,7 +286,8 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         pondRectNode?.isHidden = true
         pondQuadMarkers.forEach { $0?.isHidden = true }
         pondQuadFillNode?.isHidden = true
-        seatMarkers.values.forEach { $0.isHidden = true }
+        seatEndpointMarkers.values.forEach { $0.isHidden = true }
+        sceneView.accessibilityElements = []
     }
 
     private func restoreEditableCalibrationChrome() {
@@ -294,7 +304,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             handMarkerB?.isHidden = false
             bandNode?.isHidden = false
             pondQuadMarkers.indices.forEach { placeQuadMarker($0) }
-            for seat in seatMarkers.keys { placeSeatMarker(seat) }
+            for seat in revealedZoneMarks.keys { placeSeatEndpointMarkers(seat) }
             refreshReviewGeometry()
         }
         startPinchSamplingIfNeeded()
@@ -398,13 +408,13 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         playerLegendLabel.textColor = UIColor(MJColor.creamHeading)
         playerLegendLabel.font = .preferredFont(forTextStyle: .footnote)
         playerLegendLabel.adjustsFontForContentSizeCategory = true
-        playerLegendLabel.text = "Player marker — drag to the center of their exposed tiles."
+        playerLegendLabel.text = "Player regions — drag a strip to move it. Drag either round end to resize or rotate it."
         playerLegendLabel.backgroundColor = UIColor(MJColor.sheetGlass)
         playerLegendLabel.layer.cornerRadius = 12
         playerLegendLabel.layer.masksToBounds = true
         playerLegendLabel.isHidden = true
         playerLegendLabel.translatesAutoresizingMaskIntoConstraints = false
-        playerLegendLabel.accessibilityLabel = "Player marker. Drag to the center of their exposed tiles."
+        playerLegendLabel.accessibilityLabel = "Player regions. Drag a strip to move it. Drag either endpoint to resize or rotate it. Left player revealed tiles start, end, and body. Far player revealed tiles start, end, and body. Right player revealed tiles start, end, and body."
         view.addSubview(playerLegendLabel)
 
         playerLegendIcon.image = UIImage(systemName: "person.fill")
@@ -497,7 +507,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         case .review:
             marking = false
             titleLabel.text = "Review your table"
-            subtitleLabel.text = "Move the iPad slightly. Drag any labeled region that does not line up."
+            subtitleLabel.text = "Move the iPad slightly. Drag a labeled region to move it, or either round endpoint to resize and rotate it."
             primaryButton.setTitle("Confirm & Start", for: .normal)
         }
 
@@ -593,10 +603,12 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         let screenPoint = gesture.location(in: sceneView)
         guard let (tablePoint, worldPosition) = raycastTablePoint(at: screenPoint) else { return }
         // Review mode: a tap moves the nearest handle (hand post, pond corner,
-        // or player marker) to it — tap fallback for the pinch-drag, allowed beyond
+        // or player-region endpoint) to it — tap fallback for the pinch-drag, allowed beyond
         // `grabRadius` since a tap is deliberate.
         if stage == .review {
-            if let h = nearestEditHandle(to: tablePoint, withinRadius: false) {
+            if let h = reviewRegionHandle(containing: tablePoint)
+                ?? nearestEditHandle(at: screenPoint)
+                ?? nearestEditHandle(to: tablePoint, withinRadius: false) {
                 moveEditHandle(h, to: tablePoint)
                 lightImpact()
             }
@@ -616,10 +628,12 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         case .began:
             guard let (tablePoint, _) = hit else { return }
             let handle = reviewRegionHandle(containing: tablePoint)
+                ?? nearestEditHandle(at: screenPoint)
                 ?? nearestEditHandle(to: tablePoint, withinRadius: true)
             guard let handle, let anchor = reviewHandleAnchor(handle) else { return }
             grabbedHandle = handle
             directDragOffset = anchor - tablePoint
+            UISelectionFeedbackGenerator().selectionChanged()
         case .changed:
             guard let (tablePoint, _) = hit,
                   let handle = grabbedHandle else { return }
@@ -721,7 +735,10 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             isPinchEngaged = true
             if stage == .review {
                 grabbedHandle = nearestEditHandle(to: tablePoint)
-                if let h = grabbedHandle { moveEditHandle(h, to: tablePoint) }
+                if let h = grabbedHandle {
+                    UISelectionFeedbackGenerator().selectionChanged()
+                    moveEditHandle(h, to: tablePoint)
+                }
             } else { beginGrab(at: tablePoint, worldPosition: worldPosition) }
         } else if isPinchEngaged, sample.gap >= pinchReleaseGap {
             isPinchEngaged = false
@@ -747,10 +764,10 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         }
     }
 
-    // MARK: - Review (hand posts + pond quad + player markers)
+    // MARK: - Review (hand posts + pond quad + player regions)
 
     /// Turns the two pond points into a directly editable quad, seeds the
-    /// nearby opponent player markers from the canonical guided calibration,
+    /// nearby opponent revealed-tile strips from canonical guided calibration,
     /// and shows the same geometry that will be used in Live.
     private func enterReview() {
         guard calibrationPlaneAnchor != nil else { return }
@@ -760,8 +777,8 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         pondRectNode?.isHidden = true
         for i in 0..<4 { placeQuadMarker(i) }
         updatePondQuadFill()
-        seedSeatMidpointsIfNeeded()
-        for seat: RelativeSeat in [.left, .right, .across] { placeSeatMarker(seat) }
+        seedRevealedZoneMarksIfNeeded()
+        for seat: RelativeSeat in [.left, .right, .across] { placeSeatEndpointMarkers(seat) }
         stage = .review
         refreshReviewGeometry()
         publishDraftCalibration()
@@ -773,7 +790,8 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
     private func leaveReviewForPondMarking() {
         clearReviewGeometry()
         for i in pondQuadMarkers.indices { pondQuadMarkers[i]?.isHidden = true }
-        for seat in seatMarkers.keys { seatMarkers[seat]?.isHidden = true }
+        seatEndpointMarkers.values.forEach { $0.isHidden = true }
+        sceneView.accessibilityElements = []
         pondMarkerA?.isHidden = false
         pondMarkerB?.isHidden = false
         updatePondRectNode()
@@ -794,12 +812,12 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
                 SIMD2(c.x + r, c.y + r), SIMD2(c.x - r, c.y + r)]
     }
 
-    /// Seeds the three draggable player-marker centers from the same guided
+    /// Seeds the three draggable endpoint strips from the same guided
     /// calibration geometry that Live will use. They intentionally sit just
     /// outside the marked pond, never at the outer extent of ARKit's (often
-    /// much larger) detected plane. Returning to review preserves a drag.
-    private func seedSeatMidpointsIfNeeded() {
-        guard seatMidpoints.isEmpty,
+    /// much larger) detected plane. Returning to review preserves an edit.
+    private func seedRevealedZoneMarksIfNeeded() {
+        guard revealedZoneMarks.isEmpty,
               let planeAnchor = calibrationPlaneAnchor,
               let handPostA,
               let handPostB,
@@ -825,21 +843,23 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         }
 
         let inversePlane = simd_inverse(planeAnchor.transform)
-        func planeLocalCenter(for zone: SemanticZoneID) -> SIMD2<Double>? {
-            guard let polygon = calibration.revealedZonePolygons[zone],
-                  !polygon.isEmpty else { return nil }
-            let tableCenter = polygon.reduce(SIMD2<Float>.zero, +)
-                / Float(polygon.count)
-            let world = calibration.tableToWorld * SIMD4(
-                tableCenter.x, 0, tableCenter.y, 1
+        func planeLocalMark(for zone: SemanticZoneID) -> RevealedZoneMark? {
+            guard let mark = calibration.revealedZoneMarks[zone] else { return nil }
+            func planePoint(_ tablePoint: SIMD2<Float>) -> SIMD2<Float> {
+                let world = calibration.tableToWorld * SIMD4(tablePoint.x, 0, tablePoint.y, 1)
+                let plane = inversePlane * world
+                return SIMD2(plane.x, plane.z)
+            }
+            return RevealedZoneMark(
+                start: planePoint(mark.start),
+                end: planePoint(mark.end),
+                depth: RevealedZoneMark.fixedDepth
             )
-            let planeLocal = inversePlane * world
-            return SIMD2(Double(planeLocal.x), Double(planeLocal.z))
         }
 
-        seatMidpoints[.left] = planeLocalCenter(for: .tableRevealedLeft)
-        seatMidpoints[.right] = planeLocalCenter(for: .tableRevealedRight)
-        seatMidpoints[.across] = planeLocalCenter(for: .tableRevealedFar)
+        revealedZoneMarks[.left] = planeLocalMark(for: .tableRevealedLeft)
+        revealedZoneMarks[.right] = planeLocalMark(for: .tableRevealedRight)
+        revealedZoneMarks[.across] = planeLocalMark(for: .tableRevealedFar)
     }
 
     /// Every draggable handle's current table point, for `nearestEditHandle`.
@@ -848,7 +868,10 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         if let a = handPostA { points.append((.handA, a)) }
         if let b = handPostB { points.append((.handB, b)) }
         for i in pondQuad.indices { points.append((.pond(i), pondQuad[i])) }
-        for (seat, m) in seatMidpoints { points.append((.seat(seat), m)) }
+        for (seat, mark) in revealedZoneMarks {
+            points.append((.seatStart(seat), SIMD2(Double(mark.start.x), Double(mark.start.y))))
+            points.append((.seatEnd(seat), SIMD2(Double(mark.end.x), Double(mark.end.y))))
+        }
         return points
     }
 
@@ -870,6 +893,23 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         return best?.0
     }
 
+    /// SceneKit's visible endpoint has a fixed 44-point touch target rather
+    /// than asking people to hit a tiny projected dot.  This is used for
+    /// direct touch; Vision-pinch continues to use table-space `grabRadius`.
+    private func nearestEditHandle(at screenPoint: CGPoint) -> EditHandle? {
+        var best: (EditHandle, CGFloat)?
+        for (handle, point) in editHandlePoints() {
+            let world = worldFromLocal(point)
+            let projected = sceneView.projectPoint(SCNVector3(world.x, world.y, world.z))
+            let deltaX = CGFloat(projected.x) - screenPoint.x
+            let deltaY = CGFloat(projected.y) - screenPoint.y
+            let distance = hypot(deltaX, deltaY)
+            guard distance <= minimumProjectedHandleHitTarget else { continue }
+            if best == nil || distance < best!.1 { best = (handle, distance) }
+        }
+        return best?.0
+    }
+
     private func reviewRegionHandle(containing planePoint: SIMD2<Double>) -> EditHandle? {
         guard let planeAnchor = calibrationPlaneAnchor,
               let calibration = currentCalibration() else { return nil }
@@ -885,7 +925,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         ]
         for (zone, seat) in seats {
             if let region = calibration.revealedZonePolygons[zone], polygon(region, contains: tablePoint) {
-                return .seat(seat)
+                return .seatRegion(seat)
             }
         }
         return nil
@@ -903,8 +943,15 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         case .pondRegion:
             guard !pondQuad.isEmpty else { return nil }
             return pondQuad.reduce(SIMD2<Double>.zero, +) / Double(pondQuad.count)
-        case let .seat(seat):
-            return seatMidpoints[seat]
+        case let .seatStart(seat):
+            guard let mark = revealedZoneMarks[seat] else { return nil }
+            return SIMD2(Double(mark.start.x), Double(mark.start.y))
+        case let .seatEnd(seat):
+            guard let mark = revealedZoneMarks[seat] else { return nil }
+            return SIMD2(Double(mark.end.x), Double(mark.end.y))
+        case let .seatRegion(seat):
+            guard let mark = revealedZoneMarks[seat] else { return nil }
+            return SIMD2(Double(mark.center.x), Double(mark.center.y))
         }
     }
 
@@ -936,9 +983,12 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             setQuadCorner(i, tablePoint: tablePoint)
         case .pondRegion:
             movePondRegion(to: tablePoint)
-        case let .seat(seat):
-            seatMidpoints[seat] = tablePoint
-            placeSeatMarker(seat)
+        case let .seatStart(seat):
+            updateSeatMark(seat, start: tablePoint)
+        case let .seatEnd(seat):
+            updateSeatMark(seat, end: tablePoint)
+        case let .seatRegion(seat):
+            moveSeatRegion(seat, to: tablePoint)
         }
         refreshReviewGeometry()
         publishDraftCalibration()
@@ -972,9 +1022,106 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         pondCornerB = SIMD2(maxX, maxZ)
     }
 
-    /// An amber person icon over a ring makes an opponent marker legible as a
-    /// player location rather than another tile or a generic calibration dot.
-    private func makeSeatMarkerNode() -> SCNNode {
+    /// Changes an endpoint while preserving a usable minimum strip.  The
+    /// resulting mark is converted through the canonical table transform,
+    /// clamped to its independent X/Z extent, then brought back to plane
+    /// coordinates.  That keeps editing, region rendering, zoning and ROI
+    /// planning on the exact same polygon.
+    private func updateSeatMark(_ seat: RelativeSeat,
+                                start: SIMD2<Double>? = nil,
+                                end: SIMD2<Double>? = nil) {
+        guard let old = revealedZoneMarks[seat] else { return }
+        var candidate = RevealedZoneMark(
+            start: start.map { SIMD2(Float($0.x), Float($0.y)) } ?? old.start,
+            end: end.map { SIMD2(Float($0.x), Float($0.y)) } ?? old.end,
+            depth: RevealedZoneMark.fixedDepth
+        )
+        if candidate.length < RevealedZoneMark.minimumLength {
+            // Keep the non-dragged endpoint stable whenever possible.  A
+            // zero-length drag uses the prior orientation rather than guessing.
+            let axis = candidate.longAxis ?? old.longAxis ?? SIMD2<Float>(1, 0)
+            if start != nil {
+                candidate.start = candidate.end - axis * RevealedZoneMark.minimumLength
+            } else {
+                candidate.end = candidate.start + axis * RevealedZoneMark.minimumLength
+            }
+        }
+        guard let clamped = clampSeatMarkToCalibratedExtent(candidate) else { return }
+        revealedZoneMarks[seat] = clamped
+        placeSeatEndpointMarkers(seat)
+    }
+
+    private func moveSeatRegion(_ seat: RelativeSeat, to center: SIMD2<Double>) {
+        guard let old = revealedZoneMarks[seat] else { return }
+        let oldCenter = SIMD2<Double>(Double(old.center.x), Double(old.center.y))
+        let delta = center - oldCenter
+        let moved = RevealedZoneMark(
+            start: old.start + SIMD2(Float(delta.x), Float(delta.y)),
+            end: old.end + SIMD2(Float(delta.x), Float(delta.y)),
+            depth: RevealedZoneMark.fixedDepth
+        )
+        guard let clamped = clampSeatMarkToCalibratedExtent(moved) else { return }
+        revealedZoneMarks[seat] = clamped
+        placeSeatEndpointMarkers(seat)
+    }
+
+    /// Makes a canonical calibration from the hand and pond only. It gives
+    /// endpoint editing a stable table frame and rectangular extent without
+    /// recursively depending on the opponent marks being edited.
+    private func baseCalibrationForSeatEditing() -> WorldTableCalibration? {
+        guard let planeAnchor = calibrationPlaneAnchor,
+              let handPostA,
+              let handPostB,
+              let pondCornerA,
+              let pondCornerB else { return nil }
+        let markedPond = pondQuad.count == 4 ? pondQuad : [
+            SIMD2(pondCornerA.x, pondCornerA.y),
+            SIMD2(pondCornerB.x, pondCornerA.y),
+            SIMD2(pondCornerB.x, pondCornerB.y),
+            SIMD2(pondCornerA.x, pondCornerB.y),
+        ]
+        return WorldTableCalibration.guided(marks: GuidedTableMarks(
+            planeTransform: planeAnchor.transform,
+            handEndpoints: (
+                SIMD2(Float(handPostA.x), Float(handPostA.y)),
+                SIMD2(Float(handPostB.x), Float(handPostB.y))
+            ),
+            pondPolygon: markedPond.map { SIMD2(Float($0.x), Float($0.y)) }
+        ))
+    }
+
+    private func clampSeatMarkToCalibratedExtent(_ planeMark: RevealedZoneMark) -> RevealedZoneMark? {
+        guard let planeAnchor = calibrationPlaneAnchor,
+              let calibration = baseCalibrationForSeatEditing() else { return nil }
+        let worldToTable = simd_inverse(calibration.tableToWorld)
+        let planeToWorld = planeAnchor.transform
+        let worldToPlane = simd_inverse(planeToWorld)
+        func tablePoint(_ planePoint: SIMD2<Float>) -> SIMD2<Float> {
+            let world = planeToWorld * SIMD4(planePoint.x, 0, planePoint.y, 1)
+            let table = worldToTable * world
+            return SIMD2(table.x, table.z)
+        }
+        func planePoint(_ tablePoint: SIMD2<Float>) -> SIMD2<Float> {
+            let world = calibration.tableToWorld * SIMD4(tablePoint.x, 0, tablePoint.y, 1)
+            let plane = worldToPlane * world
+            return SIMD2(plane.x, plane.z)
+        }
+        let canonical = RevealedZoneMark(
+            start: tablePoint(planeMark.start),
+            end: tablePoint(planeMark.end),
+            depth: RevealedZoneMark.fixedDepth
+        )
+        guard let clamped = canonical.clamped(to: calibration.extent) else { return nil }
+        return RevealedZoneMark(
+            start: planePoint(clamped.start),
+            end: planePoint(clamped.end),
+            depth: RevealedZoneMark.fixedDepth
+        )
+    }
+
+    /// An amber endpoint ring makes it clear the orange player strip is an
+    /// editable revealed-tile region, not a distant "player dot".
+    private func makeSeatEndpointMarkerNode() -> SCNNode {
         let root = SCNNode()
 
         let ring = SCNTorus(ringRadius: 0.018, pipeRadius: 0.003)
@@ -986,7 +1133,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
 
         let icon = SCNPlane(width: 0.035, height: 0.035)
         let iconMaterial = SCNMaterial()
-        iconMaterial.diffuse.contents = UIImage(systemName: "person.fill")?
+        iconMaterial.diffuse.contents = UIImage(systemName: "arrow.left.and.right.circle.fill")?
             .withTintColor(.systemOrange, renderingMode: .alwaysOriginal)
         iconMaterial.lightingModel = .constant
         iconMaterial.isDoubleSided = true
@@ -1001,21 +1148,85 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         return root
     }
 
-    /// Creates (or moves) the 3D marker for `seat` at its current
-    /// `seatMidpoints` entry, lifted slightly off the plane.
-    private func placeSeatMarker(_ seat: RelativeSeat) {
-        guard let m = seatMidpoints[seat] else { return }
-        let world = worldFromLocal(m)
-        let position = SCNVector3(world.x, world.y + 0.012, world.z)
-        if let existing = seatMarkers[seat] {
-            existing.position = position
-        } else {
-            let node = makeSeatMarkerNode()
+    /// Creates (or moves) the two 3D endpoint controls for `seat`, lifted
+    /// above the plane. Their names provide useful diagnostics and the card
+    /// legend supplies the accessible editing instructions.
+    private func placeSeatEndpointMarkers(_ seat: RelativeSeat) {
+        guard let mark = revealedZoneMarks[seat] else { return }
+        let endpoints: [(SeatEndpoint, SIMD2<Float>, String)] = [
+            (.start(seat), mark.start, "start"),
+            (.end(seat), mark.end, "end"),
+        ]
+        for (endpoint, point, name) in endpoints {
+            let world = worldFromLocal(SIMD2(Double(point.x), Double(point.y)))
+            let position = SCNVector3(world.x, world.y + 0.012, world.z)
+            let node: SCNNode
+            if let existing = seatEndpointMarkers[endpoint] {
+                node = existing
+            } else {
+                node = makeSeatEndpointMarkerNode()
+                node.name = "player-region-\(seat)-\(name)"
+                sceneView.scene.rootNode.addChildNode(node)
+                seatEndpointMarkers[endpoint] = node
+            }
             node.position = position
-            sceneView.scene.rootNode.addChildNode(node)
-            seatMarkers[seat] = node
+            node.isHidden = false
         }
-        seatMarkers[seat]?.isHidden = false
+        updateSeatAccessibilityElements()
+    }
+
+    private func updateSeatAccessibilityElements() {
+        guard surfaceMode != .liveReadOnly else {
+            sceneView.accessibilityElements = []
+            return
+        }
+        func seatName(_ seat: RelativeSeat) -> String {
+            switch seat {
+            case .left: return "Left player"
+            case .across: return "Far player"
+            case .right: return "Right player"
+            case .me: return "Your"
+            }
+        }
+        func element(for endpoint: SeatEndpoint, at planePoint: SIMD2<Float>, label: String) {
+            let accessibility = seatEndpointAccessibility[endpoint]
+                ?? UIAccessibilityElement(accessibilityContainer: sceneView)
+            let world = worldFromLocal(SIMD2(Double(planePoint.x), Double(planePoint.y)))
+            let projected = sceneView.projectPoint(SCNVector3(world.x, world.y, world.z))
+            accessibility.accessibilityFrameInContainerSpace = CGRect(
+                x: CGFloat(projected.x) - minimumProjectedHandleHitTarget / 2,
+                y: CGFloat(projected.y) - minimumProjectedHandleHitTarget / 2,
+                width: minimumProjectedHandleHitTarget,
+                height: minimumProjectedHandleHitTarget
+            )
+            accessibility.accessibilityLabel = label
+            accessibility.accessibilityHint = "Drag this endpoint to resize or rotate the revealed-tile region."
+            accessibility.accessibilityTraits = .adjustable
+            seatEndpointAccessibility[endpoint] = accessibility
+        }
+        for (seat, mark) in revealedZoneMarks {
+            let name = seatName(seat)
+            element(for: .start(seat), at: mark.start, label: "\(name) revealed tiles start")
+            element(for: .end(seat), at: mark.end, label: "\(name) revealed tiles end")
+
+            let body = seatBodyAccessibility[seat]
+                ?? UIAccessibilityElement(accessibilityContainer: sceneView)
+            let center = mark.center
+            let world = worldFromLocal(SIMD2(Double(center.x), Double(center.y)))
+            let projected = sceneView.projectPoint(SCNVector3(world.x, world.y, world.z))
+            body.accessibilityFrameInContainerSpace = CGRect(
+                x: CGFloat(projected.x) - 30,
+                y: CGFloat(projected.y) - 22,
+                width: 60,
+                height: 44
+            )
+            body.accessibilityLabel = "\(name) revealed tiles body"
+            body.accessibilityHint = "Drag to move this revealed-tile region."
+            body.accessibilityTraits = .button
+            seatBodyAccessibility[seat] = body
+        }
+        sceneView.accessibilityElements = Array(seatEndpointAccessibility.values)
+            + Array(seatBodyAccessibility.values)
     }
 
     private func setQuadCorner(_ i: Int, tablePoint: SIMD2<Double>) {
@@ -1078,8 +1289,8 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             SIMD2(pondCornerB.x, pondCornerB.y),
             SIMD2(pondCornerA.x, pondCornerB.y),
         ]
-        let seatZones = Dictionary(uniqueKeysWithValues: seatMidpoints.compactMap {
-            seat, point -> (SemanticZoneID, SIMD2<Float>)? in
+        let seatZones = Dictionary(uniqueKeysWithValues: revealedZoneMarks.compactMap {
+            seat, mark -> (SemanticZoneID, RevealedZoneMark)? in
             let zone: SemanticZoneID
             switch seat {
             case .left: zone = .tableRevealedLeft
@@ -1087,7 +1298,11 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             case .right: zone = .tableRevealedRight
             case .me: return nil
             }
-            return (zone, SIMD2(Float(point.x), Float(point.y)))
+            return (zone, RevealedZoneMark(
+                start: mark.start,
+                end: mark.end,
+                depth: RevealedZoneMark.fixedDepth
+            ))
         })
         return GuidedTableMarks(
             planeTransform: planeAnchor.transform,
@@ -1096,7 +1311,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
                 SIMD2(Float(handPostB.x), Float(handPostB.y))
             ),
             pondPolygon: markedPond.map { SIMD2(Float($0.x), Float($0.y)) },
-            revealedZoneCenters: seatZones
+            revealedZoneMarks: seatZones
         )
     }
 

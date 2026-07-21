@@ -7,14 +7,135 @@ public enum CalibrationSource: String, Sendable, Codable, Equatable {
     case manualRecenter
 }
 
+/// An editable exposed-tile strip expressed by its two long-edge endpoints in
+/// table-plane coordinates. The strip's depth is deliberately fixed by the
+/// calibration UI; moving either endpoint changes both its length and yaw
+/// without turning the mark into a freeform quadrilateral.
+public struct RevealedZoneMark: Sendable, Equatable {
+    public static let fixedDepth: Float = 0.040
+    public static let minimumLength: Float = 0.072
+
+    public var start: SIMD2<Float>
+    public var end: SIMD2<Float>
+    public var depth: Float
+
+    public init(
+        start: SIMD2<Float>,
+        end: SIMD2<Float>,
+        depth: Float = RevealedZoneMark.fixedDepth
+    ) {
+        self.start = start
+        self.end = end
+        self.depth = depth
+    }
+
+    public var center: SIMD2<Float> { (start + end) * 0.5 }
+
+    public var length: Float { simd_length(end - start) }
+
+    /// Returns the endpoint direction when the mark is geometrically valid.
+    public var longAxis: SIMD2<Float>? {
+        let vector = end - start
+        let length = simd_length(vector)
+        guard length.isFinite, length > 0.000_001 else { return nil }
+        return vector / length
+    }
+
+    /// Enforces the product minimum without changing the mark's center or
+    /// rotation. Invalid/non-finite marks are rejected rather than guessed.
+    public func enforcingMinimumLength(
+        minimumLength: Float = RevealedZoneMark.minimumLength
+    ) -> RevealedZoneMark? {
+        guard start.x.isFinite, start.y.isFinite,
+              end.x.isFinite, end.y.isFinite,
+              depth.isFinite, depth > 0,
+              minimumLength.isFinite, minimumLength > 0,
+              let axis = longAxis else {
+            return nil
+        }
+        let enforcedLength = max(length, minimumLength)
+        let halfLength = enforcedLength * 0.5
+        return RevealedZoneMark(
+            start: center - axis * halfLength,
+            end: center + axis * halfLength,
+            depth: depth
+        )
+    }
+
+    /// Returns the exact rectangular polygon represented by the endpoints.
+    /// Callers use this single result for rendering, zoning, and ROI planning.
+    public func polygon(
+        minimumLength: Float = RevealedZoneMark.minimumLength
+    ) -> [SIMD2<Float>]? {
+        guard let mark = enforcingMinimumLength(minimumLength: minimumLength),
+              let axis = mark.longAxis else { return nil }
+        let halfLength = mark.length * 0.5
+        let halfDepth = mark.depth * 0.5
+        let crossAxis = SIMD2(-axis.y, axis.x)
+        return [
+            mark.center - axis * halfLength - crossAxis * halfDepth,
+            mark.center + axis * halfLength - crossAxis * halfDepth,
+            mark.center + axis * halfLength + crossAxis * halfDepth,
+            mark.center - axis * halfLength + crossAxis * halfDepth,
+        ]
+    }
+
+    /// Clamps a mark to a rectangular calibrated table extent while preserving
+    /// its center-relative yaw and fixed depth. If the requested rotation
+    /// cannot fit the minimum 72 mm length, no edit is produced.
+    public func clamped(
+        to extent: SIMD2<Float>,
+        minimumLength: Float = RevealedZoneMark.minimumLength
+    ) -> RevealedZoneMark? {
+        guard extent.x.isFinite, extent.y.isFinite,
+              extent.x > 0, extent.y > 0,
+              let mark = enforcingMinimumLength(minimumLength: minimumLength),
+              let axis = mark.longAxis else { return nil }
+
+        let halfExtent = extent * 0.5
+        let crossAxis = SIMD2(-axis.y, axis.x)
+        // Reserve room for the fixed strip depth before fitting the endpoints.
+        let endpointBounds = halfExtent - SIMD2(abs(crossAxis.x), abs(crossAxis.y)) * (mark.depth * 0.5)
+        guard endpointBounds.x > 0, endpointBounds.y > 0 else { return nil }
+        let clampedCenter = simd_min(endpointBounds, simd_max(-endpointBounds, mark.center))
+        let availableHalfLengthX = axis.x == 0
+            ? Float.greatestFiniteMagnitude
+            : min(
+                (endpointBounds.x - clampedCenter.x) / abs(axis.x),
+                (endpointBounds.x + clampedCenter.x) / abs(axis.x)
+            )
+        let availableHalfLengthZ = axis.y == 0
+            ? Float.greatestFiniteMagnitude
+            : min(
+                (endpointBounds.y - clampedCenter.y) / abs(axis.y),
+                (endpointBounds.y + clampedCenter.y) / abs(axis.y)
+            )
+        let maximumLength = max(0, 2 * min(availableHalfLengthX, availableHalfLengthZ))
+        guard maximumLength >= minimumLength else { return nil }
+        let length = min(mark.length, maximumLength)
+        return RevealedZoneMark(
+            start: clampedCenter - axis * (length * 0.5),
+            end: clampedCenter + axis * (length * 0.5),
+            depth: mark.depth
+        )
+    }
+}
+
 /// The raw marks collected during guided calibration. Every point is in the
 /// locked AR plane's local X/Z coordinate system. Optional revealed-zone
-/// centers are deliberate user adjustments, not detections of players.
+/// endpoint marks are deliberate user adjustments, not detections of players.
 public struct GuidedTableMarks: Sendable, Equatable {
     public var planeTransform: simd_float4x4
     public var handStart: SIMD2<Float>
     public var handEnd: SIMD2<Float>
     public var pondPolygon: [SIMD2<Float>]
+    /// Endpoint controls for the three opponent exposed-tile regions. These
+    /// points are in the locked plane's local X/Z system until `guided` turns
+    /// them into canonical table-local marks.
+    public var revealedZoneMarks: [SemanticZoneID: RevealedZoneMark]
+    /// Compatibility input for the former center-only editor. New code must
+    /// use `revealedZoneMarks`, which can retain the user's chosen length and
+    /// rotation.
     public var revealedZoneCenters: [SemanticZoneID: SIMD2<Float>]
     public var source: CalibrationSource
 
@@ -22,6 +143,7 @@ public struct GuidedTableMarks: Sendable, Equatable {
         planeTransform: simd_float4x4,
         handEndpoints: (SIMD2<Float>, SIMD2<Float>),
         pondPolygon: [SIMD2<Float>],
+        revealedZoneMarks: [SemanticZoneID: RevealedZoneMark] = [:],
         revealedZoneCenters: [SemanticZoneID: SIMD2<Float>] = [:],
         source: CalibrationSource = .guidedMarks
     ) {
@@ -29,6 +151,7 @@ public struct GuidedTableMarks: Sendable, Equatable {
         handStart = handEndpoints.0
         handEnd = handEndpoints.1
         self.pondPolygon = pondPolygon
+        self.revealedZoneMarks = revealedZoneMarks
         self.revealedZoneCenters = revealedZoneCenters
         self.source = source
     }
@@ -46,6 +169,10 @@ public struct WorldTableCalibration: Sendable, Equatable {
     public var extent: SIMD2<Float>
     public var pondPolygon: [SIMD2<Float>]
     public var handPolygon: [SIMD2<Float>]
+    /// Exact, table-local endpoint marks from which the opponent polygons were
+    /// made. Keeping these alongside the resulting polygons makes edits and
+    /// persistence deterministic without a second geometry reconstruction.
+    public var revealedZoneMarks: [SemanticZoneID: RevealedZoneMark]
     public var revealedZonePolygons: [SemanticZoneID: [SIMD2<Float>]]
     public var source: CalibrationSource
 
@@ -54,6 +181,7 @@ public struct WorldTableCalibration: Sendable, Equatable {
         extent: SIMD2<Float>,
         pondPolygon: [SIMD2<Float>],
         handPolygon: [SIMD2<Float>],
+        revealedZoneMarks: [SemanticZoneID: RevealedZoneMark] = [:],
         revealedZonePolygons: [SemanticZoneID: [SIMD2<Float>]],
         source: CalibrationSource
     ) {
@@ -61,6 +189,7 @@ public struct WorldTableCalibration: Sendable, Equatable {
         self.extent = extent
         self.pondPolygon = pondPolygon
         self.handPolygon = handPolygon
+        self.revealedZoneMarks = revealedZoneMarks
         self.revealedZonePolygons = revealedZonePolygons
         self.source = source
     }
@@ -155,56 +284,40 @@ public struct WorldTableCalibration: Sendable, Equatable {
             depth: 0.100
         )
 
-        let pondBounds = bounds(of: canonicalPond)
-        let opponentLength = min(0.420, max(0.280, handWidth))
-        let gap: Float = 0.020
-        let revealedDepth: Float = 0.100
-        let halfDepth = revealedDepth * 0.5
-
-        let defaultCenters: [SemanticZoneID: SIMD2<Float>] = [
-            .tableRevealedLeft: SIMD2(
-                pondBounds.min.x - gap - halfDepth,
-                canonicalPondCenter.y
-            ),
-            .tableRevealedFar: SIMD2(
-                canonicalPondCenter.x,
-                pondBounds.min.y - gap - halfDepth
-            ),
-            .tableRevealedRight: SIMD2(
-                pondBounds.max.x + gap + halfDepth,
-                canonicalPondCenter.y
-            ),
-        ]
-        let longAxes: [SemanticZoneID: SIMD2<Float>] = [
-            .tableRevealedLeft: SIMD2(0, 1),
-            .tableRevealedFar: SIMD2(1, 0),
-            .tableRevealedRight: SIMD2(0, 1),
-        ]
-
         var revealed: [SemanticZoneID: [SIMD2<Float>]] = [
             .mineMeld: mineMeld,
         ]
+        var canonicalMarks = defaultRevealedZoneMarks(around: canonicalPond)
         for zone in [
             SemanticZoneID.tableRevealedLeft,
             .tableRevealedFar,
             .tableRevealedRight,
         ] {
-            guard let defaultCenter = defaultCenters[zone],
-                  let longAxis = longAxes[zone] else { continue }
-            let adjustedCenter: SIMD2<Float>
-            if let markedCenter = marks.revealedZoneCenters[zone] {
-                // A dragged marker moves its whole region; its seat-relative
-                // orientation and dimensions cannot accidentally rotate.
-                adjustedCenter = canonical(markedCenter)
+            guard let fallback = canonicalMarks[zone] else { continue }
+            let selected: RevealedZoneMark?
+            if let rawMark = marks.revealedZoneMarks[zone] {
+                selected = RevealedZoneMark(
+                    start: canonical(rawMark.start),
+                    end: canonical(rawMark.end),
+                    depth: rawMark.depth
+                ).enforcingMinimumLength()
+            } else if let legacyCenter = marks.revealedZoneCenters[zone],
+                      let axis = fallback.longAxis {
+                // Maintain old center-only marks until the calibration view
+                // migrates. They inherit the seat-relative default size and
+                // orientation; only real endpoint marks may rotate or resize.
+                let center = canonical(legacyCenter)
+                selected = RevealedZoneMark(
+                    start: center - axis * (fallback.length * 0.5),
+                    end: center + axis * (fallback.length * 0.5),
+                    depth: fallback.depth
+                ).enforcingMinimumLength()
             } else {
-                adjustedCenter = defaultCenter
+                selected = fallback.enforcingMinimumLength()
             }
-            revealed[zone] = orientedRect(
-                center: adjustedCenter,
-                longAxis: longAxis,
-                longLength: opponentLength,
-                depth: revealedDepth
-            )
+            guard let mark = selected, let polygon = mark.polygon() else { continue }
+            canonicalMarks[zone] = mark
+            revealed[zone] = polygon
         }
 
         let allPolygons = [canonicalPond, handPolygon] + Array(revealed.values)
@@ -215,6 +328,7 @@ public struct WorldTableCalibration: Sendable, Equatable {
             extent: extent,
             pondPolygon: canonicalPond,
             handPolygon: handPolygon,
+            revealedZoneMarks: canonicalMarks,
             revealedZonePolygons: revealed,
             source: marks.source
         )
@@ -227,6 +341,7 @@ public struct WorldTableCalibration: Sendable, Equatable {
         planeTransform: simd_float4x4,
         handEndpoints: (SIMD2<Float>, SIMD2<Float>),
         pondPolygon: [SIMD2<Float>],
+        revealedZoneMarks: [SemanticZoneID: RevealedZoneMark] = [:],
         revealedZoneCenters: [SemanticZoneID: SIMD2<Float>] = [:],
         source: CalibrationSource = .guidedMarks
     ) -> WorldTableCalibration? {
@@ -234,6 +349,7 @@ public struct WorldTableCalibration: Sendable, Equatable {
             planeTransform: planeTransform,
             handEndpoints: handEndpoints,
             pondPolygon: pondPolygon,
+            revealedZoneMarks: revealedZoneMarks,
             revealedZoneCenters: revealedZoneCenters,
             source: source
         ))
@@ -253,6 +369,58 @@ public struct WorldTableCalibration: Sendable, Equatable {
             center + longAxis * halfLong - crossAxis * halfDepth,
             center + longAxis * halfLong + crossAxis * halfDepth,
             center - longAxis * halfLong + crossAxis * halfDepth,
+        ]
+    }
+
+    /// Default opponent strips sit 20 mm beyond the matching pond edge. Their
+    /// long dimension is the length of that pond edge and their narrow
+    /// dimension is the fixed 40 mm exposed-tile depth.
+    public static func defaultRevealedZoneMarks(
+        around pondPolygon: [SIMD2<Float>]
+    ) -> [SemanticZoneID: RevealedZoneMark] {
+        guard pondPolygon.count >= 3 else { return [:] }
+        let pondBounds = bounds(of: pondPolygon)
+        let pondCenter = pondPolygon.reduce(SIMD2<Float>.zero, +)
+            / Float(pondPolygon.count)
+        let verticalLength = max(
+            RevealedZoneMark.minimumLength,
+            pondBounds.max.y - pondBounds.min.y
+        )
+        let horizontalLength = max(
+            RevealedZoneMark.minimumLength,
+            pondBounds.max.x - pondBounds.min.x
+        )
+        let gap: Float = 0.020
+        let halfDepth = RevealedZoneMark.fixedDepth * 0.5
+
+        func mark(
+            center: SIMD2<Float>,
+            axis: SIMD2<Float>,
+            length: Float
+        ) -> RevealedZoneMark {
+            RevealedZoneMark(
+                start: center - axis * (length * 0.5),
+                end: center + axis * (length * 0.5),
+                depth: RevealedZoneMark.fixedDepth
+            )
+        }
+
+        return [
+            .tableRevealedLeft: mark(
+                center: SIMD2(pondBounds.min.x - gap - halfDepth, pondCenter.y),
+                axis: SIMD2(0, 1),
+                length: verticalLength
+            ),
+            .tableRevealedFar: mark(
+                center: SIMD2(pondCenter.x, pondBounds.min.y - gap - halfDepth),
+                axis: SIMD2(1, 0),
+                length: horizontalLength
+            ),
+            .tableRevealedRight: mark(
+                center: SIMD2(pondBounds.max.x + gap + halfDepth, pondCenter.y),
+                axis: SIMD2(0, 1),
+                length: verticalLength
+            ),
         ]
     }
 

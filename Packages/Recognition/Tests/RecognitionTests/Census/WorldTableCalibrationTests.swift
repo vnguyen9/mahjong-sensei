@@ -13,12 +13,14 @@ final class WorldTableCalibrationTests: XCTestCase {
         handEndpoints: (SIMD2<Float>, SIMD2<Float>) = (
             SIMD2(-0.30, 0.42), SIMD2(0.30, 0.42)
         ),
+        revealedZoneMarks: [SemanticZoneID: RevealedZoneMark] = [:],
         revealedZoneCenters: [SemanticZoneID: SIMD2<Float>] = [:]
     ) throws -> WorldTableCalibration {
         try XCTUnwrap(WorldTableCalibration.guided(marks: GuidedTableMarks(
             planeTransform: identity,
             handEndpoints: handEndpoints,
             pondPolygon: pond,
+            revealedZoneMarks: revealedZoneMarks,
             revealedZoneCenters: revealedZoneCenters
         )))
     }
@@ -71,14 +73,17 @@ final class WorldTableCalibrationTests: XCTestCase {
         XCTAssertEqual(rightBounds.min.x - pondBounds.max.x, 0.020, accuracy: 0.0001)
 
         // Left/right rows are long along local Z; the far row is long along X.
-        XCTAssertEqual(simd_distance(left[1], left[0]), 0.420, accuracy: 0.0001)
-        XCTAssertEqual(simd_distance(right[1], right[0]), 0.420, accuracy: 0.0001)
-        XCTAssertEqual(simd_distance(far[1], far[0]), 0.420, accuracy: 0.0001)
+        // Each default strip uses its matching pond edge, not the unrelated
+        // hand width. Left/right follow the pond's vertical edge; far follows
+        // its horizontal edge.
+        XCTAssertEqual(simd_distance(left[1], left[0]), 0.160, accuracy: 0.0001)
+        XCTAssertEqual(simd_distance(right[1], right[0]), 0.160, accuracy: 0.0001)
+        XCTAssertEqual(simd_distance(far[1], far[0]), 0.200, accuracy: 0.0001)
         XCTAssertEqual(left[1].x - left[0].x, 0, accuracy: 0.0001)
         XCTAssertEqual(right[1].x - right[0].x, 0, accuracy: 0.0001)
         XCTAssertEqual(far[1].y - far[0].y, 0, accuracy: 0.0001)
-        XCTAssertEqual(abs(leftBounds.max.x - leftBounds.min.x), 0.100, accuracy: 0.0001)
-        XCTAssertEqual(abs(farBounds.max.y - farBounds.min.y), 0.100, accuracy: 0.0001)
+        XCTAssertEqual(abs(leftBounds.max.x - leftBounds.min.x), 0.040, accuracy: 0.0001)
+        XCTAssertEqual(abs(farBounds.max.y - farBounds.min.y), 0.040, accuracy: 0.0001)
     }
 
     func testDraggedOpponentCenterTranslatesRegionWithoutRotatingIt() throws {
@@ -97,7 +102,60 @@ final class WorldTableCalibrationTests: XCTestCase {
             XCTAssertEqual(adjustedLeft[index].y - defaultLeft[index].y, delta.y, accuracy: 0.0001)
         }
         XCTAssertEqual(adjustedLeft[1].x - adjustedLeft[0].x, 0, accuracy: 0.0001)
-        XCTAssertEqual(simd_distance(adjustedLeft[1], adjustedLeft[0]), 0.420, accuracy: 0.0001)
+        XCTAssertEqual(simd_distance(adjustedLeft[1], adjustedLeft[0]), 0.160, accuracy: 0.0001)
+    }
+
+    func testEndpointMarkControlsCenterLengthAndRotation() throws {
+        let mark = RevealedZoneMark(
+            start: SIMD2(-0.52, 0.10),
+            end: SIMD2(-0.36, 0.22)
+        )
+        let calibration = try calibration(
+            revealedZoneMarks: [.tableRevealedLeft: mark]
+        )
+        let stored = try XCTUnwrap(calibration.revealedZoneMarks[.tableRevealedLeft])
+        let polygon = try XCTUnwrap(calibration.revealedZonePolygons[.tableRevealedLeft])
+
+        XCTAssertEqual(stored.center.x, -0.44, accuracy: 0.0001)
+        XCTAssertEqual(stored.center.y, 0.16, accuracy: 0.0001)
+        XCTAssertEqual(stored.length, 0.20, accuracy: 0.0001)
+        XCTAssertEqual(stored.depth, 0.040, accuracy: 0.0001)
+        XCTAssertEqual(polygon.count, 4)
+        XCTAssertGreaterThan(abs(polygon[1].x - polygon[0].x), 0.01)
+        XCTAssertGreaterThan(abs(polygon[1].y - polygon[0].y), 0.01)
+    }
+
+    func testShortEndpointMarkIsExtendedTo72mmWithoutChangingCenterOrRotation() throws {
+        let short = RevealedZoneMark(
+            start: SIMD2(-0.40, 0.10),
+            end: SIMD2(-0.37, 0.10)
+        )
+        let calibration = try calibration(
+            revealedZoneMarks: [.tableRevealedLeft: short]
+        )
+        let stored = try XCTUnwrap(calibration.revealedZoneMarks[.tableRevealedLeft])
+
+        XCTAssertEqual(stored.center.x, -0.385, accuracy: 0.0001)
+        XCTAssertEqual(stored.center.y, 0.10, accuracy: 0.0001)
+        XCTAssertEqual(stored.length, 0.072, accuracy: 0.0001)
+        XCTAssertEqual(stored.end.y - stored.start.y, 0, accuracy: 0.0001)
+    }
+
+    func testClampingPreservesEndpointRotationAndKeepsPolygonInsideExtent() throws {
+        let mark = RevealedZoneMark(
+            start: SIMD2(-0.90, -0.20),
+            end: SIMD2(0.90, 0.70)
+        )
+        let clamped = try XCTUnwrap(mark.clamped(to: SIMD2(0.80, 0.80)))
+        let polygon = try XCTUnwrap(clamped.polygon())
+
+        XCTAssertLessThanOrEqual(abs(clamped.center.x), 0.40)
+        XCTAssertLessThanOrEqual(abs(clamped.center.y), 0.40)
+        for point in polygon {
+            XCTAssertLessThanOrEqual(abs(point.x), 0.40 + 0.0001)
+            XCTAssertLessThanOrEqual(abs(point.y), 0.40 + 0.0001)
+        }
+        XCTAssertGreaterThanOrEqual(clamped.length, RevealedZoneMark.minimumLength)
     }
 
     func testMineMeldStripIsParallelAndSeparatedInwardFromHand() throws {
