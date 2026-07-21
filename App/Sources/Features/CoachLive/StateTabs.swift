@@ -20,6 +20,7 @@ enum LiveTab: String, CaseIterable, Hashable {
 /// hides under compression (UI plan §8/§9).
 struct LiveSegmentedBar: View {
     @Binding var selection: LiveTab
+    @Environment(\.liveControlMetrics) private var metrics
 
     var body: some View {
         HStack(spacing: 0) {
@@ -29,21 +30,21 @@ struct LiveSegmentedBar: View {
                     withAnimation(.snappy(duration: 0.2)) { selection = item }
                 } label: {
                     Text(item.label)
-                        .font(MJFont.ui(13, weight: .bold))
+                        .font(MJFont.ui(13 * metrics.scale, weight: .bold))
                         .foregroundStyle(active ? MJColor.inkOnGold : MJColor.cream(0.55))
                         .frame(maxWidth: .infinity)
-                        .frame(height: 30)
+                        .frame(height: metrics.segmentedHeight)
                         .background {
                             if active {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous).fill(MJColor.gold)
+                                RoundedRectangle(cornerRadius: 10 * metrics.scale, style: .continuous).fill(MJColor.gold)
                             }
                         }
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(3)
-        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(3 * metrics.scale)
+        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12 * metrics.scale, style: .continuous))
         .fixedSize(horizontal: false, vertical: true)
     }
 }

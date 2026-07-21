@@ -23,6 +23,10 @@ struct TileCountGrid: View {
     var handHistogram: [Int]? = nil
     var highlight: Set<Tile> = []
     var tileWidthCap: CGFloat = 22
+    /// iPad Coach Live asks for 44+pt correction targets. The measured grid
+    /// height remains authoritative, so compact drawers cap this per-cell
+    /// value rather than overflowing their four required rows.
+    var minimumHitTarget: CGFloat = 0
     /// When true (Tracker), show short East/South/…/Red captions under the honors row.
     var showHonorCaptions: Bool = false
     let onTap: (Tile) -> Void
@@ -46,12 +50,15 @@ struct TileCountGrid: View {
         GeometryReader { geo in
             let width = tileWidth(for: geo.size)
             let pipScale = min(1, width / tileWidthCap)
+            let availableCellHeight = max(0, (geo.size.height - 3 * Self.rowSpacing) / 4)
+            let effectiveHitTarget = min(minimumHitTarget, availableCellHeight)
             VStack(spacing: Self.rowSpacing) {
                 ForEach(Array(Self.rows.enumerated()), id: \.offset) { rowIndex, row in
                     HStack(spacing: Self.colSpacing) {
                         ForEach(row, id: \.self) { tile in
                             cell(tile, width: width, pipScale: pipScale,
-                                 showCaption: showHonorCaptions && rowIndex == 3)
+                                 showCaption: showHonorCaptions && rowIndex == 3,
+                                 minimumHitTarget: effectiveHitTarget)
                         }
                     }
                 }
@@ -71,7 +78,8 @@ struct TileCountGrid: View {
         return max(4, min(tileWidthCap, byWidth, byHeight))
     }
 
-    private func cell(_ tile: Tile, width: CGFloat, pipScale: CGFloat, showCaption: Bool) -> some View {
+    private func cell(_ tile: Tile, width: CGFloat, pipScale: CGFloat, showCaption: Bool,
+                      minimumHitTarget: CGFloat) -> some View {
         let table = histogram.indices.contains(tile.classIndex) ? histogram[tile.classIndex] : 0
         let hand: Int = {
             guard let handHistogram else { return 0 }
@@ -108,6 +116,7 @@ struct TileCountGrid: View {
                 }
             }
             .opacity(isDead ? 0.35 : 1)
+            .frame(minWidth: minimumHitTarget, minHeight: minimumHitTarget)
         }
         .buttonStyle(.plain)
         .animation(.easeOut(duration: 0.2), value: combined)

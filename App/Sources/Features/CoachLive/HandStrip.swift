@@ -7,6 +7,7 @@ import Recognition
 /// gold ring/tag — fixed-height, never hides under compression (UI plan §10).
 struct HandStrip: View {
     @Environment(CoachLiveSession.self) private var session
+    @Environment(\.liveControlMetrics) private var metrics
     let onTapTile: (TrackID) -> Void
     let onTapUnknown: (TrackID) -> Void
 
@@ -40,7 +41,8 @@ struct HandStrip: View {
 
     private func tile(_ tracked: TrackedTile) -> some View {
         let isDiscardPick = tracked.id == recommendedID
-        return MahjongTileView(tracked.face, theme: .ivory, width: 22)
+        return Button { onTapTile(tracked.id) } label: {
+            MahjongTileView(tracked.face, theme: .ivory, width: metrics.handTileWidth)
             .overlay {
                 if isDiscardPick {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -51,15 +53,17 @@ struct HandStrip: View {
             .overlay(alignment: .top) {
                 if isDiscardPick {
                     Text("DISCARD")
-                        .font(MJFont.ui(9, weight: .bold))
+                        .font(MJFont.ui(9 * metrics.scale, weight: .bold))
                         .foregroundStyle(MJColor.inkOnGold)
                         .padding(.horizontal, 5).padding(.vertical, 2)
                         .background(MJColor.gold, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         .fixedSize()   // else `.overlay` proposes the 22pt tile's width and wraps "DISCARD"
-                        .offset(y: -16)
+                        .offset(y: -16 * metrics.scale)
                 }
             }
-            .onTapGesture { onTapTile(tracked.id) }
+        }
+        .buttonStyle(.plain)
+        .frame(minWidth: metrics.minimumEditHitTarget, minHeight: metrics.minimumEditHitTarget)
     }
 
     private var unknownHandTiles: [SpatialUnknownTile] {
@@ -72,10 +76,11 @@ struct HandStrip: View {
         Button { onTapUnknown(tile.id) } label: {
             RoundedRectangle(cornerRadius: 5, style: .continuous)
                 .strokeBorder(MJColor.amberZone, style: StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
-                .frame(width: 22, height: 31)
+                .frame(width: metrics.handTileWidth, height: metrics.handTileWidth * 1.4)
+                .frame(minWidth: metrics.minimumEditHitTarget, minHeight: metrics.minimumEditHitTarget)
                 .overlay {
                     Text("?")
-                        .font(MJFont.ui(14, weight: .bold))
+                        .font(MJFont.ui(14 * metrics.scale, weight: .bold))
                         .foregroundStyle(MJColor.creamHeading)
                 }
         }

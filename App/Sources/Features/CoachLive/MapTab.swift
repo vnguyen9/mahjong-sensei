@@ -8,11 +8,15 @@ import Recognition
 struct MapTab: View {
     @Environment(CoachLiveSession.self) private var session
     @Environment(\.liveCompression) private var compression
+    @Environment(\.liveControlMetrics) private var metrics
     let onTapUnresolved: () -> Void
     let onTapUnknown: (TrackID) -> Void
 
-    private var pondTileWidth: CGFloat { compression == .full ? 16 : 13 }
-    private var meldTileWidth: CGFloat { compression == .full ? 15 : 13 }
+    private var pondTileWidth: CGFloat { compression == .full ? metrics.pondTileWidth : max(13, metrics.pondTileWidth - 3) }
+    private var meldTileWidth: CGFloat { compression == .full ? metrics.meldTileWidth : max(13, metrics.meldTileWidth - 2) }
+    private var pondCloudMaxWidth: CGFloat {
+        metrics.minimumEditHitTarget == 0 ? 210 : metrics.paneWidthCap * 0.6
+    }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -35,7 +39,7 @@ struct MapTab: View {
                 Spacer(minLength: 0)
                 myRevealedUnknownRow
             }
-            .padding(12)
+            .padding(12 * metrics.scale)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             pondCloud
@@ -44,18 +48,19 @@ struct MapTab: View {
             if !session.unresolved.isEmpty {
                 Button(action: onTapUnresolved) {
                     Text("\(session.unresolved.count) ? · tap")
-                        .font(MJFont.ui(11, weight: .bold))
+                        .font(MJFont.ui(11 * metrics.scale, weight: .bold))
                         .foregroundStyle(MJColor.inkOnAmber)
                         .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(MJColor.amberZone, in: Capsule())
                 }
                 .buttonStyle(.plain)
-                .padding(10)
+                .frame(minWidth: metrics.minimumEditHitTarget, minHeight: metrics.minimumEditHitTarget)
+                .padding(10 * metrics.scale)
             }
 
             if !session.spatialUnknownTiles.isEmpty {
                 unknownSummary
-                    .padding(10)
+                    .padding(10 * metrics.scale)
                     .padding(.bottom, session.unresolved.isEmpty ? 42 : 0)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             }
@@ -80,7 +85,7 @@ struct MapTab: View {
                 unknownTile(tile)
             }
         }
-        .frame(maxWidth: 210)
+        .frame(maxWidth: pondCloudMaxWidth)
         .animation(.smooth(duration: 0.35), value: session.pond.map(\.id))
     }
 
@@ -90,7 +95,7 @@ struct MapTab: View {
         if let melds = session.opponentMelds[seat], !melds.isEmpty {
             VStack(spacing: 4) {
                 Text(windEnglish(wind))
-                    .font(MJFont.ui(11, weight: .semibold))
+                    .font(MJFont.ui(11 * metrics.scale, weight: .semibold))
                     .foregroundStyle(MJColor.cream(0.55))
                 VStack(spacing: 2) {
                     ForEach(Array(melds.enumerated()), id: \.offset) { _, meld in
@@ -102,8 +107,8 @@ struct MapTab: View {
         } else {
             VStack(spacing: 3) {
                 Text("\(windEnglish(wind)) · \(session.concealedCounts[seat] ?? 13) · concealed")
-                    .font(MJFont.ui(11)).foregroundStyle(MJColor.cream(0.55))
-                    .padding(.horizontal, 10).padding(.vertical, 5)
+                        .font(MJFont.ui(11 * metrics.scale)).foregroundStyle(MJColor.cream(0.55))
+                    .padding(.horizontal, 10 * metrics.scale).padding(.vertical, 5 * metrics.scale)
                     .background(Color.white.opacity(0.06), in: Capsule())
                 unknownRow(for: seat)
             }
@@ -116,7 +121,7 @@ struct MapTab: View {
                 Image(systemName: "questionmark.square.dashed")
                     .font(.system(size: 11, weight: .semibold))
                 Text("\(session.spatialUnknownTiles.count) physical tile\(session.spatialUnknownTiles.count == 1 ? "" : "s") need faces")
-                    .font(MJFont.ui(11, weight: .bold))
+                    .font(MJFont.ui(11 * metrics.scale, weight: .bold))
             }
             let boundary = unknownTiles(in: .boundaryUnresolved)
             if !boundary.isEmpty {
@@ -126,7 +131,7 @@ struct MapTab: View {
             }
         }
         .foregroundStyle(MJColor.inkOnAmber)
-        .padding(.horizontal, 10).padding(.vertical, 6)
+        .padding(.horizontal, 10 * metrics.scale).padding(.vertical, 6 * metrics.scale)
         .background(MJColor.amberZone, in: Capsule())
         .accessibilityLabel("\(session.spatialUnknownTiles.count) physical tiles need face identification")
     }
@@ -137,7 +142,7 @@ struct MapTab: View {
         if !tiles.isEmpty {
             VStack(spacing: 3) {
                 Text("Your revealed tiles")
-                    .font(MJFont.ui(10, weight: .semibold))
+                    .font(MJFont.ui(10 * metrics.scale, weight: .semibold))
                     .foregroundStyle(MJColor.cream(0.55))
                 HStack(spacing: 2) {
                     ForEach(tiles) { tile in unknownTile(tile) }
@@ -174,9 +179,10 @@ struct MapTab: View {
             RoundedRectangle(cornerRadius: 4, style: .continuous)
                 .strokeBorder(MJColor.amberZone, style: StrokeStyle(lineWidth: 1.4, dash: [3, 2]))
                 .frame(width: meldTileWidth, height: meldTileWidth * 1.35)
+                .frame(minWidth: metrics.minimumEditHitTarget, minHeight: metrics.minimumEditHitTarget)
                 .overlay {
                     Text("?")
-                        .font(MJFont.ui(12, weight: .bold))
+                        .font(MJFont.ui(12 * metrics.scale, weight: .bold))
                         .foregroundStyle(MJColor.creamHeading)
                 }
         }

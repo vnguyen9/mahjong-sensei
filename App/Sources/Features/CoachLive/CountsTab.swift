@@ -8,6 +8,7 @@ import MahjongCore
 /// `TileCountGrid.swift`.
 struct CountsTab: View {
     @Environment(CoachLiveSession.self) private var session
+    @Environment(\.liveControlMetrics) private var metrics
     let onTapTile: (Tile) -> Void
 
     var body: some View {
@@ -15,10 +16,12 @@ struct CountsTab: View {
             TileCountGrid(
                 histogram: session.seenHistogram,
                 highlight: session.advice?.currentWaitTileSet ?? [],
+                tileWidthCap: metrics.countTileWidthCap,
+                minimumHitTarget: metrics.minimumEditHitTarget,
                 onTap: onTapTile
             )
             Text("tap a tile to fix its count")
-                .font(MJFont.ui(11))
+                .font(MJFont.ui(11 * metrics.scale))
                 .foregroundStyle(MJColor.cream(0.5))
         }
     }

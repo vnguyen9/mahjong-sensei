@@ -11,6 +11,52 @@ import Recognition
 /// "map shrinks first, hand + advice never hide".
 enum LiveCompression: Equatable { case full, compact, minimal }
 
+/// The iPad drawer has room to make its editing surface genuinely larger, not
+/// just taller.  Keep these values in one value type so every live control
+/// responds to the same detent change and the phone layout stays exactly as
+/// dense as before.
+struct LiveControlMetrics: Equatable {
+    let scale: CGFloat
+    let segmentedHeight: CGFloat
+    let paneWidthCap: CGFloat
+    let countTileWidthCap: CGFloat
+    let handTileWidth: CGFloat
+    let pondTileWidth: CGFloat
+    let meldTileWidth: CGFloat
+    let minimumEditHitTarget: CGFloat
+
+    static let phone = LiveControlMetrics(
+        scale: 1,
+        segmentedHeight: 30,
+        paneWidthCap: 560,
+        countTileWidthCap: 22,
+        handTileWidth: 22,
+        pondTileWidth: 16,
+        meldTileWidth: 15,
+        minimumEditHitTarget: 0
+    )
+
+    fileprivate static func iPad(detent: GameplayDrawerDetent) -> LiveControlMetrics {
+        switch detent {
+        case .peek:
+            return LiveControlMetrics(scale: 1.1, segmentedHeight: 40, paneWidthCap: 620,
+                                      countTileWidthCap: 24, handTileWidth: 24,
+                                      pondTileWidth: 18, meldTileWidth: 17,
+                                      minimumEditHitTarget: 40)
+        case .compact:
+            return LiveControlMetrics(scale: 1.25, segmentedHeight: 46, paneWidthCap: 680,
+                                      countTileWidthCap: 28, handTileWidth: 28,
+                                      pondTileWidth: 20, meldTileWidth: 19,
+                                      minimumEditHitTarget: 44)
+        case .expanded:
+            return LiveControlMetrics(scale: 1.45, segmentedHeight: 52, paneWidthCap: 760,
+                                      countTileWidthCap: 32, handTileWidth: 32,
+                                      pondTileWidth: 24, meldTileWidth: 22,
+                                      minimumEditHitTarget: 48)
+        }
+    }
+}
+
 private struct LiveCompressionKey: EnvironmentKey {
     static let defaultValue: LiveCompression = .full
 }
@@ -18,6 +64,16 @@ extension EnvironmentValues {
     var liveCompression: LiveCompression {
         get { self[LiveCompressionKey.self] }
         set { self[LiveCompressionKey.self] = newValue }
+    }
+}
+
+private struct LiveControlMetricsKey: EnvironmentKey {
+    static let defaultValue = LiveControlMetrics.phone
+}
+extension EnvironmentValues {
+    var liveControlMetrics: LiveControlMetrics {
+        get { self[LiveControlMetricsKey.self] }
+        set { self[LiveControlMetricsKey.self] = newValue }
     }
 }
 
@@ -46,7 +102,7 @@ enum CoachLiveSheet: Identifiable, Hashable {
 /// In particular, iPad never collapses it to a handle-only strip: Map,
 /// Counts, and Events remain immediately reachable while the camera stays
 /// full-screen behind it.
-private enum GameplayDrawerDetent: Int, Comparable {
+fileprivate enum GameplayDrawerDetent: Int, Comparable {
     case peek
     case compact
     case expanded
@@ -76,7 +132,7 @@ struct CoachLiveView: View {
     /// Live begins with the table unobscured.  The gameplay surface is a
     /// bottom sheet, not a second half of the camera renderer, so dragging it
     /// can never crop/re-layout ARKit's camera or projected geometry.
-    @State private var gameplayDrawerDetent: GameplayDrawerDetent = .peek
+    @State private var gameplayDrawerDetent: GameplayDrawerDetent
     @State private var showExitConfirm = false
     /// Non-nil while the bracket-reassign confirmation (A3) is up — which
     /// zone chip was tapped, so the dialog's copy and the confirm action
@@ -92,6 +148,10 @@ struct CoachLiveView: View {
         self.onScoreHandoff = onScoreHandoff
         _tab = State(initialValue: initialTab)
         _sheet = State(initialValue: initialSheet)
+        // An iPad has enough vertical room for a complete editing surface at
+        // launch. iPhone retains its camera-first peek state.
+        _gameplayDrawerDetent = State(initialValue:
+            UIDevice.current.userInterfaceIdiom == .pad ? .compact : .peek)
     }
 
     /// Compression from the space actually AVAILABLE to the state pane
@@ -180,12 +240,13 @@ struct CoachLiveView: View {
 
     private func gameplaySheet(height: CGFloat) -> some View {
         let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        let metrics = isPad ? LiveControlMetrics.iPad(detent: gameplayDrawerDetent) : .phone
         // The iPad peek is deliberately tall enough to retain the segmented
         // Map / Counts / Events control. A down-swipe steps through these
         // detents; it never removes the drawer from the user’s reach.
-        let peekHeight: CGFloat = isPad ? 218 : 132
-        let compactHeight = min(height * (isPad ? 0.54 : 0.58), max(isPad ? 420 : 360, height - 180))
-        let expandedHeight = min(height * (isPad ? 0.78 : 0.72), max(isPad ? 560 : 480, height - 120))
+        let peekHeight: CGFloat = isPad ? 260 : 132
+        let compactHeight = min(height * (isPad ? 0.62 : 0.58), max(isPad ? 500 : 360, height - 170))
+        let expandedHeight = min(height * (isPad ? 0.82 : 0.72), max(isPad ? 620 : 480, height - 110))
         let currentHeight: CGFloat
         switch gameplayDrawerDetent {
         case .peek: currentHeight = peekHeight
@@ -201,13 +262,14 @@ struct CoachLiveView: View {
                 .padding(.bottom, gameplayDrawerDetent == .peek ? 10 : 7)
 
             if gameplayDrawerDetent == .peek {
-                peekSheetSummary
+                peekSheetSummary(metrics: metrics)
             } else {
-                statePane(compression: compression(for: currentHeight - 22))
+                statePane(compression: compression(for: currentHeight - 22), metrics: metrics)
                     .environment(\.liveCompression, compression(for: currentHeight - 22))
             }
         }
         .frame(maxWidth: .infinity, minHeight: currentHeight, maxHeight: currentHeight, alignment: .top)
+        .environment(\.liveControlMetrics, metrics)
         .background(MJColor.deepJade.opacity(0.96))
         .clipShape(.rect(topLeadingRadius: 24, topTrailingRadius: 24))
         .overlay(alignment: .top) {
@@ -242,7 +304,7 @@ struct CoachLiveView: View {
             : "Swipe down for a smaller gameplay drawer.")
     }
 
-    private var peekSheetSummary: some View {
+    private func peekSheetSummary(metrics: LiveControlMetrics) -> some View {
         VStack(spacing: 10) {
             LiveSegmentedBar(selection: $tab)
             HStack(spacing: 8) {
@@ -260,7 +322,7 @@ struct CoachLiveView: View {
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 16)
-        .frame(maxWidth: 560)
+        .frame(maxWidth: metrics.paneWidthCap)
         .frame(maxWidth: .infinity, alignment: .top)
     }
 
@@ -295,7 +357,7 @@ struct CoachLiveView: View {
 
     // MARK: - State pane
 
-    private func statePane(compression: LiveCompression) -> some View {
+    private func statePane(compression: LiveCompression, metrics: LiveControlMetrics) -> some View {
         VStack(spacing: 10) {
             LiveSegmentedBar(selection: $tab)
             CorrectionHintBanner()
@@ -313,10 +375,13 @@ struct CoachLiveView: View {
                 // deliberate tap).
                 HStack(spacing: 18) {
                     Button("Rescan table") { session.rescanTable() }
+                        .frame(minHeight: metrics.minimumEditHitTarget)
                     Button("Recenter pond") { session.beginPondRecenter() }
+                        .frame(minHeight: metrics.minimumEditHitTarget)
                     Button("End hand") { session.requestHandEnd() }
+                        .frame(minHeight: metrics.minimumEditHitTarget)
                 }
-                .font(MJFont.ui(11, weight: .semibold))
+                .font(MJFont.ui(11 * metrics.scale, weight: .semibold))
                 .foregroundStyle(MJColor.cream(0.55))
                 .buttonStyle(.plain)
             }
@@ -333,7 +398,7 @@ struct CoachLiveView: View {
         .padding(.bottom, 10)
         // Readable-width cap so the pane's rows don't stretch edge-to-edge on a
         // wide iPad; the deepJade background still fills the full width.
-        .frame(maxWidth: 560)
+        .frame(maxWidth: metrics.paneWidthCap)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(MJColor.deepJade)
         .overlay {

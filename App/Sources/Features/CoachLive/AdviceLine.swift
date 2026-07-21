@@ -55,6 +55,7 @@ func shantenLabel(_ n: Int) -> String { n <= 0 ? "tenpai" : "\(n)-shanten" }
 /// `AdviceDetailSheet`.
 struct AdviceLine: View {
     @Environment(CoachLiveSession.self) private var session
+    @Environment(\.liveControlMetrics) private var metrics
     let onTap: () -> Void
 
     var body: some View {
@@ -66,7 +67,7 @@ struct AdviceLine: View {
                     waitAdvice(waitSet)
                 } else {
                     Text("watching the table…")
-                        .font(MJFont.ui(12, weight: .medium))
+                        .font(MJFont.ui(12 * metrics.scale, weight: .medium))
                         .foregroundStyle(MJColor.cream(0.5))
                 }
             }
@@ -75,31 +76,32 @@ struct AdviceLine: View {
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(.plain)
+        .frame(minHeight: metrics.minimumEditHitTarget)
         .fixedSize(horizontal: false, vertical: true)
     }
 
     private func discardAdvice(_ best: RankedDiscard) -> some View {
         HStack(spacing: 4) {
-            MahjongTileView(best.tile, theme: .jade, width: 19)
+            MahjongTileView(best.tile, theme: .jade, width: 19 * metrics.scale)
             Text("→ \(shantenLabel(best.shantenAfter)) · waits")
-                .font(MJFont.ui(12, weight: .semibold)).foregroundStyle(MJColor.lightGold)
+                .font(MJFont.ui(12 * metrics.scale, weight: .semibold)).foregroundStyle(MJColor.lightGold)
             ForEach(Array(best.displayWaits.prefix(4).enumerated()), id: \.offset) { _, w in
-                MahjongTileView(w.tile, theme: .jade, width: 19)
+                MahjongTileView(w.tile, theme: .jade, width: 19 * metrics.scale)
             }
             Text("· \(best.displayWaits.reduce(0) { $0 + $1.liveCount }) live · \(pct(best.nextDrawOdds)) next draw")
-                .font(MJFont.ui(12, weight: .semibold)).foregroundStyle(MJColor.lightGold)
+                .font(MJFont.ui(12 * metrics.scale, weight: .semibold)).foregroundStyle(MJColor.lightGold)
         }
     }
 
     private func waitAdvice(_ waitSet: WaitSet) -> some View {
         HStack(spacing: 4) {
             Text("\(shantenLabel(waitSet.shanten)) · waits")
-                .font(MJFont.ui(12, weight: .semibold)).foregroundStyle(MJColor.lightGold)
+                .font(MJFont.ui(12 * metrics.scale, weight: .semibold)).foregroundStyle(MJColor.lightGold)
             ForEach(Array(waitSet.displayWaits.prefix(4).enumerated()), id: \.offset) { _, w in
-                MahjongTileView(w.tile, theme: .jade, width: 19)
+                MahjongTileView(w.tile, theme: .jade, width: 19 * metrics.scale)
             }
             Text("· \(waitSet.totalLive) live · \(pct(waitSet.nextDrawOdds)) next draw")
-                .font(MJFont.ui(12, weight: .semibold)).foregroundStyle(MJColor.lightGold)
+                .font(MJFont.ui(12 * metrics.scale, weight: .semibold)).foregroundStyle(MJColor.lightGold)
         }
     }
 
@@ -112,6 +114,7 @@ struct AdviceLine: View {
 struct WaitChips: View {
     @Environment(CoachLiveSession.self) private var session
     @Environment(\.liveCompression) private var compression
+    @Environment(\.liveControlMetrics) private var metrics
 
     private var waits: [(tile: Tile, seenCount: Int, liveCount: Int)] {
         session.advice?.best?.displayWaits ?? session.advice?.waitSet?.displayWaits ?? []
@@ -119,15 +122,15 @@ struct WaitChips: View {
 
     var body: some View {
         if !waits.isEmpty, compression != .minimal {
-            HStack(spacing: 7) {
+            HStack(spacing: 7 * metrics.scale) {
                 ForEach(Array(waits.prefix(4).enumerated()), id: \.offset) { _, w in
                     chip(w)
                 }
                 if waits.count > 4 {
                     Text("+\(waits.count - 4)")
-                        .font(MJFont.ui(11.5, weight: .semibold))
+                        .font(MJFont.ui(11.5 * metrics.scale, weight: .semibold))
                         .foregroundStyle(MJColor.cream(0.6))
-                        .padding(.horizontal, 8).padding(.vertical, 6)
+                        .padding(.horizontal, 8 * metrics.scale).padding(.vertical, 6 * metrics.scale)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -136,14 +139,14 @@ struct WaitChips: View {
     }
 
     private func chip(_ w: (tile: Tile, seenCount: Int, liveCount: Int)) -> some View {
-        HStack(spacing: 5) {
-            MahjongTileView(w.tile, theme: .jade, width: 19)
+        HStack(spacing: 5 * metrics.scale) {
+            MahjongTileView(w.tile, theme: .jade, width: 19 * metrics.scale)
             SeenPips(seen: w.seenCount)
-            Text("\(w.liveCount) live").font(MJFont.ui(11.5)).foregroundStyle(MJColor.cream(0.7))
+            Text("\(w.liveCount) live").font(MJFont.ui(11.5 * metrics.scale)).foregroundStyle(MJColor.cream(0.7))
         }
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .background(MJColor.gold(0.14), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(MJColor.gold(0.4), lineWidth: 1) }
+        .padding(.horizontal, 10 * metrics.scale).padding(.vertical, 6 * metrics.scale)
+        .background(MJColor.gold(0.14), in: RoundedRectangle(cornerRadius: 11 * metrics.scale, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 11 * metrics.scale, style: .continuous).strokeBorder(MJColor.gold(0.4), lineWidth: 1) }
     }
 }
 
