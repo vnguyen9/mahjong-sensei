@@ -242,4 +242,24 @@ final class WorldTableCalibrationTests: XCTestCase {
         XCTAssertEqual(calibration.semanticZones[.tablePond], calibration.pondPolygon)
         XCTAssertEqual(calibration.semanticZones[.mineHand], calibration.handPolygon)
     }
+
+    func testTileDimensionsDefaultToStandardAndRemainPartOfCalibration() throws {
+        let guided = try calibration()
+        XCTAssertEqual(guided.tileDimensions, .standard)
+        XCTAssertEqual(guided.tileDimensions.width, 0.024, accuracy: 0.000_001)
+        XCTAssertEqual(guided.tileDimensions.length, 0.032, accuracy: 0.000_001)
+        XCTAssertEqual(guided.tileDimensions.height, 0.016, accuracy: 0.000_001)
+
+        let custom = PhysicalTileDimensions(width: 0.028, length: 0.036, height: 0.017)
+        let direct = WorldTableCalibration(
+            tableToWorld: identity,
+            extent: SIMD2(0.80, 0.90),
+            pondPolygon: pond,
+            handPolygon: pond,
+            revealedZonePolygons: [:],
+            tileDimensions: custom,
+            source: .guidedMarks
+        )
+        XCTAssertEqual(direct.tileDimensions, custom)
+    }
 }

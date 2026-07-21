@@ -158,6 +158,7 @@ struct ROIScheduler {
         /// not execute its stale image-space rectangle until it projects on
         /// the current frame again.
         var isProjected: Bool
+        var isDetail: Bool
     }
 
     init(fullFrameInterval: TimeInterval = 20) {
@@ -246,6 +247,31 @@ struct ROIScheduler {
     var plannedRegions: [TableZoneID] { plannedZoneIDs }
     var deferredRegionCount: Int {
         max(0, fairQueue.pendingIDs.count - Set(plannedZoneIDs).count)
+    }
+
+    /// Queues shared semantic-region detail work for unresolved or weak-face
+    /// tracks. Work is grouped by region and goes through the same two-crop
+    /// fairness budget; this never creates a recognizer call per track.
+    mutating func requestDetailZones(
+        _ ids: Set<TableZoneID>,
+        projected zones: ZoneRects
+    ) {
+        let projected = Dictionary(uniqueKeysWithValues: zones.identified)
+        for id in ids {
+            guard let rect = projected[id] else { continue }
+            if var old = pending[id] {
+                old.rect = rect
+                old.isProjected = true
+                old.isDetail = true
+                pending[id] = old
+                fairQueue.setAvailable(true, for: id)
+            } else {
+                pending[id] = PendingCrop(
+                    rect: rect, isProjected: true, isDetail: true
+                )
+                fairQueue.enqueue(id)
+            }
+        }
     }
 
     /// Projects the tracker's fixed table-space zone geometry into
@@ -438,6 +464,12 @@ struct ROIScheduler {
         let projected = Dictionary(uniqueKeysWithValues: zones.identified)
         for id in pending.keys {
             guard var old = pending[id] else { continue }
+            if old.isDetail {
+                old.isProjected = Self.fractionInsideFrame(old.rect) > 0
+                fairQueue.setAvailable(old.isProjected, for: id)
+                pending[id] = old
+                continue
+            }
             if let current = projected[id] {
                 old.rect = current
                 old.isProjected = true
@@ -453,7 +485,9 @@ struct ROIScheduler {
                 old.rect = rect
                 pending[id] = old
             } else {
-                pending[id] = PendingCrop(rect: rect, isProjected: true)
+                pending[id] = PendingCrop(
+                    rect: rect, isProjected: true, isDetail: false
+                )
                 fairQueue.enqueue(id)
             }
         }
@@ -467,7 +501,9 @@ struct ROIScheduler {
                 old.rect = rect
                 pending[verificationZone] = old
             } else {
-                pending[verificationZone] = PendingCrop(rect: rect, isProjected: true)
+                pending[verificationZone] = PendingCrop(
+                    rect: rect, isProjected: true, isDetail: false
+                )
                 fairQueue.enqueue(verificationZone)
             }
         }

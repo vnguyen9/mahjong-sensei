@@ -232,6 +232,7 @@ public final class TableTracker {
     public func ingestCensus(
         _ snapshot: CensusSnapshot,
         tableExtent: SIMD2<Float>,
+        tileDimensions: PhysicalTileDimensions = .standard,
         at t: TimeInterval,
         motion: MotionSample? = nil
     ) -> IngestOutcome {
@@ -239,7 +240,8 @@ public final class TableTracker {
         store.synchronize(
             authoritative: CensusEventAdapter.tracks(
                 from: snapshot,
-                tableExtent: tableExtent
+                tableExtent: tableExtent,
+                tileDimensions: tileDimensions
             ),
             at: t
         )

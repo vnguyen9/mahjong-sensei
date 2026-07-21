@@ -9,7 +9,10 @@ import MahjongCore
 /// touching the logic that consumes them.
 public struct CensusConfig: Sendable {
     // MARK: Track birth (§9.1: "births for unmatched confident observations")
-    public var birthConfidenceThreshold: Float = 0.35
+    /// An observation may be decoded by the app at a lower threshold to
+    /// sustain an existing identity, but it needs this stronger evidence to
+    /// create a new physical tile. Coach Live uses 0.30 / 0.45 respectively.
+    public var birthConfidenceThreshold: Float = 0.45
 
     // MARK: Tentative → confirmed (§9.2)
     public var tentativeConfirmHits: Int = 3
@@ -29,7 +32,13 @@ public struct CensusConfig: Sendable {
     public var faceCostWeight: Float = 0.2
 
     // MARK: LiDAR world-space association
+    /// Tile dimensions are copied from `WorldTableCalibration` when the app
+    /// starts a calibrated census. Keeping a standard default makes the
+    /// package source-compatible for existing callers and tests.
+    public var tileDimensions: PhysicalTileDimensions = .standard
     public var worldMatchRadius: Float = 0.018
+    public var staleWorldReacquisitionRadius: Float = 0.022
+    public var tentativeDuplicateMergeRadius: Float = 0.010
     public var worldPositionEMAContribution: Float = 0.25
 
     // MARK: Face certainty (§9.3)
@@ -54,6 +63,10 @@ public struct CensusDiagnostics: Sendable, Equatable {
     public var strongFaceReads: Int = 0
     public var facePublications: Int = 0
     public var confidentFaceConflicts: Int = 0
+    public var primaryWorldMatches: Int = 0
+    public var staleWorldReacquisitions: Int = 0
+    public var suppressedReplacementBirths: Int = 0
+    public var tentativeDuplicateMerges: Int = 0
 
     public init() {}
 }
@@ -99,6 +112,11 @@ public final class PhysicalCensus {
         diagnostics.matches += association.matches.count
 
         for match in association.matches {
+            if match.isStaleReacquisition {
+                diagnostics.staleWorldReacquisitions += 1
+            } else if match.usesWorldGeometry {
+                diagnostics.primaryWorldMatches += 1
+            }
             applyHit(trackIndex: match.trackIndex, observation: batch.observations[match.observationIndex], at: time)
         }
         for trackIndex in association.unmatchedTrackIndices {
@@ -110,8 +128,13 @@ public final class PhysicalCensus {
                 diagnostics.retirements += 1
             }
         }
+        mergeTentativeDuplicates()
+
         for observationIndex in association.unmatchedObservationIndices {
-            if birth(from: batch.observations[observationIndex], at: time) {
+            let observation = batch.observations[observationIndex]
+            if shouldSuppressReplacementBirth(for: observation) {
+                diagnostics.suppressedReplacementBirths += 1
+            } else if birth(from: observation, at: time) {
                 diagnostics.births += 1
             }
         }
@@ -126,17 +149,13 @@ public final class PhysicalCensus {
             }
         }
 
-        // Ownership is re-derived for every live track, every ingest — purely
-        // geometric, never touched by face fusion (§10.1).
+        // Automatic ownership votes only on actual observations. Replaying an
+        // unchanged anchor while it is offscreen must not satisfy the
+        // three-consecutive-observation switch rule.
         for i in tracks.indices {
-            let zone = tracks[i].semanticZoneOverride
-                ?? OwnershipResolver.semanticZone(
-                    center: tracks[i].anchorCenter,
-                    footprintRadius: tracks[i].footprintRadius,
-                    zones: zones
-                )
-            tracks[i].semanticZone = zone
-            tracks[i].bucket = OwnershipResolver.bucket(for: zone)
+            guard tracks[i].semanticZoneOverride != nil
+                    || tracks[i].lastHitAt == time else { continue }
+            updateAutomaticOwnership(trackIndex: i, zones: zones)
         }
 
         recordCoverage(batch.coverage, at: time)
@@ -173,7 +192,7 @@ public final class PhysicalCensus {
             id: id,
             anchorCenter: tablePoint,
             worldPosition: worldPosition,
-            footprintRadius: 0.012,
+            footprintRadius: config.tileDimensions.footprintRadius,
             imageBox: TileBoundingBox(
                 x: Double(tablePoint.x),
                 y: Double(tablePoint.y),
@@ -242,6 +261,8 @@ public final class PhysicalCensus {
                 )
             tracks[i].semanticZone = zone
             tracks[i].bucket = OwnershipResolver.bucket(for: zone)
+            tracks[i].pendingAutomaticZone = nil
+            tracks[i].pendingAutomaticZoneHits = 0
         }
     }
 
@@ -350,6 +371,7 @@ public final class PhysicalCensus {
                 faceIsUserPinned: $0.isPinned,
                 requiresManualFaceResolution: $0.requiresManualFaceResolution,
                 semanticZone: $0.semanticZone,
+                semanticZoneIsUserOverridden: $0.semanticZoneOverride != nil,
                 lifecycle: $0.state,
                 firstSeen: $0.createdAt,
                 lastSeen: $0.lastHitAt
@@ -411,7 +433,7 @@ public final class PhysicalCensus {
         // this only matters for locator-only integration/tests.
         let center = observation.footprintCenter
             ?? SIMD2<Float>(Float(observation.box.centerX), Float(observation.box.centerY))
-        let radius = observation.footprintRadius ?? 0
+        let radius = observation.footprintRadius ?? config.tileDimensions.footprintRadius
 
         let id = CensusTrackID(nextTrackValue)
         nextTrackValue += 1
@@ -426,6 +448,118 @@ public final class PhysicalCensus {
         return true
     }
 
+    /// A stale world anchor is deliberately given a slightly wider recovery
+    /// gate. If an observation remains plausible for such an identity but was
+    /// not selected by the global one-to-one assignment, birthing a second
+    /// identity is more harmful than waiting for the next still frame.
+    private func shouldSuppressReplacementBirth(for observation: TileObservation) -> Bool {
+        guard observation.confidence >= config.birthConfidenceThreshold else { return false }
+        for track in tracks where track.state == .stale || track.state == .temporarilyMissing {
+            if let trackWorld = track.worldPosition,
+               let observationWorld = observation.worldPosition {
+                let radius = min(
+                    config.staleWorldReacquisitionRadius,
+                    config.tileDimensions.width * 0.95
+                )
+                if simd_distance(trackWorld, observationWorld) <= radius {
+                    return true
+                }
+            } else if let center = observation.footprintCenter {
+                let gate = max(
+                    config.gateCenterDistance,
+                    track.footprintRadius + (observation.footprintRadius ?? config.tileDimensions.footprintRadius)
+                ) + config.gateCenterSlack
+                if simd_distance(track.anchorCenter, center) <= gate {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /// Old depth views can create two tentative identities for the same tile
+    /// before either has enough hits to become visible. Merge only tentative
+    /// pairs inside a sub-tile radius; confirmed neighboring tiles are never
+    /// considered for this cleanup.
+    private func mergeTentativeDuplicates() {
+        let radius = min(
+            config.tentativeDuplicateMergeRadius,
+            config.tileDimensions.width * 0.45
+        )
+        guard radius > 0 else { return }
+
+        var merged = true
+        while merged {
+            merged = false
+            outer: for left in tracks.indices {
+                guard tracks[left].state == .tentative else { continue }
+                for right in tracks.indices.dropFirst(left + 1) {
+                    guard tracks[right].state == .tentative,
+                          tentativeDistance(tracks[left], tracks[right]) <= radius else { continue }
+                    mergeTentative(trackAt: left, with: right)
+                    diagnostics.tentativeDuplicateMerges += 1
+                    merged = true
+                    break outer
+                }
+            }
+        }
+    }
+
+    private func tentativeDistance(_ lhs: PhysicalTrack, _ rhs: PhysicalTrack) -> Float {
+        if let leftWorld = lhs.worldPosition, let rightWorld = rhs.worldPosition {
+            return simd_distance(leftWorld, rightWorld)
+        }
+        return simd_distance(lhs.anchorCenter, rhs.anchorCenter)
+    }
+
+    private func mergeTentative(trackAt firstIndex: Int, with secondIndex: Int) {
+        let (retainedIndex, duplicateIndex): (Int, Int) = tracks[firstIndex].id < tracks[secondIndex].id
+            ? (firstIndex, secondIndex)
+            : (secondIndex, firstIndex)
+        let duplicate = tracks[duplicateIndex]
+        var retained = tracks[retainedIndex]
+
+        if let duplicateWorld = duplicate.worldPosition {
+            if let retainedWorld = retained.worldPosition {
+                retained.worldPosition = (retainedWorld + duplicateWorld) * 0.5
+            } else {
+                retained.worldPosition = duplicateWorld
+            }
+        }
+        retained.anchorCenter = (retained.anchorCenter + duplicate.anchorCenter) * 0.5
+        retained.footprintRadius = max(retained.footprintRadius, duplicate.footprintRadius)
+        retained.lastHitAt = max(retained.lastHitAt, duplicate.lastHitAt)
+        retained.createdAt = min(retained.createdAt, duplicate.createdAt)
+        retained.recentOpportunities = Array(
+            (retained.recentOpportunities + duplicate.recentOpportunities)
+                .suffix(config.tentativeWindow)
+        )
+        retained.recentFaceEvidence = Array(
+            (retained.recentFaceEvidence + duplicate.recentFaceEvidence)
+                .suffix(config.faceSuggestionWindow)
+        )
+        retained.faceSupport = [:]
+        for evidence in retained.recentFaceEvidence {
+            retained.faceSupport[evidence.face, default: 0] += evidence.confidence
+        }
+        if let best = retained.faceSupport.max(by: { lhs, rhs in
+            lhs.value == rhs.value
+                ? String(describing: lhs.key) > String(describing: rhs.key)
+                : lhs.value < rhs.value
+        }) {
+            let peakConfidence = retained.recentFaceEvidence
+                .filter { $0.face == best.key }
+                .map(\.confidence)
+                .max() ?? 0
+            retained.faceSuggestion = CensusFaceSuggestion(
+                face: best.key,
+                confidence: min(1, max(0, peakConfidence))
+            )
+        }
+        tracks[retainedIndex] = retained
+        tracks.remove(at: duplicateIndex)
+    }
+
     private func recordFaceEvidence(
         _ observation: TileObservation,
         into track: inout PhysicalTrack
@@ -435,9 +569,8 @@ public final class PhysicalCensus {
                 max(0, hypothesis.confidence),
                 max(0, observation.confidence)
             )
-            if effectiveConfidence >= config.facePublicationConfidenceThreshold {
-                diagnostics.strongFaceReads += 1
-            } else {
+            if !observation.faceEvidenceQualifiesForPublication
+                || effectiveConfidence < config.facePublicationConfidenceThreshold {
                 diagnostics.lowConfidenceFaceCandidates += 1
             }
         }
@@ -445,16 +578,67 @@ public final class PhysicalCensus {
         switch FaceFusion.absorb(
             hypothesis: observation.faceHypothesis,
             observationConfidence: observation.confidence,
+            passID: observation.faceEvidencePassID
+                ?? UInt64(max(0, observation.frameID.value)),
+            qualifiesForPublication: observation.faceEvidenceQualifiesForPublication,
+            observedAt: observation.faceEvidenceTimestamp,
             into: &track,
             config: config
         ) {
         case .none:
             break
+        case .strongRead:
+            diagnostics.strongFaceReads += 1
         case .published:
+            diagnostics.strongFaceReads += 1
             diagnostics.facePublications += 1
         case .conflict:
+            diagnostics.strongFaceReads += 1
             diagnostics.confidentFaceConflicts += 1
         }
+    }
+
+    private func updateAutomaticOwnership(
+        trackIndex: Int,
+        zones: [SemanticZoneID: [SIMD2<Float>]]
+    ) {
+        if let override = tracks[trackIndex].semanticZoneOverride {
+            tracks[trackIndex].semanticZone = override
+            tracks[trackIndex].bucket = OwnershipResolver.bucket(for: override)
+            return
+        }
+        let proposed = OwnershipResolver.semanticZone(
+            center: tracks[trackIndex].anchorCenter,
+            footprintRadius: tracks[trackIndex].footprintRadius,
+            zones: zones
+        )
+        let current = tracks[trackIndex].semanticZone
+
+        if current == .boundaryUnresolved || proposed == current {
+            if proposed != .boundaryUnresolved {
+                tracks[trackIndex].semanticZone = proposed
+                tracks[trackIndex].bucket = OwnershipResolver.bucket(for: proposed)
+            }
+            tracks[trackIndex].pendingAutomaticZone = nil
+            tracks[trackIndex].pendingAutomaticZoneHits = 0
+            return
+        }
+
+        // A brief boundary result is measurement jitter, not evidence that a
+        // physical tile changed owner. A concrete different polygon must be
+        // seen in three consecutive observations before ownership moves.
+        guard proposed != .boundaryUnresolved else { return }
+        if tracks[trackIndex].pendingAutomaticZone == proposed {
+            tracks[trackIndex].pendingAutomaticZoneHits += 1
+        } else {
+            tracks[trackIndex].pendingAutomaticZone = proposed
+            tracks[trackIndex].pendingAutomaticZoneHits = 1
+        }
+        guard tracks[trackIndex].pendingAutomaticZoneHits >= 3 else { return }
+        tracks[trackIndex].semanticZone = proposed
+        tracks[trackIndex].bucket = OwnershipResolver.bucket(for: proposed)
+        tracks[trackIndex].pendingAutomaticZone = nil
+        tracks[trackIndex].pendingAutomaticZoneHits = 0
     }
 
     private func recordCoverage(_ coverage: CoverageMask, at time: TimeInterval) {

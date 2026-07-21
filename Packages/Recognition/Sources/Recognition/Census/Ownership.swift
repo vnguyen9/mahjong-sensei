@@ -28,13 +28,11 @@ enum OwnershipResolver {
         }
     }
 
-    /// Resolves one track's bucket from its footprint against the calibrated
-    /// zone polygons (anchor-local metres). Samples the footprint's center
-    /// and, when it has a nonzero radius, four cardinal points on its
-    /// boundary; if those samples disagree — the footprint straddles two
-    /// zones, or part of it falls outside every zone — the track is
-    /// `.unresolved` rather than guessed (§10.1: "footprint crossing an
-    /// ownership boundary beyond tolerance → unresolved").
+    /// Center-first ownership keeps a tile stable when its measured footprint
+    /// jitters across a boundary. A center inside exactly one polygon wins.
+    /// Outside all polygons, a uniquely nearest edge may snap within the
+    /// measured-tile tolerance; overlaps and equal-distance ambiguity remain
+    /// unresolved.
     static func resolve(center: SIMD2<Float>, footprintRadius: Float,
                         zones: [SemanticZoneID: [SIMD2<Float>]]) -> CensusBucket {
         bucket(for: semanticZone(center: center, footprintRadius: footprintRadius, zones: zones))
@@ -42,31 +40,47 @@ enum OwnershipResolver {
 
     static func semanticZone(center: SIMD2<Float>, footprintRadius: Float,
                              zones: [SemanticZoneID: [SIMD2<Float>]]) -> SemanticZoneID {
-        let samples = samplePoints(center: center, radius: footprintRadius)
-        var resolvedZones: Set<SemanticZoneID> = []
-        for point in samples {
-            resolvedZones.insert(zoneAtPoint(point, zones: zones))
+        let containing = zones.compactMap { zone, vertices in
+            pointInPolygon(center, vertices: vertices) ? zone : nil
         }
-        return resolvedZones.count == 1 ? resolvedZones.first! : .boundaryUnresolved
+        guard containing.count <= 1 else { return .boundaryUnresolved }
+        if let zone = containing.first { return zone }
+
+        let tolerance = min(0.008, max(0, footprintRadius * 2 / 3))
+        guard tolerance > 0 else { return .boundaryUnresolved }
+        let distances = zones.map { zone, vertices in
+            (zone, distance(center, to: vertices))
+        }.sorted {
+            if abs($0.1 - $1.1) > 0.000_001 { return $0.1 < $1.1 }
+            return String(describing: $0.0) < String(describing: $1.0)
+        }
+        guard let nearest = distances.first, nearest.1 <= tolerance else {
+            return .boundaryUnresolved
+        }
+        if distances.count > 1,
+           abs(distances[1].1 - nearest.1) <= 0.000_001 {
+            return .boundaryUnresolved
+        }
+        return nearest.0
     }
 
-    private static func zoneAtPoint(_ point: SIMD2<Float>,
-                                    zones: [SemanticZoneID: [SIMD2<Float>]]) -> SemanticZoneID {
-        var containingZones: Set<SemanticZoneID> = []
-        for (zoneID, vertices) in zones where pointInPolygon(point, vertices: vertices) {
-            containingZones.insert(zoneID)
+    private static func distance(
+        _ point: SIMD2<Float>,
+        to polygon: [SIMD2<Float>]
+    ) -> Float {
+        guard polygon.count >= 2 else { return .infinity }
+        var result = Float.infinity
+        for index in polygon.indices {
+            let start = polygon[index]
+            let end = polygon[(index + 1) % polygon.count]
+            let edge = end - start
+            let denominator = simd_length_squared(edge)
+            let t = denominator > 0
+                ? min(1, max(0, simd_dot(point - start, edge) / denominator))
+                : 0
+            result = min(result, simd_distance(point, start + edge * t))
         }
-        guard containingZones.count == 1 else { return .boundaryUnresolved }
-        return containingZones.first!
-    }
-
-    private static func samplePoints(center: SIMD2<Float>, radius: Float) -> [SIMD2<Float>] {
-        guard radius > 0 else { return [center] }
-        return [
-            center,
-            center + SIMD2(radius, 0), center + SIMD2(-radius, 0),
-            center + SIMD2(0, radius), center + SIMD2(0, -radius),
-        ]
+        return result
     }
 
     /// Even-odd ray-casting point-in-polygon test — the same rule as

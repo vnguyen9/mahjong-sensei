@@ -1,10 +1,14 @@
 # Coach Live — Authoritative ARKit World Census Handoff
 
-> **Source status (2026-07-20):** The authoritative census now stays on one
+> **Source status (2026-07-21):** The authoritative census now stays on one
 > persistent AR surface from marking through Live, exposes endpoint-defined
 > player regions, publishes unknown physical tiles, schedules every region
-> fairly, and requires depth-proven bare table before retirement. Recognition
-> has 307 tests; the universal iPhone/iPad iOS 26 Simulator build passes. The
+> fairly, and requires depth-proven bare table before retirement. Post-
+> calibration recognition is clipped to the calibrated table, uses split
+> 45% birth/30% continuation confidence, and publishes faces only from two
+> qualified 80% detail reads. Optional tile measurement drives every physical
+> geometry consumer. Recognition has 339 tests; iPhone and iPad iOS 26 Debug
+> and Release Simulator builds pass. The
 > M4 iPad/LiDAR
 > acceptance matrix in §9 remains a release gate
 > because Simulator testing cannot validate depth, physical anchor stability,
@@ -112,6 +116,8 @@ pondPolygon                    // exact marked polygon
 handPolygon                    // exact marked orientation
 revealedZoneMarks             // exact start/end/depth controls
 revealedZonePolygons
+tileDimensions                 // width, length, height
+tileDimensionsSource           // standard, measured, or manual
 source
 ```
 
@@ -134,6 +140,14 @@ Recenter Pond raycasts the tap into the same AR world, then atomically updates
 the table origin, polygons, semantic assignment, ROI geometry, overlays, and
 persistence. Recalibration replaces the active calibration in the same session
 and forces one full recount.
+
+Step 3 also contains an optional Tile Size card. Standard dimensions are
+24×32×16 mm. The user may measure one isolated face-up tile using five stable,
+depth-backed samples over at least one second, accept the preview explicitly,
+or adjust width/length manually in 1 mm increments. Rejected or skipped
+measurement never blocks calibration. A single `tileDimensions` value drives
+association gates, tile footprints, depth-empty sampling, crop margins,
+overlay geometry, and map presentation without restarting ARKit.
 
 ### iPadOS 26 image transform
 
@@ -169,10 +183,19 @@ For each detection:
 
 `PhysicalCensus` remains the only census implementation:
 
-- association radius: 18 mm;
+- birth confidence: 45%; existing-track continuation/reacquisition: 30%;
+- primary association radius: `min(18 mm, 0.75 × measured width)`;
+- stale/missing reacquisition radius:
+  `min(22 mm, 0.95 × measured width)`, mutual-best only;
 - position EMA: 25% new observation;
 - confirmation: three hits in five qualified opportunities;
 - retirement: five qualified misses and at least 0.8 seconds.
+
+Association is deterministic global one-to-one assignment rather than greedy
+nearest-neighbour matching. An unmatched observation close to a viable stale
+identity cannot immediately birth a replacement. Tentative duplicates may
+merge only within `min(10 mm, 0.45 × measured width)`; confirmed adjacent tiles
+are never merged.
 
 A miss is qualified only when the camera and image are still, AR tracking is
 normal, the exact executed ROI covers the anchor, and at least three
@@ -205,6 +228,28 @@ lives in `ROIScheduler`; deferred/offscreen work remains queued with age-based
 fairness, and DEBUG labels report only recognizer calls that actually executed.
 The census never invokes a recognizer.
 
+All production recognition after calibration is table-only. The calibrated
+table polygon is projected into the current oriented frame; the adaptive grid
+skips cells outside it, masks pixels outside the polygon, and rejects detection
+centres outside it. Semantic-region and detail work uses each exact projected
+polygon with one measured-tile margin, clipped to the table. Oversized work is
+subdivided so the tile short side reaches at least 32 model pixels. Unknown,
+conflicted, and weak-face tracks enter a fair shared detail queue, still under
+the two-crop normal-tick budget. Camera movement suspends Core ML while world
+anchors continue rendering; queued work runs immediately after settling. The
+20-second recovery pass is the same table-only adaptive grid, never a room-wide
+camera pass.
+
+Face evidence carries inference pass ID, pass kind, timestamp, crop, model-
+space tile size, and camera-still state. Broad discovery may maintain identity
+and improve suggestions, but cannot publish a face. Automatic publication
+requires two matching ≥80% depth-valid detail reads from distinct successful
+passes, at least 0.5 seconds apart, with a model-space short side of at least
+32 pixels. Duplicate boxes in one pass count once. Moving, undersized, broad,
+or low-confidence reads cannot advance or contradict publication. Two
+contradictory qualified detail reads return an automatic face to `?`; a
+user-pinned correction remains authoritative.
+
 Semantic ownership is deterministic:
 
 | Census zone | Published ownership |
@@ -215,6 +260,11 @@ Semantic ownership is deterministic:
 | left/far/right revealed | matching opponent meld |
 | `ignoredWall` | excluded |
 | boundary/outside | unresolved |
+
+Manual ownership always wins. Automatic ownership changes only after three
+observed votes inside a different polygon. Boundary jitter preserves the prior
+zone; a unique gap of at most `min(8 mm, tile width / 3)` snaps to the nearest
+polygon, while overlap/equal-distance ambiguity remains unresolved.
 
 The exact calibration polygons drive census ownership, ROI planning, production
 brackets, production overlays, and DEBUG overlays. Independent X/Z extents are
@@ -270,6 +320,16 @@ The DEBUG HUD and console expose:
 - depth, height, orientation, and geometry rejection reasons;
 - census processing time;
 - existing recognizer invocation count.
+- 30–44% continuation and ≥45% birth-eligible observations;
+- primary matches, stale reacquisitions, suppressed replacement births, and
+  tentative duplicate merges;
+- recognition pass ID/kind, crop pixels, model-space tile size, and Core ML
+  duration;
+- table-mask skipped cells and rejected outside-table boxes;
+- broad suggestions, qualified detail reads, face publications, and conflicts;
+- recount waiting/running/progress/completion state;
+- tile dimensions and standard/measured/manual source;
+- automatic, manually overridden, and unresolved ownership totals.
 
 The world-point overlay renders plane anchors at tile centers for device
 validation. Diagnostics never cause another inference.
@@ -294,12 +354,17 @@ Important files:
 | Visibility, occlusion, diagnostics, census controller | `App/Sources/Features/CoachLive/Capture/WorldCensusController.swift` |
 | Census-to-UI adapter | `App/Sources/Features/CoachLive/Capture/CensusStateAdapter.swift` |
 | Fair ROI and verification scheduler | `App/Sources/Features/CoachLive/Capture/ROIScheduler.swift` |
+| Table polygon masking and crop mapping | `App/Sources/Features/CoachLive/Capture/PixelBufferCropper.swift` |
+| Table-only adaptive tiled recognition | `App/Sources/Features/Tracker/TiledTileRecognizer.swift` |
 | Source transitions, loop, recounts, corrections | `App/Sources/Features/CoachLive/CoachLiveSession.swift` |
 | Shared raw/oriented transform | `Packages/Recognition/Sources/Recognition/Tracking/FrameImageTransform.swift` |
 | Projection/unprojection | `Packages/Recognition/Sources/Recognition/Tracking/TableProjection.swift` |
 | Depth sampling | `Packages/Recognition/Sources/Recognition/Tracking/DepthSampler.swift` |
 | Canonical guided calibration | `Packages/Recognition/Sources/Recognition/Census/WorldTableCalibration.swift` |
 | Physical identities/lifecycle | `Packages/Recognition/Sources/Recognition/Census/PhysicalCensus.swift` |
+| Deterministic global association | `Packages/Recognition/Sources/Recognition/Census/TrackAssociation.swift` |
+| Qualified face-read fusion | `Packages/Recognition/Sources/Recognition/Census/FaceFusion.swift` |
+| Optional tile measurement policy | `Packages/Recognition/Sources/Recognition/Tracking/TileSizeMeasurement.swift` |
 | Physical/unknown presentation | `Packages/Recognition/Sources/Recognition/Census/CensusPhysicalPresentation.swift` |
 | Tested deferred/verification policy | `Packages/Recognition/Sources/Recognition/Census/DeferredRegionWorkQueue.swift` |
 | Bare/occupied/occluded depth policy | `Packages/Recognition/Sources/Recognition/Census/TileFootprintDepthEvidence.swift` |
@@ -313,10 +378,13 @@ Verified locally:
 
 ```text
 swift test --package-path Packages/Recognition
-307 tests, 0 failures
+339 tests, 0 failures
 
 Xcode 26.5 SDK / deployment target iOS 26.0:
-- generic universal iPhone/iPad iOS Simulator build: passed (arm64 + x86_64)
+- iPhone iOS 26 Simulator Debug: passed
+- iPad iOS 26 Simulator Debug: passed
+- iPhone iOS 26 Simulator Release: passed
+- iPad iOS 26 Simulator Release: passed
 ```
 
 Coverage includes canonical transform construction, exact polygons, independent
@@ -327,6 +395,12 @@ ROI survival and starvation freedom, occupied/occluded depth holds, bare-plane
 classification, pan-away survival, exact fifth-miss retirement, deterministic
 corrections, source-safe event parity, old persistence rejection, and v3
 metadata round trip. The unrelated untracked `Modeling` directory is preserved.
+
+The 339-test suite additionally covers split 45/30 confidence, deterministic
+global assignment, stale mutual-best reacquisition and birth suppression,
+measured-width adjacency, broad-pass non-publication, unique-pass and 0.5-second
+face evidence, three-vote ownership changes, and accepted/rejected/reset tile
+measurement.
 
 Still required on an M4 iPad with LiDAR:
 
@@ -351,6 +425,16 @@ Still required on an M4 iPad with LiDAR:
 10. Hold tracking limited for five seconds: the last census snapshot remains,
     the same AR surface becomes editable, and session/reset counters do not
     change. Compare `inferencesRun`; census processing adds zero invocations.
+11. In low light, verify 30–44% boxes maintain existing identities but cannot
+    create dots; ≥45% detections create candidates only after normal census
+    confirmation. Pan away and return without replacement IDs.
+12. Trigger recount while moving and then settle: observe waiting animation,
+    progress, completion summary, and no room-outside-table inference.
+13. Measure one isolated tile and manually change width/length. Confirm the HUD
+    source/dimensions change and adjacent tiles remain separate.
+14. Present the same face in two sharp detail passes at least 0.5 seconds apart:
+    it publishes once. Confirm broad, moving, undersized, and same-pass reads do
+    not advance face certainty.
 
 These are physical-device gates, not deferred source work. Do not declare the
 LiDAR release accepted from Simulator results alone.

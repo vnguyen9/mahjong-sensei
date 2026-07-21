@@ -7,6 +7,7 @@ import MahjongCore
 enum FaceFusion {
     enum Outcome {
         case none
+        case strongRead
         case published
         case conflict
     }
@@ -17,6 +18,9 @@ enum FaceFusion {
     static func absorb(
         hypothesis: TileFaceHypothesis?,
         observationConfidence: Float,
+        passID: UInt64?,
+        qualifiesForPublication: Bool,
+        observedAt: TimeInterval?,
         into track: inout PhysicalTrack,
         config: CensusConfig
     ) -> Outcome {
@@ -36,11 +40,24 @@ enum FaceFusion {
             window: max(1, config.faceSuggestionWindow)
         )
 
-        guard confidence >= config.facePublicationConfidenceThreshold else {
+        guard qualifiesForPublication,
+              confidence >= config.facePublicationConfidenceThreshold else {
             return .none
         }
 
-        if track.strongFaceCandidate == topFace {
+        if let passID, track.lastStrongFacePassID == passID {
+            return .none
+        }
+
+        let candidateMatches = track.strongFaceCandidate == topFace
+        if candidateMatches,
+           let observedAt,
+           let previous = track.lastStrongFaceReadAt,
+           observedAt - previous < 0.5 {
+            return .none
+        }
+
+        if candidateMatches {
             track.strongFaceReadCount += 1
             track.strongFaceConfidence = min(track.strongFaceConfidence, confidence)
         } else {
@@ -48,9 +65,11 @@ enum FaceFusion {
             track.strongFaceReadCount = 1
             track.strongFaceConfidence = confidence
         }
+        track.lastStrongFacePassID = passID
+        track.lastStrongFaceReadAt = observedAt
 
         let requiredReads = max(1, config.requiredStrongFaceReads)
-        guard track.strongFaceReadCount >= requiredReads else { return .none }
+        guard track.strongFaceReadCount >= requiredReads else { return .strongRead }
         guard !track.requiresManualFaceResolution else { return .none }
 
         switch track.publishedFace {
@@ -64,7 +83,7 @@ enum FaceFusion {
                 track.publishedFaceConfidence,
                 track.strongFaceConfidence
             )
-            return .none
+            return .strongRead
 
         case .some:
             // Never silently switch an authoritative gameplay face. A second
@@ -86,6 +105,8 @@ enum FaceFusion {
         track.strongFaceCandidate = face
         track.strongFaceReadCount = 0
         track.strongFaceConfidence = 1
+        track.lastStrongFacePassID = nil
+        track.lastStrongFaceReadAt = nil
         track.requiresManualFaceResolution = false
         track.isPinned = true
     }

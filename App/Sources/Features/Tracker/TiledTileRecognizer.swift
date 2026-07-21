@@ -52,6 +52,7 @@ enum TiledTileRecognizer {
     static func recognize(buffer: CVPixelBuffer, roi: TileBoundingBox?,
                            minConfidence: Double = confidenceThreshold,
                            imageOrientation: CGImagePropertyOrientation = .right,
+                           clippingPolygon: [SIMD2<Double>]? = nil,
                            using recognize: (RecognizerFrame) async -> RecognitionResult) async -> [DetectedTile] {
         let orientedImageSize = RecognizerFrame.buffer(
             buffer,
@@ -64,12 +65,33 @@ enum TiledTileRecognizer {
         var merged: [DetectedTile] = []
         var anyCropSucceeded = false
 
+        let imageTransform = FrameImageTransform(
+            imageOrientation: imageOrientation,
+            imageResolution: imageResolution
+        )
+        let rawClippingPolygon = clippingPolygon?.map { point -> CGPoint in
+            let raw = imageTransform.rawNormalized(fromOriented: point)
+            return CGPoint(
+                x: raw.x * imageResolution.width,
+                y: raw.y * imageResolution.height
+            )
+        }
+
         for cell in gridCells(over: region) {
+            if let clippingPolygon,
+               !polygonIntersectsRect(clippingPolygon, cell) {
+                continue
+            }
             let cropRect = ROICropMapper.cropRect(forZoneImageRect: cell, orientedImageSize: orientedImageSize,
                                                    imageResolution: imageResolution,
                                                    imageOrientation: imageOrientation,
                                                    padding: overlap)
-            guard cropRect != .zero, let crop = cropper.crop(buffer, to: cropRect) else { continue }
+            guard cropRect != .zero,
+                  let crop = cropper.crop(
+                    buffer,
+                    to: cropRect,
+                    clippingPolygon: rawClippingPolygon
+                  ) else { continue }
             anyCropSucceeded = true
             let result = await recognize(RecognizerFrame.buffer(crop, orientation: imageOrientation))
             for det in result.tiles {
@@ -82,13 +104,28 @@ enum TiledTileRecognizer {
         }
 
         guard anyCropSucceeded else {
+            // A calibrated-table request must never fall back to feeding the
+            // whole room to Core ML when projection/cropping fails.
+            if clippingPolygon != nil { return [] }
             // Fallback: a single full-frame recognize, filtered to roi — never
             // worse than today's non-tiled path.
             let result = await recognize(RecognizerFrame.buffer(buffer, orientation: imageOrientation))
             return accepting(result.keepingTiles(insideROI: roi).tiles, minConfidence: minConfidence)
         }
 
-        return accepting(deduplicatingOverlaps(merged), minConfidence: minConfidence)
+        var accepted = accepting(
+            deduplicatingOverlaps(merged),
+            minConfidence: minConfidence
+        )
+        if let clippingPolygon {
+            accepted.removeAll {
+                !pointInPolygon(
+                    SIMD2($0.box.centerX, $0.box.centerY),
+                    vertices: clippingPolygon
+                )
+            }
+        }
+        return accepted
     }
 
     /// Confidence + box-area gate — used after tiled NMS and on the photo
@@ -119,6 +156,56 @@ enum TiledTileRecognizer {
             }
         }
         return cells
+    }
+
+    private static func polygonIntersectsRect(
+        _ polygon: [SIMD2<Double>],
+        _ rect: TileBoundingBox
+    ) -> Bool {
+        let corners = [
+            SIMD2(rect.x, rect.y),
+            SIMD2(rect.x + rect.width, rect.y),
+            SIMD2(rect.x + rect.width, rect.y + rect.height),
+            SIMD2(rect.x, rect.y + rect.height),
+        ]
+        if corners.contains(where: { pointInPolygon($0, vertices: polygon) }) {
+            return true
+        }
+        if polygon.contains(where: {
+            $0.x >= rect.x && $0.x <= rect.x + rect.width
+                && $0.y >= rect.y && $0.y <= rect.y + rect.height
+        }) {
+            return true
+        }
+        // The projected table is convex. An AABB overlap is therefore a safe
+        // conservative fallback for an edge crossing with no contained
+        // vertex; masking still prevents any out-of-table pixels reaching ML.
+        guard let minX = polygon.map(\.x).min(),
+              let maxX = polygon.map(\.x).max(),
+              let minY = polygon.map(\.y).min(),
+              let maxY = polygon.map(\.y).max() else { return false }
+        return rect.x < maxX && rect.x + rect.width > minX
+            && rect.y < maxY && rect.y + rect.height > minY
+    }
+
+    private static func pointInPolygon(
+        _ point: SIMD2<Double>,
+        vertices: [SIMD2<Double>]
+    ) -> Bool {
+        guard vertices.count >= 3 else { return false }
+        var inside = false
+        var j = vertices.count - 1
+        for i in vertices.indices {
+            let a = vertices[i]
+            let b = vertices[j]
+            if (a.y > point.y) != (b.y > point.y) {
+                let edgeX = (b.x - a.x) * (point.y - a.y)
+                    / (b.y - a.y) + a.x
+                if point.x < edgeX { inside.toggle() }
+            }
+            j = i
+        }
+        return inside
     }
 
     // MARK: - Dedupe (greedy class-agnostic NMS + same-class center rule)

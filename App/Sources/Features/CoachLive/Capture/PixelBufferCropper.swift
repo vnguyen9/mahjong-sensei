@@ -40,7 +40,11 @@ final class PixelBufferCropper {
     /// one). Returns `nil` for a degenerate rect or a render failure —
     /// callers fall back to skipping that crop (same "crop failed → don't
     /// ingest garbage" contract `ScanView.croppedFrame` already uses).
-    func crop(_ buffer: CVPixelBuffer, to rect: CGRect) -> CVPixelBuffer? {
+    func crop(
+        _ buffer: CVPixelBuffer,
+        to rect: CGRect,
+        clippingPolygon: [CGPoint]? = nil
+    ) -> CVPixelBuffer? {
         guard rect.width >= 2, rect.height >= 2 else { return nil }
         let bufferHeight = CGFloat(CVPixelBufferGetHeight(buffer))
         let format = CVPixelBufferGetPixelFormatType(buffer)
@@ -58,9 +62,80 @@ final class PixelBufferCropper {
         // Render into the pooled buffer's own (0,0)-origin frame — translate
         // the crop's (nonzero) extent origin back to zero first, or the
         // render below would sample the wrong region.
-        let translated = cropped.transformed(by: CGAffineTransform(translationX: -ciRect.minX, y: -ciRect.minY))
-        ciContext.render(translated, to: pooled, bounds: CGRect(origin: .zero, size: rect.size), colorSpace: nil)
+        var translated = cropped.transformed(
+            by: CGAffineTransform(translationX: -ciRect.minX, y: -ciRect.minY)
+        )
+        if let clippingPolygon,
+           let mask = polygonMask(
+                fullImagePoints: clippingPolygon,
+                cropRect: rect
+           ) {
+            let bounds = CGRect(origin: .zero, size: rect.size)
+            let neutral = CIImage(
+                color: CIColor(red: 0.5, green: 0.5, blue: 0.5)
+            ).cropped(to: bounds)
+            translated = translated.applyingFilter(
+                "CIBlendWithMask",
+                parameters: [
+                    kCIInputBackgroundImageKey: neutral,
+                    kCIInputMaskImageKey: mask,
+                ]
+            )
+        }
+        ciContext.render(
+            translated,
+            to: pooled,
+            bounds: CGRect(origin: .zero, size: rect.size),
+            colorSpace: nil
+        )
         return pooled
+    }
+
+    /// Builds a one-channel crop-local mask from a polygon expressed in the
+    /// captured buffer's native, top-left-origin pixel coordinates. Pixels
+    /// outside the calibrated table are replaced with neutral gray before
+    /// Vision sees the crop; the model never receives the surrounding room.
+    private func polygonMask(
+        fullImagePoints: [CGPoint],
+        cropRect: CGRect
+    ) -> CIImage? {
+        guard fullImagePoints.count >= 3 else { return nil }
+        let width = Int(cropRect.width.rounded())
+        let height = Int(cropRect.height.rounded())
+        guard width >= 2, height >= 2 else { return nil }
+
+        var bytes = [UInt8](repeating: 0, count: width * height)
+        guard let context = CGContext(
+            data: &bytes,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return nil }
+
+        // Match the app's native-pixel convention (+y downward).
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: 1, y: -1)
+        context.setFillColor(gray: 1, alpha: 1)
+        context.beginPath()
+        let first = CGPoint(
+            x: fullImagePoints[0].x - cropRect.minX,
+            y: fullImagePoints[0].y - cropRect.minY
+        )
+        context.move(to: first)
+        for point in fullImagePoints.dropFirst() {
+            context.addLine(to: CGPoint(
+                x: point.x - cropRect.minX,
+                y: point.y - cropRect.minY
+            ))
+        }
+        context.closePath()
+        context.fillPath()
+
+        guard let image = context.makeImage() else { return nil }
+        return CIImage(cgImage: image)
     }
 
     private func pooledBuffer(size: CGSize, format: OSType) -> CVPixelBuffer? {

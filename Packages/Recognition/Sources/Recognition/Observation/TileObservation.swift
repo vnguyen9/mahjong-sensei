@@ -1,3 +1,4 @@
+import Foundation
 import simd
 
 /// One localized (and, once fused, classified) tile sighting in a single
@@ -23,6 +24,13 @@ public struct TileObservation: Sendable, Hashable {
     /// Median camera-axis depth at the detected tile surface. Identity uses
     /// `worldPosition`, which is projected onto the table plane.
     public var measuredSurfaceDepth: Float?
+    /// Recognition provenance used to distinguish repeated boxes from
+    /// genuinely independent, publication-quality detail reads. Broad
+    /// discovery observations may still improve suggestions while setting
+    /// `faceEvidenceQualifiesForPublication` to false.
+    public var faceEvidencePassID: UInt64?
+    public var faceEvidenceQualifiesForPublication: Bool
+    public var faceEvidenceTimestamp: TimeInterval?
 
     public init(frameID: FrameID,
                 box: TileBoundingBox,
@@ -32,7 +40,10 @@ public struct TileObservation: Sendable, Hashable {
                 footprintCenter: SIMD2<Float>? = nil,
                 footprintRadius: Float? = nil,
                 worldPosition: SIMD3<Float>? = nil,
-                measuredSurfaceDepth: Float? = nil) {
+                measuredSurfaceDepth: Float? = nil,
+                faceEvidencePassID: UInt64? = nil,
+                faceEvidenceQualifiesForPublication: Bool = true,
+                faceEvidenceTimestamp: TimeInterval? = nil) {
         self.frameID = frameID
         self.box = box
         self.confidence = confidence
@@ -42,5 +53,8 @@ public struct TileObservation: Sendable, Hashable {
         self.footprintRadius = footprintRadius
         self.worldPosition = worldPosition
         self.measuredSurfaceDepth = measuredSurfaceDepth
+        self.faceEvidencePassID = faceEvidencePassID
+        self.faceEvidenceQualifiesForPublication = faceEvidenceQualifiesForPublication
+        self.faceEvidenceTimestamp = faceEvidenceTimestamp
     }
 }

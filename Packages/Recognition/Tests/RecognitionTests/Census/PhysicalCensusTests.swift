@@ -26,9 +26,15 @@ final class PhysicalCensusTests: XCTestCase {
     private static func observation(center: SIMD2<Float>, radius: Float = 0.02,
                                     box: TileBoundingBox = TileBoundingBox(x: 0.1, y: 0.1, width: 0.05, height: 0.08),
                                     face: TileFaceHypothesis? = nil, confidence: Float = 0.9,
-                                    frame: Int = 0) -> TileObservation {
+                                    frame: Int = 0,
+                                    passID: UInt64? = nil,
+                                    qualifies: Bool = true,
+                                    observedAt: TimeInterval? = nil) -> TileObservation {
         TileObservation(frameID: FrameID(frame), box: box, confidence: confidence, poseHint: .flat,
-                        faceHypothesis: face, footprintCenter: center, footprintRadius: radius)
+                        faceHypothesis: face, footprintCenter: center, footprintRadius: radius,
+                        faceEvidencePassID: passID,
+                        faceEvidenceQualifiesForPublication: qualifies,
+                        faceEvidenceTimestamp: observedAt)
     }
 
     private static func hypothesis(top: TileFace, topProb: Float, alt: TileFace,
@@ -162,6 +168,101 @@ final class PhysicalCensusTests: XCTestCase {
         XCTAssertNil(census.tracks.first?.publishedFace)
         XCTAssertEqual(census.tracks.first?.strongFaceReadCount, 0)
         XCTAssertEqual(census.tracks.first?.faceSuggestion?.face, faceA)
+    }
+
+    func testBroadStrongReadsSuggestButNeverPublish() {
+        var config = CensusConfig()
+        config.birthConfidenceThreshold = 0.45
+        let census = PhysicalCensus(config: config)
+        let faceA = TileFace.tile(.m(2))
+        let faceB = TileFace.tile(.p(2))
+        let hypothesis = Self.hypothesis(
+            top: faceA, topProb: 0.95, alt: faceB, altProb: 0.05
+        )
+        for frame in 0..<3 {
+            let observation = Self.observation(
+                center: SIMD2(2, 0.5), face: hypothesis, confidence: 0.95,
+                frame: frame, passID: UInt64(frame), qualifies: false,
+                observedAt: Double(frame)
+            )
+            census.ingest(.success(ObservationBatch(
+                frameID: FrameID(frame), observations: [observation],
+                coverage: CoverageMask(), quality: Self.acceptedQuality()
+            )), zones: [:], at: Double(frame))
+        }
+        XCTAssertEqual(census.tracks.first?.faceSuggestion?.face, faceA)
+        XCTAssertNil(census.tracks.first?.publishedFace)
+        XCTAssertEqual(census.tracks.first?.strongFaceReadCount, 0)
+    }
+
+    func testIndependentDetailPassesNeedHalfSecondSeparation() {
+        var config = CensusConfig()
+        config.birthConfidenceThreshold = 0.45
+        let census = PhysicalCensus(config: config)
+        let faceA = TileFace.tile(.m(3))
+        let faceB = TileFace.tile(.p(3))
+        let hypothesis = Self.hypothesis(
+            top: faceA, topProb: 0.90, alt: faceB, altProb: 0.10
+        )
+        func read(frame: Int, pass: UInt64, time: TimeInterval) {
+            let observation = Self.observation(
+                center: SIMD2(2, 0.5), face: hypothesis, confidence: 0.90,
+                frame: frame, passID: pass, qualifies: true,
+                observedAt: time
+            )
+            census.ingest(.success(ObservationBatch(
+                frameID: FrameID(frame), observations: [observation],
+                coverage: CoverageMask(), quality: Self.acceptedQuality()
+            )), zones: [:], at: time)
+        }
+        read(frame: 0, pass: 10, time: 0)
+        read(frame: 1, pass: 10, time: 0.6)
+        XCTAssertEqual(census.tracks.first?.strongFaceReadCount, 1)
+        read(frame: 2, pass: 11, time: 0.4)
+        XCTAssertEqual(census.tracks.first?.strongFaceReadCount, 1)
+        read(frame: 3, pass: 12, time: 0.6)
+        XCTAssertEqual(census.tracks.first?.publishedFace, faceA)
+    }
+
+    func testAutomaticOwnershipNeedsThreeObservedVotesToCrossBoundary() {
+        var config = CensusConfig()
+        config.birthConfidenceThreshold = 0.45
+        let census = PhysicalCensus(config: config)
+        let left: [SIMD2<Float>] = [
+            SIMD2(0, 0), SIMD2(0.5, 0), SIMD2(0.5, 1), SIMD2(0, 1),
+        ]
+        let right: [SIMD2<Float>] = [
+            SIMD2(0.5, 0), SIMD2(1, 0), SIMD2(1, 1), SIMD2(0.5, 1),
+        ]
+        let zones: [SemanticZoneID: [SIMD2<Float>]] = [
+            .tablePond: left,
+            .mineHand: right,
+        ]
+        _ = ingestRepeatedHits(
+            census, center: SIMD2(0.45, 0.5), hits: 3,
+            hypothesis: nil, zones: zones, startFrame: 0, startTime: 0
+        )
+        XCTAssertEqual(census.tracks.first?.semanticZone, .tablePond)
+
+        for vote in 1...2 {
+            let observation = Self.observation(
+                center: SIMD2(0.55, 0.5), confidence: 0.9,
+                frame: 10 + vote
+            )
+            census.ingest(.success(ObservationBatch(
+                frameID: FrameID(10 + vote), observations: [observation],
+                coverage: CoverageMask(), quality: Self.acceptedQuality()
+            )), zones: zones, at: 1 + Double(vote) * 0.1)
+            XCTAssertEqual(census.tracks.first?.semanticZone, .tablePond)
+        }
+        let third = Self.observation(
+            center: SIMD2(0.55, 0.5), confidence: 0.9, frame: 13
+        )
+        census.ingest(.success(ObservationBatch(
+            frameID: FrameID(13), observations: [third],
+            coverage: CoverageMask(), quality: Self.acceptedQuality()
+        )), zones: zones, at: 1.3)
+        XCTAssertEqual(census.tracks.first?.semanticZone, .mineHand)
     }
 
     func testSecondMatchingPoint80ReadPublishesFace() {

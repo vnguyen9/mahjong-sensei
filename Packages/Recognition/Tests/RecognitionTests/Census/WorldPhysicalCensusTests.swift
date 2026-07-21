@@ -72,6 +72,184 @@ final class WorldPhysicalCensusTests: XCTestCase {
         XCTAssertEqual(census.diagnostics.matches, 3)
     }
 
+    func testSplitThresholdRequiresPoint45ForBirthButAllowsPoint30ToConfirmExistingTrack() {
+        var config = CensusConfig()
+        config.birthConfidenceThreshold = 0.45
+        let census = PhysicalCensus(config: config)
+        let point = SIMD3<Float>(0, 0, 0)
+
+        ingest([
+            TileObservation(
+                frameID: FrameID(0),
+                box: TileBoundingBox(x: 0.4, y: 0.4, width: 0.05, height: 0.08),
+                confidence: 0.30,
+                poseHint: .flat,
+                footprintCenter: SIMD2(0, 0),
+                footprintRadius: 0.012,
+                worldPosition: point
+            ),
+        ], into: census, frame: 0, time: 0)
+        XCTAssertTrue(census.tracks.isEmpty)
+
+        ingest([observation(point, frame: 1)], into: census, frame: 1, time: 0.1)
+        for frame in 2...3 {
+            ingest([
+                TileObservation(
+                    frameID: FrameID(frame),
+                    box: TileBoundingBox(x: 0.4, y: 0.4, width: 0.05, height: 0.08),
+                    confidence: 0.30,
+                    poseHint: .flat,
+                    footprintCenter: SIMD2(0, 0),
+                    footprintRadius: 0.012,
+                    worldPosition: point
+                ),
+            ], into: census, frame: frame, time: Double(frame) * 0.1)
+        }
+
+        XCTAssertEqual(census.tracks.count, 1)
+        XCTAssertEqual(census.tracks.first?.state, .confirmed)
+        XCTAssertEqual(census.diagnostics.births, 1)
+        XCTAssertEqual(census.diagnostics.matches, 2)
+    }
+
+    func testStaleTrackReacquiresWithinDimensionDerivedRecoveryRadiusWithoutReplacementBirth() {
+        let census = PhysicalCensus()
+        let original = SIMD3<Float>(0, 0, 0)
+        for frame in 0..<3 {
+            ingest([observation(original, frame: frame)], into: census, frame: frame, time: Double(frame) * 0.1)
+        }
+        let id = CensusTrackID(0)
+        ingest([], into: census, frame: 3, time: 0.3)
+        XCTAssertEqual(census.tracks.first?.state, .stale)
+
+        // 20 mm is beyond the primary 18 mm gate, but within the bounded
+        // 22 mm stale recovery gate for standard 24 mm tiles.
+        ingest([observation(SIMD3(0.020, 0, 0), frame: 4)], into: census, frame: 4, time: 0.4)
+
+        XCTAssertEqual(census.tracks.count, 1)
+        XCTAssertEqual(census.tracks.first?.id, id)
+        XCTAssertEqual(census.tracks.first?.state, .confirmed)
+        XCTAssertEqual(census.diagnostics.staleWorldReacquisitions, 1)
+        XCTAssertEqual(census.diagnostics.births, 1)
+    }
+
+    func testObservationNearAmbiguousStaleTrackDoesNotBirthReplacementIdentity() {
+        let census = PhysicalCensus()
+        for frame in 0..<3 {
+            ingest(
+                [
+                    observation(SIMD3(0, 0, 0), frame: frame, x: 0.4),
+                    observation(SIMD3(0.030, 0, 0), frame: frame, x: 0.5),
+                ],
+                into: census,
+                frame: frame,
+                time: Double(frame) * 0.1
+            )
+        }
+
+        // Keep the right-hand track observed while the left-hand track goes
+        // stale. This models panning/reprojection noise rather than a known
+        // empty location.
+        ingest([observation(SIMD3(0.030, 0, 0), frame: 3, x: 0.5)], into: census, frame: 3, time: 0.3)
+        XCTAssertEqual(census.tracks.first?.state, .stale)
+
+        // The 19 mm observation is viable for the stale left track but a
+        // better primary match for the right track. The global solver assigns
+        // the right track to the 21 mm observation, leaving this one
+        // ambiguous; it must wait, not create a third physical identity.
+        ingest(
+            [
+                observation(SIMD3(0.019, 0, 0), frame: 4, x: 0.4),
+                observation(SIMD3(0.021, 0, 0), frame: 4, x: 0.5),
+            ],
+            into: census,
+            frame: 4,
+            time: 0.4
+        )
+
+        XCTAssertEqual(census.tracks.count, 2)
+        XCTAssertEqual(census.diagnostics.births, 2)
+        XCTAssertEqual(census.diagnostics.suppressedReplacementBirths, 1)
+    }
+
+    func testCustomTileDimensionsDriveFootprintAndKeepTwentyFourMillimeterNeighborsDistinct() {
+        var config = CensusConfig()
+        config.tileDimensions = PhysicalTileDimensions(width: 0.030, length: 0.040, height: 0.018)
+        let census = PhysicalCensus(config: config)
+        let unsizedObservation = TileObservation(
+            frameID: FrameID(-1),
+            box: TileBoundingBox(x: 0.2, y: 0.2, width: 0.05, height: 0.08),
+            confidence: 0.9,
+            poseHint: .flat,
+            footprintCenter: SIMD2(-0.10, 0),
+            worldPosition: SIMD3(-0.10, 0, 0)
+        )
+        ingest([unsizedObservation], into: census, frame: -1, time: -0.1)
+        XCTAssertEqual(census.tracks.first?.footprintRadius, 0.015)
+
+        census.resetTiles()
+        for frame in 0..<3 {
+            ingest(
+                [
+                    observation(SIMD3(0, 0, 0), frame: frame, x: 0.4),
+                    observation(SIMD3(0.024, 0, 0), frame: frame, x: 0.5),
+                ],
+                into: census,
+                frame: frame,
+                time: Double(frame) * 0.1
+            )
+        }
+
+        XCTAssertEqual(census.tracks.count, 2)
+        XCTAssertEqual(config.tileDimensions.footprintRadius, 0.015)
+    }
+
+    func testGlobalAssignmentAvoidsGreedyCrossPairingInDenseImageSpace() {
+        let track0 = PhysicalTrack(
+            id: CensusTrackID(0),
+            anchorCenter: .zero,
+            footprintRadius: 0.012,
+            imageBox: TileBoundingBox(x: 0, y: 0, width: 14, height: 10),
+            at: 0
+        )
+        let track1 = PhysicalTrack(
+            id: CensusTrackID(1),
+            anchorCenter: .zero,
+            footprintRadius: 0.012,
+            imageBox: TileBoundingBox(x: 0, y: 0, width: 6.1, height: 10),
+            at: 0
+        )
+        let observations = [
+            TileObservation(
+                frameID: FrameID(1),
+                box: TileBoundingBox(x: 0, y: 0, width: 10, height: 10),
+                confidence: 0.9
+            ),
+            TileObservation(
+                frameID: FrameID(1),
+                box: TileBoundingBox(x: 6, y: 0, width: 10, height: 10),
+                confidence: 0.9
+            ),
+        ]
+        var config = CensusConfig()
+        config.centerCostWeight = 0
+        config.footprintCostWeight = 0
+        config.imageCostWeight = 1
+        config.faceCostWeight = 0
+
+        let result = TrackAssociator.associate(
+            tracks: [track0, track1],
+            observations: observations,
+            config: config
+        )
+
+        XCTAssertEqual(result.matches.count, 2)
+        XCTAssertEqual(result.matches.first?.trackIndex, 0)
+        XCTAssertEqual(result.matches.first?.observationIndex, 1)
+        XCTAssertEqual(result.matches.last?.trackIndex, 1)
+        XCTAssertEqual(result.matches.last?.observationIndex, 0)
+    }
+
     func test_adjacentTilesOutsideWorldGateStayDistinct() {
         let census = PhysicalCensus()
         for frame in 0..<3 {

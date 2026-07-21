@@ -2,6 +2,47 @@ import SwiftUI
 import DesignSystem
 import MahjongCore
 
+/// The user-visible scope of a one-shot Coach Live recount. This stays
+/// independent from the ROI scheduler's internal plan so presentation never
+/// has to infer progress from detector cadence.
+enum RecountScope: Equatable {
+    case fullTable
+    case pond
+    case hand
+}
+
+/// A short, truthful result for the non-modal completion acknowledgement.
+/// Counts are deltas from the snapshot present when the request was accepted.
+struct RecountSummary: Equatable {
+    var updatedTrackCount: Int
+    var unresolvedFaceCount: Int
+
+    var userFacingText: String {
+        let updatedNoun = updatedTrackCount == 1 ? "tile" : "tiles"
+        let updated = "\(updatedTrackCount) \(updatedNoun) updated"
+        guard unresolvedFaceCount > 0 else { return updated }
+        let unresolvedNoun = unresolvedFaceCount == 1 ? "face" : "faces"
+        return "\(updated) · \(unresolvedFaceCount) \(unresolvedNoun) need review"
+    }
+}
+
+/// State published by `CoachLiveSession` while a user-requested recount waits
+/// for stillness, executes bounded recognition work, and reports its result.
+enum CoachLiveRecountState: Equatable {
+    case idle
+    case waitingForStill(RecountScope)
+    case running(RecountScope, completed: Int, total: Int)
+    case completed(RecountSummary)
+    case failed(String)
+
+    var isActive: Bool {
+        switch self {
+        case .waitingForStill, .running: true
+        case .idle, .completed, .failed: false
+        }
+    }
+}
+
 /// The live-feed pane (UI plan §7). The camera preview is a **fixed,
 /// full-screen** layer — only the pane's clip height animates as the split
 /// breathes, so the `AVCaptureVideoPreviewLayer` never relayouts (no per-frame
@@ -51,6 +92,10 @@ struct LiveFeedPane: View {
     /// ("Recount everything / Just the pond / Just my hand") instead of
     /// firing the FAB's default tap action.
     @State private var showRecountMenu = false
+    /// The recount control is deliberately stateful: waiting for a still frame
+    /// is useful work, not a dead tap. `CoachLiveSession` owns the truth while
+    /// this view only supplies the visible acknowledgement.
+    @State private var recountSymbolTurns = 0
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -151,6 +196,12 @@ struct LiveFeedPane: View {
         .animation(.easeInOut(duration: 0.25), value: blursFeed)
         .animation(.easeInOut(duration: 0.4), value: showCalibratedToast)
         .animation(.easeInOut(duration: 0.25), value: session.isRelocalizing)
+        .onChange(of: session.recountState) { _, state in
+            guard state.isActive else { return }
+            withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
+                recountSymbolTurns += 1
+            }
+        }
         .onAppear {
             withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) { pulse = true }
             #if !targetEnvironment(simulator)
@@ -171,9 +222,9 @@ struct LiveFeedPane: View {
             }
         }
         .confirmationDialog("Force recount", isPresented: $showRecountMenu, titleVisibility: .visible) {
-            Button("Recount everything") { session.requestRecount() }
-            Button("Just the pond") { session.requestRecount(zone: .pond) }
-            Button("Just my hand") { session.requestRecount(zone: .hand) }
+            Button("Recount everything") { requestRecount() }
+            Button("Just the pond") { requestRecount(zone: .pond) }
+            Button("Just my hand") { requestRecount(zone: .hand) }
             Button("Cancel", role: .cancel) {}
         }
     }
@@ -230,10 +281,46 @@ struct LiveFeedPane: View {
             }
             .overlay { Circle().strokeBorder(MJColor.gold(0.35), lineWidth: 1) }
             .contentShape(Circle())
-            .onTapGesture { session.requestRecount() }
+            .rotationEffect(.degrees(session.recountState.isActive ? 360 : 0))
+            .animation(
+                session.recountState.isActive
+                    ? .linear(duration: 0.9).repeatForever(autoreverses: false)
+                    : .easeOut(duration: 0.2),
+                value: recountSymbolTurns
+            )
+            .opacity(session.recountState.isActive ? 0.78 : 1)
+            .onTapGesture { requestRecount() }
             .onLongPressGesture(minimumDuration: 0.5) { showRecountMenu = true }
-            .accessibilityLabel("Force recount")
-            .accessibilityHint("Double tap to recount everything; touch and hold for more options")
+            .accessibilityLabel(recountAccessibilityLabel)
+            .accessibilityValue(recountStatusText ?? "Ready")
+            .accessibilityHint(session.recountState.isActive
+                ? "A recount is already in progress."
+                : "Double tap to recount everything; touch and hold for more options")
+    }
+
+    private func requestRecount(zone: TableZoneID? = nil) {
+        guard !session.recountState.isActive else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        session.requestRecount(zone: zone)
+    }
+
+    private var recountAccessibilityLabel: String {
+        session.recountState.isActive ? "Recount in progress" : "Force recount"
+    }
+
+    private var recountStatusText: String? {
+        switch session.recountState {
+        case .idle:
+            nil
+        case .waitingForStill:
+            "Hold still to recount"
+        case let .running(_, completed, total):
+            total > 1 ? "Recounting table… \(completed) of \(total)" : "Recounting table…"
+        case let .completed(summary):
+            summary.userFacingText
+        case let .failed(message):
+            message
+        }
     }
 
     // MARK: - Fixed feed layer
@@ -274,7 +361,10 @@ struct LiveFeedPane: View {
             // chain (spec screen 15) — it's persistent (stays up the whole
             // time `usingFallbackCapture` is true) but yields to anything
             // more urgent/actionable above it.
-            if session.cameraMoving {
+            if let recountStatusText {
+                recountStatusChip(recountStatusText)
+                    .transition(.opacity)
+            } else if session.cameraMoving {
                 holdSteadyChip
                     .transition(.opacity)
             } else if let prompt = session.rescanPrompt {
@@ -287,13 +377,11 @@ struct LiveFeedPane: View {
                 fallbackCaptureChip
                     .transition(.opacity)
             }
-            // Workstream G: always-available recalibrate link (spec screen
-            // 14/15's "Recalibrate" affordance) — AR-active only, same gate
-            // `CoachLiveView`'s state-pane "Rescan table" link already uses,
-            // since re-entering `ARCalibrationView` needs a live `arCapture`
-            // (see `beginARCalibration()`).
+            // Returning to edit mode preserves this AR surface and session;
+            // it is not a new calibration handoff.
             if session.isARCaptureActive {
                 recalibrateLink
+                trackingMarkerLegend
             }
             if showHUD {
                 debugHUD.frame(maxWidth: .infinity, alignment: .leading)
@@ -326,6 +414,36 @@ struct LiveFeedPane: View {
             Capsule().fill(Color(hex: 0x0A241D, alpha: 0.6))
         }
         .overlay { Capsule().strokeBorder(MJColor.gold(0.3), lineWidth: 1) }
+    }
+
+    /// Recount state is visible in the same chrome position as the other
+    /// transient tracking messages. A completed result is intentionally calm
+    /// and self-clears in the session, while waiting/running conveys why a
+    /// tap has not yet changed the table.
+    private func recountStatusChip(_ text: String) -> some View {
+        HStack(spacing: 7) {
+            if session.recountState.isActive {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(MJColor.cream)
+            } else if case .completed = session.recountState {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(MJColor.jadeAccent)
+            } else {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(MJColor.amberZone)
+            }
+            Text(text)
+                .font(MJFont.ui(12, weight: .semibold))
+        }
+        .foregroundStyle(MJColor.cream)
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background {
+            Capsule().fill(.ultraThinMaterial).environment(\.colorScheme, .dark)
+            Capsule().fill(Color(hex: 0x0A241D, alpha: 0.6))
+        }
+        .overlay { Capsule().strokeBorder(MJColor.gold(0.3), lineWidth: 1) }
+        .accessibilityElement(children: .combine)
     }
 
     /// Lane B chunk H item 2's directional rescan-prompt chip — same
@@ -446,18 +564,34 @@ struct LiveFeedPane: View {
         return "\(reason.message) — using explicit 2D tracking"
     }
 
-    /// Workstream G's "Recalibrate" affordance (spec screens 14/15) — reuses
-    /// the exact ARKit-native calibration flow (`beginARCalibration()` →
-    /// `ARCalibrationView` cover in `CoachLiveView`) that used to be a
-    /// debug-HUD-only button, hoisted into production for this. See
-    /// `calibratedTableGeometry`'s doc for the known gap: recalibrating
-    /// mid-session captures a fresh geometry but doesn't retroactively rebuild
-    /// the already-running tracker.
+    /// Opens the editable calibration marks on the same persistent AR surface.
+    /// Counts are held while regions move; ARKit is neither paused nor reset.
     private var recalibrateLink: some View {
-        Button("Recalibrate") { session.beginARCalibration() }
+        Button("Edit regions") { session.beginARCalibration() }
             .font(MJFont.ui(11, weight: .semibold))
             .foregroundStyle(MJColor.cream(0.55))
             .buttonStyle(.plain)
+            .accessibilityLabel("Edit table regions")
+            .accessibilityHint("Shows the existing calibration handles without restarting tracking")
+    }
+
+    /// Keep the marker vocabulary discoverable without covering the table.
+    /// The dot answers face certainty; the ring answers table ownership.
+    private var trackingMarkerLegend: some View {
+        HStack(spacing: 8) {
+            legendItem(symbol: "circle.fill", tint: Color(uiColor: .systemBlue), text: "face")
+            legendItem(symbol: "questionmark.circle.fill", tint: Color(uiColor: .systemOrange), text: "face needed")
+            legendItem(symbol: "circle.dashed", tint: Color(uiColor: .systemOrange), text: "region")
+        }
+        .font(MJFont.ui(9, weight: .medium))
+        .foregroundStyle(MJColor.cream(0.52))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Tracking markers. Blue dot: confirmed face. Amber question mark: face needs confirmation. Orange ring: table region needs placement.")
+    }
+
+    private func legendItem(symbol: String, tint: Color, text: String) -> some View {
+        Label(text, systemImage: symbol)
+            .foregroundStyle(tint.opacity(0.9))
     }
 
     private var torchButton: some View {
@@ -554,19 +688,25 @@ struct LiveFeedPane: View {
             Text("top: \(session.diagnostics.lastTopDetections.isEmpty ? "—" : session.diagnostics.lastTopDetections.joined(separator: ", "))")
             Text("tracker live \(session.trackerDiagnostics.live) · tent \(session.trackerDiagnostics.tentative) · missing \(session.trackerDiagnostics.missing)")
             Text("census t\(session.diagnostics.worldCensusTentative) c\(session.diagnostics.worldCensusConfirmed) s\(session.diagnostics.worldCensusStale) m\(session.diagnostics.worldCensusMissing) · \(session.diagnostics.worldCensusZoneSummary)")
+            Text("ownership \(session.diagnostics.worldCensusOwnershipSummary)")
             Text("census +\(session.diagnostics.worldCensus.births) =\(session.diagnostics.worldCensus.matches) miss \(session.diagnostics.worldCensus.qualifiedMisses) −\(session.diagnostics.worldCensus.retirements) · \(session.diagnostics.worldCensusMilliseconds, specifier: "%.1f")ms")
+            Text("match primary \(session.diagnostics.worldCensus.primaryWorldMatches) · reacquire \(session.diagnostics.worldCensus.staleWorldReacquisitions) · hold births \(session.diagnostics.worldCensus.suppressedReplacementBirths) · merge \(session.diagnostics.worldCensus.tentativeDuplicateMerges)")
             Text("face reads ≥80 \(session.diagnostics.worldCensus.strongFaceReads) · ? \(session.diagnostics.worldCensusUnknownFaces) · publish \(session.diagnostics.worldCensus.facePublications) · conflict \(session.diagnostics.worldCensus.confidentFaceConflicts)")
             Text("candidate 30–79 \(session.diagnostics.worldCensusLowConfidenceCandidates) · rescued <50 \(session.diagnostics.worldCensusRecoveredBelowLegacyFloor) · no-box \(session.diagnostics.worldCensusZeroDetectionFrames)")
-            Text("threshold candidate \(CoachLiveRecognitionPolicy.candidateConfidence, specifier: "%.2f") · face \(CoachLiveRecognitionPolicy.facePublicationConfidence, specifier: "%.2f")")
+            Text("continue 30–44 \(session.diagnostics.worldCensusContinuationOnlyDetections) · birth ≥45 \(session.diagnostics.worldCensusBirthEligibleDetections)")
+            Text("threshold maintain \(CoachLiveRecognitionPolicy.candidateConfidence, specifier: "%.2f") · birth \(CoachLiveRecognitionPolicy.birthConfidence, specifier: "%.2f") · face \(CoachLiveRecognitionPolicy.facePublicationConfidence, specifier: "%.2f")")
             Text("suggestions \(session.diagnostics.worldCensusSuggestionSummary)")
             Text("depth \(session.diagnostics.worldCensusDepthAcceptance * 100, specifier: "%.0f")% · reproj \(session.diagnostics.worldCensusAnchorErrorPixels, specifier: "%.1f")px · reject \(session.diagnostics.worldCensusDepthSummary)")
             Text("calibration \(session.diagnostics.worldCensusCalibrationSource) · \(session.diagnostics.calibrationDecision)")
+            Text("tile \(session.worldTableCalibration?.tileDimensions.width ?? 0, specifier: "%.3f")×\(session.worldTableCalibration?.tileDimensions.length ?? 0, specifier: "%.3f")×\(session.worldTableCalibration?.tileDimensions.height ?? 0, specifier: "%.3f")m · \(session.worldTableCalibration?.tileDimensionsSource.rawValue ?? "—")")
             Text("source \(session.countSource.diagnosticName) · health \(session.spatialTrackingHealth.diagnosticName)")
             Text("AR \(session.diagnostics.spatialSessionID) · pipe \(session.diagnostics.spatialPipelineGeneration) · cal \(session.diagnostics.calibrationRevision) · \(session.diagnostics.calibrationDecision)")
             Text("tracking \(session.arCapture?.cameraTrackingReason ?? "—")")
             Text("config \(session.diagnostics.configurationRunCount) · reset \(session.diagnostics.resetTrackingRunCount)/\(session.diagnostics.removeExistingAnchorsRunCount) · \(session.diagnostics.lastConfigurationReason)\(session.diagnostics.lastConfigurationUsedReset ? " ⚠︎" : "")")
             Text("rec: \(session.diagnostics.recognizerType) · mode \(session.arCapture != nil && !session.usingFallbackCapture ? "AR" : "2D")")
             Text("\(session.diagnostics.roiPlan) · deferred \(session.diagnostics.roiDeferredRegions)")
+            Text("pass \(session.diagnostics.recognitionPassSummary)")
+            Text("table mask skipped crops \(session.diagnostics.tableCropsSkipped) · rejected boxes \(session.diagnostics.outsideTableDetectionsRejected)")
             Text("verification \(session.diagnostics.roiVerification)")
             Text("physical \(session.diagnostics.worldCensusPhysicalCount) · resolved \(session.diagnostics.worldCensusResolvedCount)")
             Text("empty \(session.diagnostics.worldCensusEmptyPlaneProofs) · occupied \(session.diagnostics.worldCensusOccupiedHolds) · occluded \(session.diagnostics.worldCensusOcclusionHolds)")

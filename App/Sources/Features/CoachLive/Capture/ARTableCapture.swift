@@ -210,6 +210,20 @@ final class ARTableCapture: NSObject {
         liveSurfaceController = controller
         return controller
     }
+
+    func ingestTileMeasurementSample(
+        widthMeters: Float,
+        lengthMeters: Float,
+        heightMeters: Float,
+        timestamp: TimeInterval
+    ) {
+        liveSurfaceController?.ingestTileMeasurementSample(
+            widthMeters: widthMeters,
+            lengthMeters: lengthMeters,
+            heightMeters: heightMeters,
+            timestamp: timestamp
+        )
+    }
     private var planeLockPolicy: PlaneLockPolicy?
     /// Whether the running configuration currently requests horizontal
     /// plane detection — tracked locally because `ARWorldTrackingConfiguration`

@@ -44,6 +44,7 @@ enum CensusStateAdapter {
         snapshot: CensusSnapshot,
         preserving legacy: TrackedTableState,
         tableExtent: SIMD2<Float>,
+        tileDimensions: PhysicalTileDimensions,
         censusRevision: Int
     ) -> CensusPresentation {
         var hand: [TrackedTile] = []
@@ -76,10 +77,10 @@ enum CensusStateAdapter {
             let nx = Double(track.tablePoint.x / tableExtent.x + 0.5)
             let nz = Double(track.tablePoint.y / tableExtent.y + 0.5)
             let box = TileBoundingBox(
-                x: nx - Double(0.024 / tableExtent.x) / 2,
-                y: nz - Double(0.032 / tableExtent.y) / 2,
-                width: Double(0.024 / tableExtent.x),
-                height: Double(0.032 / tableExtent.y)
+                x: nx - Double(tileDimensions.width / tableExtent.x) / 2,
+                y: nz - Double(tileDimensions.length / tableExtent.y) / 2,
+                width: Double(tileDimensions.width / tableExtent.x),
+                height: Double(tileDimensions.length / tableExtent.y)
             )
             let confidence = max(0, min(1, Double(track.faceConfidence)))
             func makeTracked(_ zone: TileZone, seat: RelativeSeat? = nil) -> TrackedTile {
@@ -163,12 +164,14 @@ enum CensusStateAdapter {
         snapshot: CensusSnapshot,
         preserving legacy: TrackedTableState,
         tableExtent: SIMD2<Float>,
+        tileDimensions: PhysicalTileDimensions = .standard,
         censusRevision: Int
     ) -> TrackedTableState {
         makePresentation(
             snapshot: snapshot,
             preserving: legacy,
             tableExtent: tableExtent,
+            tileDimensions: tileDimensions,
             censusRevision: censusRevision
         ).knownState
     }

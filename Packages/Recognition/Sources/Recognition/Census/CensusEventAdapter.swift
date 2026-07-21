@@ -47,7 +47,8 @@ public struct CensusEventTrack: Sendable, Hashable {
 public enum CensusEventAdapter {
     public static func tracks(
         from snapshot: CensusSnapshot,
-        tableExtent: SIMD2<Float>
+        tableExtent: SIMD2<Float>,
+        tileDimensions: PhysicalTileDimensions = .standard
     ) -> [CensusEventTrack] {
         guard tableExtent.x > 0, tableExtent.y > 0 else { return [] }
 
@@ -57,8 +58,8 @@ public enum CensusEventAdapter {
                   case .tile(let tile)? = track.face else {
                 return nil
             }
-            let width = Double(0.024 / tableExtent.x)
-            let height = Double(0.032 / tableExtent.y)
+            let width = Double(tileDimensions.width / tableExtent.x)
+            let height = Double(tileDimensions.length / tableExtent.y)
             let centerX = Double(track.tablePoint.x / tableExtent.x + 0.5)
             let centerY = Double(track.tablePoint.y / tableExtent.y + 0.5)
             let confidence = max(0, min(1, Double(track.faceConfidence)))

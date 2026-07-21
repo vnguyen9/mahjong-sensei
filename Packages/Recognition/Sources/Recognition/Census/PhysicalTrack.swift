@@ -65,6 +65,8 @@ struct PhysicalTrack {
     var strongFaceCandidate: TileFace?
     var strongFaceReadCount: Int = 0
     var strongFaceConfidence: Float = 0
+    var lastStrongFacePassID: UInt64?
+    var lastStrongFaceReadAt: TimeInterval?
     var publishedFace: TileFace?
     /// Normalized detector confidence for the published face.
     var publishedFaceConfidence: Float = 0
@@ -79,6 +81,8 @@ struct PhysicalTrack {
     var bucket: CensusBucket = .unresolved
     var semanticZone: SemanticZoneID = .boundaryUnresolved
     var semanticZoneOverride: SemanticZoneID?
+    var pendingAutomaticZone: SemanticZoneID?
+    var pendingAutomaticZoneHits: Int = 0
 
     // MARK: Lifecycle (§9.2)
     var state: TrackLifecycleState = .tentative

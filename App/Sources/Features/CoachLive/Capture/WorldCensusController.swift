@@ -1,20 +1,45 @@
 import Foundation
+import CoreGraphics
 import QuartzCore
 import MahjongCore
 import Recognition
 import simd
 
+enum RecognitionPassKind: Sendable, Equatable {
+    case tableDiscovery
+    case semanticRegion(SemanticZoneID)
+    case detail
+    case recount
+}
+
+struct RecognitionPassMetadata: Sendable, Equatable {
+    var id: UInt64
+    var kind: RecognitionPassKind
+    var timestamp: TimeInterval
+    var cropRect: CGRect
+    var modelSpaceTileSize: CGSize?
+    var cameraWasStill: Bool
+
+    var qualifiesFaceRead: Bool {
+        guard cameraWasStill,
+              kind == .detail,
+              let modelSpaceTileSize else { return false }
+        return min(modelSpaceTileSize.width, modelSpaceTileSize.height) >= 32
+    }
+}
+
 /// Coach Live deliberately separates physical-tile recall from face certainty.
 /// Other recognition modes continue using `VisionRecognizer`'s 0.50 default.
 enum CoachLiveRecognitionPolicy {
     static let candidateConfidence = 0.30
+    static let birthConfidence: Float = 0.45
     static let facePublicationConfidence: Float = 0.80
     static let requiredStrongFaceReads = 2
     static let faceSuggestionWindow = 5
 
     static var censusConfig: CensusConfig {
         var config = CensusConfig()
-        config.birthConfidenceThreshold = Float(candidateConfidence)
+        config.birthConfidenceThreshold = birthConfidence
         config.facePublicationConfidenceThreshold = facePublicationConfidence
         config.requiredStrongFaceReads = requiredStrongFaceReads
         config.faceSuggestionWindow = faceSuggestionWindow
@@ -37,6 +62,8 @@ struct WorldCensusDiagnostics {
     var qualifiedMissesSuppressedFrames = 0
     var depthProvenRetirements = 0
     var lowConfidenceCandidateDetections = 0
+    var continuationOnlyDetections = 0
+    var birthEligibleDetections = 0
     var strongFaceDetections = 0
     var recoveredBelowLegacyFloor = 0
     var zeroDetectionFrames = 0
@@ -73,6 +100,7 @@ final class WorldCensusController {
         self.tableOrigin = origin
         self.worldToTable = origin.worldToTable
         self.zones = calibration.semanticZones
+        census.config.tileDimensions = calibration.tileDimensions
     }
 
     init(lockedPlaneTransform: simd_float4x4,
@@ -130,6 +158,7 @@ final class WorldCensusController {
 
     func apply(_ calibration: WorldTableCalibration, at time: TimeInterval) {
         self.calibration = calibration
+        census.config.tileDimensions = calibration.tileDimensions
         tableOrigin = TableOriginState(
             guidedTableToWorld: calibration.tableToWorld,
             extent: calibration.extent,
@@ -149,6 +178,7 @@ final class WorldCensusController {
         recognizerSucceeded: Bool,
         trackingIsNormal: Bool,
         allowsQualifiedMisses: Bool = true,
+        recognitionMetadata: [UUID: RecognitionPassMetadata] = [:],
         at time: TimeInterval
     ) {
         let started = CACurrentMediaTime()
@@ -176,6 +206,13 @@ final class WorldCensusController {
         diagnostics.lowConfidenceCandidateDetections += detections.count {
             $0.confidence >= CoachLiveRecognitionPolicy.candidateConfidence
                 && $0.confidence < Double(CoachLiveRecognitionPolicy.facePublicationConfidence)
+        }
+        diagnostics.continuationOnlyDetections += detections.count {
+            $0.confidence >= CoachLiveRecognitionPolicy.candidateConfidence
+                && $0.confidence < Double(CoachLiveRecognitionPolicy.birthConfidence)
+        }
+        diagnostics.birthEligibleDetections += detections.count {
+            $0.confidence >= Double(CoachLiveRecognitionPolicy.birthConfidence)
         }
         diagnostics.strongFaceDetections += detections.count {
             $0.confidence >= Double(CoachLiveRecognitionPolicy.facePublicationConfidence)
@@ -248,6 +285,7 @@ final class WorldCensusController {
             }
             let face = TileFace.tile(detection.tile)
             let confidence = Float(detection.confidence)
+            let metadata = recognitionMetadata[detection.id]
             return TileObservation(
                 frameID: frameID,
                 box: detection.box,
@@ -261,11 +299,14 @@ final class WorldCensusController {
                     rejectionScore: max(0, 1 - confidence)
                 ),
                 footprintCenter: tablePoint,
-                footprintRadius: 0.012,
+                footprintRadius: census.config.tileDimensions.footprintRadius,
                 worldPosition: SIMD3<Float>(
                     Float(planeWorld4.x), Float(planeWorld4.y), Float(planeWorld4.z)
                 ),
-                measuredSurfaceDepth: Self.median(surfaceDepths)
+                measuredSurfaceDepth: Self.median(surfaceDepths),
+                faceEvidencePassID: metadata?.id,
+                faceEvidenceQualifiesForPublication: metadata?.qualifiesFaceRead ?? false,
+                faceEvidenceTimestamp: metadata?.timestamp
             )
         }
 
@@ -352,12 +393,13 @@ final class WorldCensusController {
         coverageRects: [TileBoundingBox]
     ) -> Set<CensusTrackID> {
         let tableToWorld = simd_inverse(worldToTable)
+        let dimensions = census.config.tileDimensions
         let footprintOffsets: [SIMD2<Float>] = [
             .zero,
-            SIMD2(-0.008, -0.011),
-            SIMD2(0.008, -0.011),
-            SIMD2(-0.008, 0.011),
-            SIMD2(0.008, 0.011),
+            SIMD2(-dimensions.width / 3, -dimensions.length / 3),
+            SIMD2(dimensions.width / 3, -dimensions.length / 3),
+            SIMD2(-dimensions.width / 3, dimensions.length / 3),
+            SIMD2(dimensions.width / 3, dimensions.length / 3),
         ]
         var provenEmpty: Set<CensusTrackID> = []
 
@@ -534,7 +576,8 @@ final class WorldCensusController {
                 let point = Self.manualCorrectionPoint(
                     center: center,
                     classIndex: classIndex,
-                    ordinal: ordinal
+                    ordinal: ordinal,
+                    dimensions: census.config.tileDimensions
                 )
                 let world4 = tableOrigin.tableToWorld
                     * SIMD4<Float>(point.x, 0, point.y, 1)
@@ -571,7 +614,8 @@ final class WorldCensusController {
     private static func manualCorrectionPoint(
         center: SIMD2<Float>,
         classIndex: Int,
-        ordinal: Int
+        ordinal: Int,
+        dimensions: PhysicalTileDimensions
     ) -> SIMD2<Float> {
         // Stable 24 mm lattice: deterministic snapshots and no random UUID
         // geometry. The correction remains a census track and can later be
@@ -579,7 +623,10 @@ final class WorldCensusController {
         let slot = classIndex * 4 + ordinal
         let column = Float(slot % 9) - 4
         let row = Float((slot / 9) % 5) - 2
-        return center + SIMD2(column * 0.024, row * 0.032)
+        return center + SIMD2(
+            column * dimensions.width,
+            row * dimensions.length
+        )
     }
 
     /// Non-overlapping physical-metre zones centered on the fitted table

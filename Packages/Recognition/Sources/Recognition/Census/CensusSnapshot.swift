@@ -137,6 +137,7 @@ public struct CensusTrackSnapshot: Sendable, Hashable {
     public var faceIsUserPinned: Bool
     public var requiresManualFaceResolution: Bool
     public var semanticZone: SemanticZoneID
+    public var semanticZoneIsUserOverridden: Bool
     public var lifecycle: TrackLifecycleState
     public var firstSeen: TimeInterval
     public var lastSeen: TimeInterval
@@ -151,6 +152,7 @@ public struct CensusTrackSnapshot: Sendable, Hashable {
                 faceIsUserPinned: Bool = false,
                 requiresManualFaceResolution: Bool = false,
                 semanticZone: SemanticZoneID,
+                semanticZoneIsUserOverridden: Bool = false,
                 lifecycle: TrackLifecycleState,
                 firstSeen: TimeInterval,
                 lastSeen: TimeInterval) {
@@ -164,6 +166,7 @@ public struct CensusTrackSnapshot: Sendable, Hashable {
         self.faceIsUserPinned = faceIsUserPinned
         self.requiresManualFaceResolution = requiresManualFaceResolution
         self.semanticZone = semanticZone
+        self.semanticZoneIsUserOverridden = semanticZoneIsUserOverridden
         self.lifecycle = lifecycle
         self.firstSeen = firstSeen
         self.lastSeen = lastSeen

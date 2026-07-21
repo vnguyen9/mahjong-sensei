@@ -110,6 +110,22 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
     private let subtitleLabel = UILabel()
     private let stepLabel = UILabel()
     private let cardView = UIView()
+    /// Optional Step 3 card. It is separate from the review instructions so
+    /// the player can skip measurement without turning calibration into a
+    /// fourth required step.
+    private let tileSizeCardView = UIView()
+    private let tileSizeSummaryLabel = UILabel()
+    private let tileSizeStatusLabel = UILabel()
+    private let measureTileButton = UIButton(type: .system)
+    private let manualTileSizeButton = UIButton(type: .system)
+    private let useMeasuredSizeButton = UIButton(type: .system)
+    private let resetTileSizeButton = UIButton(type: .system)
+    private let widthLabel = UILabel()
+    private let lengthLabel = UILabel()
+    private let widthDecreaseButton = UIButton(type: .system)
+    private let widthIncreaseButton = UIButton(type: .system)
+    private let lengthDecreaseButton = UIButton(type: .system)
+    private let lengthIncreaseButton = UIButton(type: .system)
     private let backButton = UIButton(type: .system)
     private let primaryButton = UIButton(type: .system)
     private let playerLegendLabel = UILabel()
@@ -122,6 +138,24 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
     private var panGesture: UIPanGestureRecognizer?
 
     private var stage: MarkStage = .handPostA
+
+    /// Tile dimensions are an optional calibrated refinement. They always
+    /// begin at the established standard and are attached to the final
+    /// `WorldTableCalibration` by `currentCalibration()`.
+    private var selectedTileDimensions = PhysicalTileDimensions.standard
+    private var selectedTileDimensionsSource: PhysicalTileDimensionsSource = .standard
+    private var measurementAccumulator = TileSizeMeasurementAccumulator()
+    private var measuredTileDimensions: PhysicalTileDimensions?
+    private var measurementSampleCount = 0
+    private enum TileSizeMode: Equatable {
+        case idle
+        case measuring
+        case preview
+        case manual
+        case failed(String)
+    }
+    private var tileSizeMode: TileSizeMode = .idle
+    private var tileMeasurementGuideNode: SCNNode?
 
     /// The largest currently-tracked horizontal plane.
     private var calibrationPlaneAnchor: ARPlaneAnchor?
@@ -285,6 +319,8 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         // other calibration-only affordance becomes invisible and inert.
         coachingOverlay.isHidden = true
         cardView.isHidden = true
+        tileSizeCardView.isHidden = true
+        hideTileMeasurementGuide()
         backButton.superview?.isHidden = true
         playerLegendLabel.isHidden = true
         playerLegendIcon.isHidden = true
@@ -454,6 +490,76 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         playerLegendIcon.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(playerLegendIcon)
 
+        // Optional tile-size refinement, available only in the existing
+        // review step. All controls meet the 44-point minimum target and the
+        // manual mode changes one millimetre at a time.
+        tileSizeCardView.backgroundColor = UIColor(MJColor.sheetGlass)
+        tileSizeCardView.layer.cornerRadius = 16
+        tileSizeCardView.isHidden = true
+        tileSizeCardView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(tileSizeCardView)
+
+        let tileSizeTitle = UILabel()
+        tileSizeTitle.text = "Tile size · Optional"
+        tileSizeTitle.textColor = UIColor(MJColor.creamHeading)
+        tileSizeTitle.font = .preferredFont(forTextStyle: .headline)
+        tileSizeTitle.adjustsFontForContentSizeCategory = true
+
+        tileSizeSummaryLabel.textColor = UIColor(MJColor.cream(0.82))
+        tileSizeSummaryLabel.font = .preferredFont(forTextStyle: .subheadline)
+        tileSizeSummaryLabel.adjustsFontForContentSizeCategory = true
+        tileSizeSummaryLabel.numberOfLines = 1
+
+        tileSizeStatusLabel.textColor = UIColor(MJColor.cream(0.68))
+        tileSizeStatusLabel.font = .preferredFont(forTextStyle: .caption1)
+        tileSizeStatusLabel.adjustsFontForContentSizeCategory = true
+        tileSizeStatusLabel.numberOfLines = 0
+
+        configureTileSizeButton(measureTileButton, title: "Measure a Tile", action: #selector(measureTileTapped))
+        configureTileSizeButton(manualTileSizeButton, title: "Adjust Manually", action: #selector(manualTileSizeTapped))
+        configureTileSizeButton(useMeasuredSizeButton, title: "Use Measured Size", action: #selector(useMeasuredTileSizeTapped))
+        configureTileSizeButton(resetTileSizeButton, title: "Reset to Standard", action: #selector(resetTileSizeTapped))
+        useMeasuredSizeButton.backgroundColor = UIColor(MJColor.gold)
+        useMeasuredSizeButton.setTitleColor(UIColor(MJColor.inkOnGold), for: .normal)
+
+        configureTileSizeStepper(widthDecreaseButton, symbol: "minus", action: #selector(widthDecreaseTapped), accessibilityLabel: "Decrease tile width")
+        configureTileSizeStepper(widthIncreaseButton, symbol: "plus", action: #selector(widthIncreaseTapped), accessibilityLabel: "Increase tile width")
+        configureTileSizeStepper(lengthDecreaseButton, symbol: "minus", action: #selector(lengthDecreaseTapped), accessibilityLabel: "Decrease tile length")
+        configureTileSizeStepper(lengthIncreaseButton, symbol: "plus", action: #selector(lengthIncreaseTapped), accessibilityLabel: "Increase tile length")
+        [widthLabel, lengthLabel].forEach {
+            $0.textColor = UIColor(MJColor.creamHeading)
+            $0.font = .preferredFont(forTextStyle: .subheadline)
+            $0.adjustsFontForContentSizeCategory = true
+            $0.textAlignment = .center
+            $0.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
+
+        let sizeButtonRow = UIStackView(arrangedSubviews: [measureTileButton, manualTileSizeButton, useMeasuredSizeButton, resetTileSizeButton])
+        sizeButtonRow.axis = .horizontal
+        sizeButtonRow.spacing = 8
+        sizeButtonRow.distribution = .fillEqually
+
+        let widthRow = UIStackView(arrangedSubviews: [widthDecreaseButton, widthLabel, widthIncreaseButton])
+        widthRow.axis = .horizontal
+        widthRow.alignment = .center
+        widthRow.spacing = 8
+        widthRow.distribution = .fill
+        let lengthRow = UIStackView(arrangedSubviews: [lengthDecreaseButton, lengthLabel, lengthIncreaseButton])
+        lengthRow.axis = .horizontal
+        lengthRow.alignment = .center
+        lengthRow.spacing = 8
+        lengthRow.distribution = .fill
+        let dimensionsRow = UIStackView(arrangedSubviews: [widthRow, lengthRow])
+        dimensionsRow.axis = .horizontal
+        dimensionsRow.spacing = 12
+        dimensionsRow.distribution = .fillEqually
+
+        let tileSizeStack = UIStackView(arrangedSubviews: [tileSizeTitle, tileSizeSummaryLabel, tileSizeStatusLabel, sizeButtonRow, dimensionsRow])
+        tileSizeStack.axis = .vertical
+        tileSizeStack.spacing = 8
+        tileSizeStack.translatesAutoresizingMaskIntoConstraints = false
+        tileSizeCardView.addSubview(tileSizeStack)
+
         // Flash toggle (top-right). Hidden if the device has no torch.
         flashButton.translatesAutoresizingMaskIntoConstraints = false
         flashButton.tintColor = UIColor(MJColor.creamHeading)
@@ -481,6 +587,15 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             cardStack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 16),
             cardStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -16),
 
+            tileSizeCardView.topAnchor.constraint(equalTo: cardView.bottomAnchor, constant: 12),
+            tileSizeCardView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            tileSizeCardView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+
+            tileSizeStack.topAnchor.constraint(equalTo: tileSizeCardView.topAnchor, constant: 14),
+            tileSizeStack.bottomAnchor.constraint(equalTo: tileSizeCardView.bottomAnchor, constant: -14),
+            tileSizeStack.leadingAnchor.constraint(equalTo: tileSizeCardView.leadingAnchor, constant: 16),
+            tileSizeStack.trailingAnchor.constraint(equalTo: tileSizeCardView.trailingAnchor, constant: -16),
+
             bottomStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             bottomStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             bottomStack.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20),
@@ -496,6 +611,31 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
             playerLegendIcon.widthAnchor.constraint(equalToConstant: 20),
             playerLegendIcon.heightAnchor.constraint(equalToConstant: 20)
         ])
+    }
+
+    private func configureTileSizeButton(_ button: UIButton, title: String, action: Selector) {
+        button.setTitle(title, for: .normal)
+        button.setTitleColor(UIColor(MJColor.creamHeading), for: .normal)
+        button.titleLabel?.font = .preferredFont(forTextStyle: .footnote)
+        button.titleLabel?.adjustsFontForContentSizeCategory = true
+        button.backgroundColor = UIColor(MJColor.cream(0.12))
+        button.layer.cornerRadius = 10
+        button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        button.addTarget(self, action: action, for: .touchUpInside)
+    }
+
+    private func configureTileSizeStepper(_ button: UIButton,
+                                          symbol: String,
+                                          action: Selector,
+                                          accessibilityLabel: String) {
+        button.setImage(UIImage(systemName: symbol), for: .normal)
+        button.tintColor = UIColor(MJColor.creamHeading)
+        button.backgroundColor = UIColor(MJColor.cream(0.12))
+        button.layer.cornerRadius = 10
+        button.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 44).isActive = true
+        button.addTarget(self, action: action, for: .touchUpInside)
+        button.accessibilityLabel = accessibilityLabel
     }
 
     private func styleSecondary(_ button: UIButton, title: String) {
@@ -543,9 +683,77 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         backButton.setTitle(stage == .handPostA ? "Cancel" : "Back", for: .normal)
         playerLegendLabel.isHidden = stage != .review
         playerLegendIcon.isHidden = stage != .review
+        tileSizeCardView.isHidden = stage != .review
         primaryButton.isHidden = marking
         primaryButton.isEnabled = plane
         primaryButton.alpha = plane ? 1 : 0.45
+        if stage == .review { refreshTileSizeUI() }
+    }
+
+    private func millimetres(_ value: Float) -> String {
+        "\(Int((value * 1_000).rounded())) mm"
+    }
+
+    private func refreshTileSizeUI() {
+        let previewingMeasurement: Bool
+        switch tileSizeMode {
+        case .preview: previewingMeasurement = true
+        default: previewingMeasurement = false
+        }
+        let dimensions = previewingMeasurement ? (measuredTileDimensions ?? selectedTileDimensions) : selectedTileDimensions
+        let prefix = previewingMeasurement ? "Measured preview · " : ""
+        tileSizeSummaryLabel.text = "\(prefix)\(millimetres(dimensions.width)) × \(millimetres(dimensions.length)) · \(millimetres(dimensions.height)) high"
+        widthLabel.text = "Width\n\(millimetres(dimensions.width))"
+        widthLabel.numberOfLines = 2
+        lengthLabel.text = "Length\n\(millimetres(dimensions.length))"
+        lengthLabel.numberOfLines = 2
+        widthLabel.accessibilityLabel = "Tile width, \(millimetres(dimensions.width))"
+        lengthLabel.accessibilityLabel = "Tile length, \(millimetres(dimensions.length))"
+
+        let isManual: Bool
+        switch tileSizeMode {
+        case .manual: isManual = true
+        default: isManual = false
+        }
+        [widthDecreaseButton, widthIncreaseButton, lengthDecreaseButton, lengthIncreaseButton].forEach {
+            $0.isHidden = !isManual
+            $0.isEnabled = isManual
+        }
+        dimensionsRowAccessibility(isHidden: !isManual)
+
+        measureTileButton.isHidden = tileSizeMode == .measuring || tileSizeMode == .preview
+        manualTileSizeButton.isHidden = tileSizeMode == .measuring || tileSizeMode == .preview
+        useMeasuredSizeButton.isHidden = tileSizeMode != .preview
+        resetTileSizeButton.isHidden = tileSizeMode == .measuring || tileSizeMode == .preview
+
+        switch tileSizeMode {
+        case .idle:
+            tileSizeStatusLabel.text = "Optional. Place one isolated face-up tile in the guide, or use the standard size."
+        case .measuring:
+            tileSizeStatusLabel.text = measurementSampleCount == 0
+                ? "Place one isolated, face-up tile flat in the cyan guide. Keep the iPad and tile still."
+                : "Measuring isolated tile · \(measurementSampleCount) of \(TileSizeMeasurementAccumulator.requiredSampleCount) stable samples"
+        case .preview:
+            tileSizeStatusLabel.text = "Measurement ready. Check the preview, then use it or choose manual adjustment."
+        case .manual:
+            tileSizeStatusLabel.text = "Adjust width and length in 1 mm steps. Height stays measured or uses the 16 mm standard."
+        case let .failed(message):
+            tileSizeStatusLabel.text = message
+        }
+        tileSizeStatusLabel.accessibilityLabel = tileSizeStatusLabel.text
+        measureTileButton.accessibilityLabel = "Measure a tile"
+        measureTileButton.accessibilityHint = "Shows a guide and gathers five stable depth-backed measurements."
+        manualTileSizeButton.accessibilityLabel = "Adjust tile size manually"
+        useMeasuredSizeButton.accessibilityLabel = "Use measured tile size"
+        resetTileSizeButton.accessibilityLabel = "Reset tile size to standard"
+    }
+
+    /// The steppers themselves are individually accessible. This helper keeps
+    /// the value labels hidden from VoiceOver only while manual controls are
+    /// not relevant, without changing their visual summary.
+    private func dimensionsRowAccessibility(isHidden: Bool) {
+        widthLabel.isAccessibilityElement = !isHidden
+        lengthLabel.isAccessibilityElement = !isHidden
     }
 
     // MARK: - Plane visualization (ARSCNViewDelegate)
@@ -821,6 +1029,7 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
     /// affordances disappear, but a subsequent review restores the edited quad.
     private func leaveReviewForPondMarking() {
         clearReviewGeometry()
+        hideTileMeasurementGuide()
         for i in pondQuadMarkers.indices { pondQuadMarkers[i]?.isHidden = true }
         seatEndpointMarkers.values.forEach { $0.isHidden = true }
         seatMoveMarkers.values.forEach { $0.isHidden = true }
@@ -1430,7 +1639,10 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
 
     private func currentCalibration() -> WorldTableCalibration? {
         guard let marks = currentGuidedMarks() else { return nil }
-        return WorldTableCalibration.guided(marks: marks)
+        guard var calibration = WorldTableCalibration.guided(marks: marks) else { return nil }
+        calibration.tileDimensions = selectedTileDimensions
+        calibration.tileDimensionsSource = selectedTileDimensionsSource
+        return calibration
     }
 
     /// Renders filled regions and names in *calibration table coordinates*.
@@ -1754,6 +1966,171 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         let image = renderer.uiImage
         if let image { Self.tileTextureCache[key] = image }
         return image
+    }
+
+    // MARK: - Optional tile-size measurement
+
+    /// Starts the optional Step 3 measurement guide. The guide is attached to
+    /// the same persistent SceneKit scene as review regions; it never creates,
+    /// pauses, or reconfigures an AR session.
+    @objc private func measureTileTapped() {
+        measurementAccumulator.reset()
+        measuredTileDimensions = nil
+        measurementSampleCount = 0
+        tileSizeMode = .measuring
+        showTileMeasurementGuide()
+        UISelectionFeedbackGenerator().selectionChanged()
+        refreshTileSizeUI()
+    }
+
+    @objc private func manualTileSizeTapped() {
+        if let measuredTileDimensions { selectedTileDimensions = measuredTileDimensions }
+        selectedTileDimensionsSource = .manual
+        tileSizeMode = .manual
+        hideTileMeasurementGuide()
+        publishDraftCalibration()
+        UISelectionFeedbackGenerator().selectionChanged()
+        refreshTileSizeUI()
+    }
+
+    @objc private func useMeasuredTileSizeTapped() {
+        guard let measuredTileDimensions else { return }
+        selectedTileDimensions = measuredTileDimensions
+        selectedTileDimensionsSource = .measured
+        tileSizeMode = .idle
+        hideTileMeasurementGuide()
+        publishDraftCalibration()
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        refreshTileSizeUI()
+    }
+
+    @objc private func resetTileSizeTapped() {
+        selectedTileDimensions = .standard
+        selectedTileDimensionsSource = .standard
+        measuredTileDimensions = nil
+        measurementAccumulator.reset()
+        measurementSampleCount = 0
+        tileSizeMode = .idle
+        hideTileMeasurementGuide()
+        publishDraftCalibration()
+        UISelectionFeedbackGenerator().selectionChanged()
+        refreshTileSizeUI()
+    }
+
+    @objc private func widthDecreaseTapped() { adjustTileWidth(byMillimetres: -1) }
+    @objc private func widthIncreaseTapped() { adjustTileWidth(byMillimetres: 1) }
+    @objc private func lengthDecreaseTapped() { adjustTileLength(byMillimetres: -1) }
+    @objc private func lengthIncreaseTapped() { adjustTileLength(byMillimetres: 1) }
+
+    private func adjustTileWidth(byMillimetres delta: Float) {
+        let width = min(0.032, max(0.016, selectedTileDimensions.width + delta / 1_000))
+        // A valid manual size must remain narrower than its long edge.
+        selectedTileDimensions.width = min(width, selectedTileDimensions.length - 0.001)
+        selectedTileDimensionsSource = .manual
+        publishDraftCalibration()
+        UISelectionFeedbackGenerator().selectionChanged()
+        refreshTileSizeUI()
+    }
+
+    private func adjustTileLength(byMillimetres delta: Float) {
+        let length = min(0.044, max(0.022, selectedTileDimensions.length + delta / 1_000))
+        // Preserve the measurement invariant even at the lower manual bound.
+        selectedTileDimensions.length = max(length, selectedTileDimensions.width + 0.001)
+        selectedTileDimensionsSource = .manual
+        publishDraftCalibration()
+        UISelectionFeedbackGenerator().selectionChanged()
+        refreshTileSizeUI()
+    }
+
+    /// Integration hook for the existing recognition/depth pipeline. The
+    /// caller must provide the observed flat tile's table-space width, length,
+    /// and surface height from one accepted AR frame. This controller owns no
+    /// separate capture or recognizer loop. Calls from pipeline queues are
+    /// safely rerouted to the main thread.
+    func ingestTileMeasurementSample(widthMeters: Float,
+                                     lengthMeters: Float,
+                                     heightMeters: Float,
+                                     timestamp: TimeInterval) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.ingestTileMeasurementSample(
+                    widthMeters: widthMeters,
+                    lengthMeters: lengthMeters,
+                    heightMeters: heightMeters,
+                    timestamp: timestamp
+                )
+            }
+            return
+        }
+        guard case .measuring = tileSizeMode else { return }
+        switch measurementAccumulator.append(TileSizeMeasurementSample(
+            width: widthMeters,
+            length: lengthMeters,
+            height: heightMeters,
+            timestamp: timestamp
+        )) {
+        case let .collecting(sampleCount):
+            measurementSampleCount = sampleCount
+        case let .accepted(sample):
+            measuredTileDimensions = PhysicalTileDimensions(
+                width: sample.width,
+                length: sample.length,
+                height: sample.height
+            )
+            tileSizeMode = .preview
+            hideTileMeasurementGuide()
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        case let .rejected(reason):
+            tileSizeMode = .failed(reason.userMessage)
+            hideTileMeasurementGuide()
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+        }
+        refreshTileSizeUI()
+    }
+
+    private func showTileMeasurementGuide() {
+        hideTileMeasurementGuide()
+        guard let calibration = currentCalibration() else { return }
+        let root = SCNNode()
+        root.simdTransform = calibration.tableToWorld
+
+        let outline = SCNBox(
+            width: CGFloat(PhysicalTileDimensions.standard.width),
+            height: 0.002,
+            length: CGFloat(PhysicalTileDimensions.standard.length),
+            chamferRadius: 0.002
+        )
+        let material = SCNMaterial()
+        material.diffuse.contents = UIColor.systemCyan.withAlphaComponent(0.55)
+        material.emission.contents = UIColor.systemCyan.withAlphaComponent(0.35)
+        material.lightingModel = .constant
+        outline.materials = [material]
+        let tileGuide = SCNNode(geometry: outline)
+        tileGuide.position = SCNVector3(0, 0.004, 0)
+        root.addChildNode(tileGuide)
+
+        let text = SCNText(string: "Place one tile here", extrusionDepth: 0.001)
+        text.font = UIFont.preferredFont(forTextStyle: .caption1)
+        text.flatness = 0.2
+        let textMaterial = SCNMaterial()
+        textMaterial.diffuse.contents = UIColor.systemCyan
+        textMaterial.lightingModel = .constant
+        text.materials = [textMaterial]
+        let label = SCNNode(geometry: text)
+        label.scale = SCNVector3(0.0012, 0.0012, 0.0012)
+        label.position = SCNVector3(-0.045, 0.018, 0.028)
+        let billboard = SCNBillboardConstraint()
+        billboard.freeAxes = .Y
+        label.constraints = [billboard]
+        root.addChildNode(label)
+
+        sceneView.scene.rootNode.addChildNode(root)
+        tileMeasurementGuideNode = root
+    }
+
+    private func hideTileMeasurementGuide() {
+        tileMeasurementGuideNode?.removeFromParentNode()
+        tileMeasurementGuideNode = nil
     }
 
     // MARK: - Actions

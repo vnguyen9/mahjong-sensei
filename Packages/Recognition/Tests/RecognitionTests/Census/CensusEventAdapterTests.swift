@@ -45,6 +45,27 @@ final class CensusEventAdapterTests: XCTestCase {
         XCTAssertEqual(detection?.box.height ?? 0, 0.032, accuracy: 1e-6)
     }
 
+    func testAdapterUsesMeasuredTileDimensionsForEventGeometry() throws {
+        let snapshot = CensusSnapshot(
+            generatedAt: 1,
+            tracks: [track(8, .confirmed, .p(5), .zero)]
+        )
+        let dimensions = PhysicalTileDimensions(
+            width: 0.030,
+            length: 0.040,
+            height: 0.018
+        )
+
+        let eventTrack = try XCTUnwrap(CensusEventAdapter.tracks(
+            from: snapshot,
+            tableExtent: SIMD2(0.75, 1.00),
+            tileDimensions: dimensions
+        ).first)
+
+        XCTAssertEqual(eventTrack.box.width, 0.04, accuracy: 1e-6)
+        XCTAssertEqual(eventTrack.box.height, 0.04, accuracy: 1e-6)
+    }
+
     func testCensusObservationStreamPreservesLegacyEventKinds() {
         var game = ScriptedGame(seed: 2_026)
         game.deal(myHand: [

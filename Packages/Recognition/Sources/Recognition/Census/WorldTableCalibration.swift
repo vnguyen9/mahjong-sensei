@@ -7,6 +7,38 @@ public enum CalibrationSource: String, Sendable, Codable, Equatable {
     case manualRecenter
 }
 
+/// Physical dimensions used by the world census. These are deliberately part
+/// of the table calibration rather than a detector setting: one table's tile
+/// footprint is shared by association, empty-space evidence, crop margins,
+/// and presentation geometry.
+public struct PhysicalTileDimensions: Sendable, Equatable {
+    public var width: Float
+    public var length: Float
+    public var height: Float
+
+    public static let standard = PhysicalTileDimensions(
+        width: 0.024,
+        length: 0.032,
+        height: 0.016
+    )
+
+    public init(width: Float, length: Float, height: Float) {
+        self.width = width
+        self.length = length
+        self.height = height
+    }
+
+    /// The existing census represents a tile footprint as a circular radius.
+    /// Use half the short edge so neighboring 24 mm tiles stay separable.
+    public var footprintRadius: Float { max(0, width * 0.5) }
+}
+
+public enum PhysicalTileDimensionsSource: String, Sendable, Equatable {
+    case standard
+    case measured
+    case manual
+}
+
 /// An editable exposed-tile strip expressed by its two long-edge endpoints in
 /// table-plane coordinates. The strip's depth is deliberately fixed by the
 /// calibration UI; moving either endpoint changes both its length and yaw
@@ -205,6 +237,10 @@ public struct WorldTableCalibration: Sendable, Equatable {
     /// persistence deterministic without a second geometry reconstruction.
     public var revealedZoneMarks: [SemanticZoneID: RevealedZoneMark]
     public var revealedZonePolygons: [SemanticZoneID: [SIMD2<Float>]]
+    /// Defaults preserve existing calibrated tables until the optional tile
+    /// measurement step supplies a table-specific value.
+    public var tileDimensions: PhysicalTileDimensions
+    public var tileDimensionsSource: PhysicalTileDimensionsSource
     public var source: CalibrationSource
 
     public init(
@@ -214,6 +250,8 @@ public struct WorldTableCalibration: Sendable, Equatable {
         handPolygon: [SIMD2<Float>],
         revealedZoneMarks: [SemanticZoneID: RevealedZoneMark] = [:],
         revealedZonePolygons: [SemanticZoneID: [SIMD2<Float>]],
+        tileDimensions: PhysicalTileDimensions = .standard,
+        tileDimensionsSource: PhysicalTileDimensionsSource = .standard,
         source: CalibrationSource
     ) {
         self.tableToWorld = tableToWorld
@@ -222,6 +260,8 @@ public struct WorldTableCalibration: Sendable, Equatable {
         self.handPolygon = handPolygon
         self.revealedZoneMarks = revealedZoneMarks
         self.revealedZonePolygons = revealedZonePolygons
+        self.tileDimensions = tileDimensions
+        self.tileDimensionsSource = tileDimensionsSource
         self.source = source
     }
 

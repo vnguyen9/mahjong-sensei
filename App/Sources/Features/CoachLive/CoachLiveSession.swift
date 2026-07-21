@@ -249,10 +249,19 @@ final class CoachLiveSession: Identifiable {
         case zone(TableZoneID)
     }
     private var recountRequest: RecountRequest?
+    var recountState: CoachLiveRecountState = .idle
+
+    private struct RecountTrackSignature: Equatable {
+        var face: TileFace?
+        var zone: SemanticZoneID
+        var lifecycle: TrackLifecycleState
+    }
+    private var recountBaseline: [CensusTrackID: RecountTrackSignature] = [:]
 
     /// Dev-only diagnostics the loop records every tick — powers the
     /// triple-tap debug HUD; see `LiveDiagnostics`.
     var diagnostics = LiveDiagnostics()
+    private var nextRecognitionPassID: UInt64 = 1
     /// Authoritative LiDAR census. It receives the exact detections already
     /// produced by Coach Live and never schedules model work of its own.
     private(set) var worldCensusController: WorldCensusController?
@@ -565,13 +574,11 @@ final class CoachLiveSession: Identifiable {
     // committed-change cadence, ≤ ~3 Hz, only on a `revision` bump).
     private static let publishInterval: TimeInterval = 0.3
     private static let pollInterval: Duration = .milliseconds(120)
-    /// When true, the AR loop SKIPS inference/ingest while the camera reads as
-    /// moving (`CameraMotionGate`) — the old thermal/blur guard. Now **false**
-    /// by default: detection runs continuously so tracking keeps up while you
-    /// pan a handheld iPad (per-track position smoothing, `TrackerConfig
-    /// .positionSmoothing`, absorbs the extra motion-frame noise). The `moving`
-    /// signal is still computed for the "hold steady" chip + bracket re-project.
-    private static let motionPausesInference = false
+    /// Camera-pose motion is not useful visual evidence: ARKit continues
+    /// reprojecting held anchors while Core ML waits for a settled, sharp
+    /// frame. Local table motion with a stable camera still reaches the ROI
+    /// scheduler through `MotionDetector` below.
+    private static let motionPausesInference = true
     /// When true, the AR loop's `.fullFrame` refresh passes (the periodic
     /// safety net + each moving→still settle) are recognized via
     /// `TiledTileRecognizer` — an overlapping NATIVE-resolution 3×4 grid over
@@ -1190,20 +1197,38 @@ final class CoachLiveSession: Identifiable {
                     let extent = geometry.extent
                     let calibration = self.worldCensusController?.calibration
                         ?? self.worldTableCalibration
+                    // Once Coach Live is spatially calibrated, Core ML sees
+                    // only the projected table. The polygon is also used as
+                    // a mask for every crop so the surrounding room cannot
+                    // create candidates or consume detector attention.
+                    guard let calibration,
+                          let tableImagePolygon = Self.projectedTablePolygon(
+                            calibration,
+                            projection: projection,
+                            imageTransform: frame.imageTransform
+                          ),
+                          let tableImageBounds = Self.boundingBox(
+                            tableImagePolygon
+                          ) else {
+                        break
+                    }
+                    let rawTablePolygon = Self.rawImagePolygon(
+                        tableImagePolygon,
+                        imageTransform: frame.imageTransform,
+                        imageResolution: frame.imageResolution
+                    )
 
                     // Lane B chunk H item 2: zone rects are needed for
                     // staleness tracking regardless of `useROIScheduler` —
                     // hoisted out of that flag's block (was chunk E-only).
-                    let zones = calibration.map {
-                        ROIScheduler.projectedZoneRects(
-                            calibration: $0,
-                            projection: projection,
-                            imageTransform: frame.imageTransform
-                        )
-                    } ?? ROIScheduler.ZoneRects()
-                    let zoneCenters = calibration.map {
-                        ROIScheduler.zoneCenters(calibration: $0)
-                    } ?? [:]
+                    let zones = ROIScheduler.projectedZoneRects(
+                        calibration: calibration,
+                        projection: projection,
+                        imageTransform: frame.imageTransform
+                    )
+                    let zoneCenters = ROIScheduler.zoneCenters(
+                        calibration: calibration
+                    )
                     self.updateZoneStaleness(tracker: tracker, zones: zones, centers: zoneCenters,
                                              projection: projection,
                                              imageTransform: frame.imageTransform,
@@ -1234,6 +1259,18 @@ final class CoachLiveSession: Identifiable {
                             plan = .fullFrame
                         }
                     } else if self.useROIScheduler {
+                        if let snapshot = self.worldCensusController?.snapshot {
+                            let detailZones = Self.projectedDetailZoneRects(
+                                snapshot: snapshot,
+                                calibration: calibration,
+                                projection: projection,
+                                imageTransform: frame.imageTransform
+                            )
+                            roiScheduler.requestDetailZones(
+                                Set(detailZones.identified.map(\.id)),
+                                projected: detailZones
+                            )
+                        }
                         let myTurn = tracker.state.currentTurn == .me || tracker.state.myHand.count % 3 == 2
                         plan = roiScheduler.decide(motionField: field, zones: zones, myTurn: myTurn,
                                                    justSettled: justSettled, orientedImageSize: frame.orientedImageSize,
@@ -1253,6 +1290,7 @@ final class CoachLiveSession: Identifiable {
                     }
                     self.diagnostics.roiPlan = self.useROIScheduler ? "roi: \(roiLabel)" : "roi: off"
                     self.diagnostics.roiDeferredRegions = roiScheduler.deferredRegionCount
+                    let executingRecountRequest = self.recountRequest
 
                     switch plan {
                     case .fullFrame:
@@ -1272,35 +1310,98 @@ final class CoachLiveSession: Identifiable {
                         let fullRecognizerSucceeded: Bool
                         if Self.tilesFullFrameRefresh {
                             var tiledRecognizerFailed = false
-                            self.diagnostics.inferencesRun += TiledTileRecognizer.gridCols * TiledTileRecognizer.gridRows
+                            let inferenceCountBefore = self.diagnostics.inferencesRun
+                            self.beginExecutingRecount(
+                                executingRecountRequest,
+                                total: TiledTileRecognizer.gridCols
+                                    * TiledTileRecognizer.gridRows
+                            )
                             fullTiles = await TiledTileRecognizer.recognize(
                                 buffer: frame.pixelBuffer,
-                                roi: nil,
+                                roi: tableImageBounds,
                                 minConfidence: CoachLiveRecognitionPolicy.candidateConfidence,
                                 imageOrientation: frame.imageOrientation,
+                                clippingPolygon: tableImagePolygon,
                                 using: { f in
+                                    self.diagnostics.inferencesRun += 1
+                                    let started = CACurrentMediaTime()
                                     do {
-                                        return try await rec.recognize(f)
+                                        let result = try await rec.recognize(f)
+                                        self.diagnostics.recognitionPassSummary = String(
+                                            format: "tableDiscovery %dx%d · %.1fms",
+                                            Int(f.orientedPixelSize.width),
+                                            Int(f.orientedPixelSize.height),
+                                            (CACurrentMediaTime() - started) * 1_000
+                                        )
+                                        self.advanceRecount(executingRecountRequest)
+                                        return result
                                     } catch {
                                         tiledRecognizerFailed = true
+                                        self.advanceRecount(executingRecountRequest)
                                         return .empty
                                     }
                                 })
+                            self.diagnostics.tableCropsSkipped += max(
+                                0,
+                                TiledTileRecognizer.gridCols * TiledTileRecognizer.gridRows
+                                    - (self.diagnostics.inferencesRun - inferenceCountBefore)
+                            )
                             fullRecognizerSucceeded = !tiledRecognizerFailed
                             self.lastPipelineError = tiledRecognizerFailed
                                 ? "one or more tiled recognizer calls failed"
                                 : nil
                         } else {
-                            self.diagnostics.inferencesRun += 1
-                            let recognizerFrame = RecognizerFrame.buffer(
-                                frame.pixelBuffer,
-                                orientation: frame.imageOrientation
+                            self.beginExecutingRecount(
+                                executingRecountRequest,
+                                total: 1
                             )
+                            let cropRect = ROICropMapper.cropRect(
+                                forZoneImageRect: tableImageBounds,
+                                orientedImageSize: frame.orientedImageSize,
+                                imageResolution: frame.imageResolution,
+                                imageOrientation: frame.imageOrientation,
+                                padding: 0
+                            )
+                            guard let crop = pixelBufferCropper.crop(
+                                frame.pixelBuffer,
+                                to: cropRect,
+                                clippingPolygon: rawTablePolygon
+                            ) else { break }
+                            self.diagnostics.inferencesRun += 1
                             do {
-                                fullTiles = try await rec.recognize(recognizerFrame).tiles
+                                let started = CACurrentMediaTime()
+                                let cropResult = try await rec.recognize(
+                                    .buffer(crop, orientation: frame.imageOrientation)
+                                )
+                                self.diagnostics.recognitionPassSummary = String(
+                                    format: "tableDiscovery %dx%d · %.1fms",
+                                    Int(cropRect.width), Int(cropRect.height),
+                                    (CACurrentMediaTime() - started) * 1_000
+                                )
+                                self.advanceRecount(executingRecountRequest)
+                                fullTiles = cropResult.tiles.compactMap { tile in
+                                    let mapped = DetectedTile(
+                                        id: tile.id,
+                                        tile: tile.tile,
+                                        confidence: tile.confidence,
+                                        box: ROICropMapper.fullImageBox(
+                                            fromCropNormalized: tile.box,
+                                            cropRect: cropRect,
+                                            imageResolution: frame.imageResolution,
+                                            orientedImageSize: frame.orientedImageSize,
+                                            imageOrientation: frame.imageOrientation
+                                        ),
+                                        inReticle: tile.inReticle
+                                    )
+                                    return Self.pointInPolygon(
+                                        SIMD2(mapped.box.centerX, mapped.box.centerY),
+                                        vertices: tableImagePolygon
+                                    ) ? mapped : nil
+                                }
                                 fullRecognizerSucceeded = true
                                 self.lastPipelineError = nil
                             } catch {
+                                self.advanceRecount(executingRecountRequest)
                                 fullRecognizerSucceeded = false
                                 self.recognizerErrorCount += 1
                                 self.lastPipelineError = String(describing: error)
@@ -1321,7 +1422,21 @@ final class CoachLiveSession: Identifiable {
                         // `TableProjection`/`DetectionProjector`'s own docs).
                         let projected = DetectionProjector.projectToTableSpace(
                             fullTiles, projection: projection, imageTransform: frame.imageTransform,
-                            tableExtent: extent, tileSize: SIMD2<Double>(0.024, 0.032))
+                            tableExtent: extent,
+                            tileSize: SIMD2<Double>(
+                                Double(calibration.tileDimensions.width),
+                                Double(calibration.tileDimensions.length)
+                            ))
+
+                        self.feedTileMeasurementIfRequested(
+                            detections: fullTiles,
+                            frame: frame,
+                            projection: projection,
+                            calibration: calibration,
+                            cameraWasStill: !moving
+                                && level < self.trackerConfig.motionSettle,
+                            at: now
+                        )
 
                         self.worldCensusController?.ingest(
                             detections: fullTiles,
@@ -1339,6 +1454,10 @@ final class CoachLiveSession: Identifiable {
                             at: now
                         )
                         self.updateWorldCensusDiagnostics()
+                        self.finishRecount(
+                            executingRecountRequest,
+                            recognizerSucceeded: fullRecognizerSucceeded
+                        )
                         let stableZones = fullRecognizerSucceeded
                             ? Self.stabilizedVerificationZones(
                                 candidates: Set(roiScheduler.plannedRegions),
@@ -1368,6 +1487,10 @@ final class CoachLiveSession: Identifiable {
 
                     case let .crops(rects):
                         self.recountRequest = nil
+                        self.beginExecutingRecount(
+                            executingRecountRequest,
+                            total: max(1, rects.count)
+                        )
                         // `ROIScheduler` owns the thermal budget. Every crop
                         // it returns is executed; deferred regions remain in
                         // the scheduler instead of being silently dropped.
@@ -1377,8 +1500,35 @@ final class CoachLiveSession: Identifiable {
                         var cropRecognizerSucceeded = true
                         var attemptedCrop = false
                         var executedCropIndices: [Int] = []
+                        var recognitionMetadata: [UUID: RecognitionPassMetadata] = [:]
                         for (cropIndex, rect) in rects.enumerated() {
-                            guard let cropBuffer = pixelBufferCropper.crop(frame.pixelBuffer, to: rect) else { continue }
+                            let regionID: TableZoneID?
+                            if roiScheduler.plannedRegions.indices.contains(cropIndex) {
+                                regionID = roiScheduler.plannedRegions[cropIndex]
+                            } else if case let .zone(zone)? = executingRecountRequest {
+                                regionID = zone
+                            } else {
+                                regionID = nil
+                            }
+                            let cropMask = regionID.flatMap {
+                                Self.projectedRecognitionPolygon(
+                                    for: $0,
+                                    calibration: calibration,
+                                    projection: projection,
+                                    imageTransform: frame.imageTransform
+                                )
+                            }.map {
+                                Self.rawImagePolygon(
+                                    $0,
+                                    imageTransform: frame.imageTransform,
+                                    imageResolution: frame.imageResolution
+                                )
+                            } ?? rawTablePolygon
+                            guard let cropBuffer = pixelBufferCropper.crop(
+                                frame.pixelBuffer,
+                                to: rect,
+                                clippingPolygon: cropMask
+                            ) else { continue }
                             attemptedCrop = true
                             executedCropIndices.append(cropIndex)
                             self.diagnostics.inferencesRun += 1
@@ -1393,20 +1543,45 @@ final class CoachLiveSession: Identifiable {
                                 cropBuffer,
                                 orientation: frame.imageOrientation
                             )
+                            let passID = self.nextRecognitionPassID
+                            self.nextRecognitionPassID &+= 1
                             let cropResult: RecognitionResult
+                            let inferenceStarted = CACurrentMediaTime()
                             do {
                                 cropResult = try await rec.recognize(cropFrame)
+                                self.advanceRecount(executingRecountRequest)
                                 self.lastPipelineError = nil
                             } catch {
+                                self.advanceRecount(executingRecountRequest)
                                 cropRecognizerSucceeded = false
                                 self.recognizerErrorCount += 1
                                 self.lastPipelineError = String(describing: error)
                                 Self.logger.error("recognize() threw on ROI crop (\(self.recognizerErrorCount, privacy: .public) total): \(String(describing: error), privacy: .public)")
                                 cropResult = .empty
                             }
+                            self.diagnostics.recognitionPassSummary = String(
+                                format: "pass %llu %@ %dx%d · %.1fms",
+                                passID,
+                                executingRecountRequest == nil ? "detail" : "recount",
+                                Int(rect.width), Int(rect.height),
+                                (CACurrentMediaTime() - inferenceStarted) * 1_000
+                            )
                             if self.isEnded { break pollLoop }
                             let mapped = cropResult.tiles.map { tile in
-                                DetectedTile(id: tile.id, tile: tile.tile, confidence: tile.confidence,
+                                let modelSize = Self.modelSpaceTileSize(
+                                    tile.box,
+                                    orientedCropSize: cropFrame.orientedPixelSize
+                                )
+                                recognitionMetadata[tile.id] = RecognitionPassMetadata(
+                                    id: passID,
+                                    kind: executingRecountRequest == nil ? .detail : .recount,
+                                    timestamp: now,
+                                    cropRect: rect,
+                                    modelSpaceTileSize: modelSize,
+                                    cameraWasStill: !moving
+                                        && level < self.trackerConfig.motionSettle
+                                )
+                                return DetectedTile(id: tile.id, tile: tile.tile, confidence: tile.confidence,
                                             box: ROICropMapper.fullImageBox(fromCropNormalized: tile.box, cropRect: rect,
                                                                              imageResolution: frame.imageResolution,
                                                                              orientedImageSize: frame.orientedImageSize,
@@ -1446,7 +1621,15 @@ final class CoachLiveSession: Identifiable {
                         // Overlapping crops (padding) can see the same
                         // physical tile twice — de-dupe before projecting,
                         // or it would phantom-birth a ghost track.
-                        let deduped = Self.deduplicatingOverlaps(mergedImageSpace)
+                        let insideTable = mergedImageSpace.filter {
+                                Self.pointInPolygon(
+                                    SIMD2($0.box.centerX, $0.box.centerY),
+                                    vertices: tableImagePolygon
+                                )
+                            }
+                        self.diagnostics.outsideTableDetectionsRejected +=
+                            mergedImageSpace.count - insideTable.count
+                        let deduped = Self.deduplicatingOverlaps(insideTable)
                         self.diagnostics.lastRawDetectionCount = deduped.count
                         self.diagnostics.lastTopDetections = deduped
                             .sorted { $0.confidence > $1.confidence }
@@ -1456,7 +1639,20 @@ final class CoachLiveSession: Identifiable {
 
                         let projected = DetectionProjector.projectToTableSpace(
                             deduped, projection: projection, imageTransform: frame.imageTransform,
-                            tableExtent: extent, tileSize: SIMD2<Double>(0.024, 0.032))
+                            tableExtent: extent,
+                            tileSize: SIMD2<Double>(
+                                Double(calibration.tileDimensions.width),
+                                Double(calibration.tileDimensions.length)
+                            ))
+                        self.feedTileMeasurementIfRequested(
+                            detections: deduped,
+                            frame: frame,
+                            projection: projection,
+                            calibration: calibration,
+                            cameraWasStill: !moving
+                                && level < self.trackerConfig.motionSettle,
+                            at: now
+                        )
                         self.worldCensusController?.ingest(
                             detections: deduped,
                             frame: frame,
@@ -1468,10 +1664,15 @@ final class CoachLiveSession: Identifiable {
                                 && !moving
                                 && level < self.trackerConfig.motionSettle
                                 && self.spatialTrackingHealth == .healthy,
+                            recognitionMetadata: recognitionMetadata,
                             at: now
                         )
                         self.updateWorldCensusDiagnostics()
                         let cropBatchSucceeded = attemptedCrop && cropRecognizerSucceeded
+                        self.finishRecount(
+                            executingRecountRequest,
+                            recognizerSucceeded: cropBatchSucceeded
+                        )
                         let stableZones = cropBatchSucceeded
                             ? Self.stabilizedVerificationZones(
                                 candidates: Set(executedCropIndices.compactMap { index in
@@ -1533,6 +1734,7 @@ final class CoachLiveSession: Identifiable {
             return tracker.ingestCensus(
                 controller.census.snapshot(at: time),
                 tableExtent: controller.tableOrigin.extent,
+                tileDimensions: controller.calibration?.tileDimensions ?? .standard,
                 at: time,
                 motion: motion
             )
@@ -2295,14 +2497,107 @@ final class CoachLiveSession: Identifiable {
     /// TODO: F — a real per-zone (or even per-tick force) hook for the
     /// non-AR `startLoop` path is out of scope here; wire one if the
     /// image-space fallback ever needs this FAB to do more than no-op.
+    @MainActor
     func requestRecount(zone: TableZoneID? = nil) {
+        guard !recountState.isActive else { return }
         if isARCaptureActive {
             recountRequest = zone.map(RecountRequest.zone) ?? .fullTable
+            let scope = Self.recountScope(for: zone)
+            recountState = .waitingForStill(scope)
+            recountBaseline = recountSignatures(
+                worldCensusController?.snapshot.tracks ?? []
+            )
+            UISelectionFeedbackGenerator().selectionChanged()
         }
         if tracker != nil {
             publishAfterCorrection()
         } else {
             recomputeAdvice()
+        }
+    }
+
+    private static func recountScope(for zone: TableZoneID?) -> RecountScope {
+        switch zone {
+        case .some(.hand): return .hand
+        case .some(.pond): return .pond
+        case .none, .some(.meldLeft), .some(.meldRight), .some(.meldFar):
+            return .fullTable
+        }
+    }
+
+    private func recountSignatures(
+        _ tracks: [CensusTrackSnapshot]
+    ) -> [CensusTrackID: RecountTrackSignature] {
+        Dictionary(uniqueKeysWithValues: tracks
+            .filter { $0.lifecycle != .tentative && $0.lifecycle != .retired }
+            .map {
+                ($0.id, RecountTrackSignature(
+                    face: $0.face,
+                    zone: $0.semanticZone,
+                    lifecycle: $0.lifecycle
+                ))
+            })
+    }
+
+    private func beginExecutingRecount(
+        _ request: RecountRequest?,
+        total: Int
+    ) {
+        guard let request else { return }
+        let scope: RecountScope
+        switch request {
+        case .fullTable: scope = .fullTable
+        case .zone(let zone): scope = Self.recountScope(for: zone)
+        }
+        recountState = .running(scope, completed: 0, total: max(1, total))
+    }
+
+    private func advanceRecount(_ request: RecountRequest?) {
+        guard request != nil,
+              case let .running(scope, completed, total) = recountState else {
+            return
+        }
+        recountState = .running(
+            scope,
+            completed: min(total, completed + 1),
+            total: total
+        )
+    }
+
+    @MainActor
+    private func finishRecount(
+        _ request: RecountRequest?,
+        recognizerSucceeded: Bool
+    ) {
+        guard request != nil else { return }
+        guard recognizerSucceeded else {
+            recountState = .failed("Recount could not finish. Try again.")
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            scheduleRecountStateReset()
+            return
+        }
+        let tracks = worldCensusController?.snapshot.tracks ?? []
+        let current = recountSignatures(tracks)
+        let ids = Set(recountBaseline.keys).union(current.keys)
+        let updated = ids.count { recountBaseline[$0] != current[$0] }
+        let unknown = tracks.count {
+            $0.lifecycle != .tentative
+                && $0.lifecycle != .retired
+                && $0.face == nil
+        }
+        recountState = .completed(RecountSummary(
+            updatedTrackCount: updated,
+            unresolvedFaceCount: unknown
+        ))
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        scheduleRecountStateReset()
+    }
+
+    private func scheduleRecountStateReset() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1.8))
+            guard let self, !self.recountState.isActive else { return }
+            self.recountState = .idle
         }
     }
 
@@ -2364,6 +2659,7 @@ final class CoachLiveSession: Identifiable {
             snapshot: controller.snapshot,
             preserving: legacy,
             tableExtent: controller.tableOrigin.extent,
+            tileDimensions: controller.census.config.tileDimensions,
             censusRevision: controller.revision
         )
         spatialUnknownTiles = presentation.unknownTracks
@@ -2480,6 +2776,8 @@ final class CoachLiveSession: Identifiable {
         diagnostics.worldCensusSuppressedMissFrames = controller.diagnostics.qualifiedMissesSuppressedFrames
         diagnostics.worldCensusDepthProvenRetirements = controller.diagnostics.depthProvenRetirements
         diagnostics.worldCensusLowConfidenceCandidates = controller.diagnostics.lowConfidenceCandidateDetections
+        diagnostics.worldCensusContinuationOnlyDetections = controller.diagnostics.continuationOnlyDetections
+        diagnostics.worldCensusBirthEligibleDetections = controller.diagnostics.birthEligibleDetections
         diagnostics.worldCensusStrongFaceDetections = controller.diagnostics.strongFaceDetections
         diagnostics.worldCensusRecoveredBelowLegacyFloor = controller.diagnostics.recoveredBelowLegacyFloor
         diagnostics.worldCensusZeroDetectionFrames = controller.diagnostics.zeroDetectionFrames
@@ -2539,6 +2837,11 @@ final class CoachLiveSession: Identifiable {
             "opp \(opponentCount)",
             "unres \(liveTracks.count { $0.semanticZone == .boundaryUnresolved })"
         ].joined(separator: " · ")
+        diagnostics.worldCensusOwnershipSummary = [
+            "auto \(liveTracks.count { !$0.semanticZoneIsUserOverridden && $0.semanticZone != .boundaryUnresolved })",
+            "manual \(liveTracks.count { $0.semanticZoneIsUserOverridden })",
+            "unresolved \(liveTracks.count { $0.semanticZone == .boundaryUnresolved })"
+        ].joined(separator: " · ")
         diagnostics.worldCensusDepthSummary = controller.diagnostics.depthRejections
             .sorted { String(describing: $0.key) < String(describing: $1.key) }
             .map { "\(String(describing: $0.key))=\($0.value)" }
@@ -2547,7 +2850,7 @@ final class CoachLiveSession: Identifiable {
             diagnostics.worldCensusDepthSummary = "—"
         }
         Self.logger.debug(
-            "census source=\(self.countSource.diagnosticName, privacy: .public) health=\(self.spatialTrackingHealth.diagnosticName, privacy: .public) tracks=\(snapshot.tracks.count, privacy: .public) physical=\(self.diagnostics.worldCensusPhysicalCount, privacy: .public) resolved=\(self.diagnostics.worldCensusResolvedCount, privacy: .public) unknown=\(self.diagnostics.worldCensusUnknownFaces, privacy: .public) suggestions=\(self.diagnostics.worldCensusSuggestionSummary, privacy: .public) candidateDetections30to79=\(self.diagnostics.worldCensusLowConfidenceCandidates, privacy: .public) strongDetections80=\(self.diagnostics.worldCensusStrongFaceDetections, privacy: .public) strongDepthReads80=\(self.diagnostics.worldCensus.strongFaceReads, privacy: .public) recoveredBelow50=\(self.diagnostics.worldCensusRecoveredBelowLegacyFloor, privacy: .public) noBoxFrames=\(self.diagnostics.worldCensusZeroDetectionFrames, privacy: .public) publications=\(self.diagnostics.worldCensus.facePublications, privacy: .public) conflicts=\(self.diagnostics.worldCensus.confidentFaceConflicts, privacy: .public) candidateFloor=\(CoachLiveRecognitionPolicy.candidateConfidence, privacy: .public) faceFloor=\(CoachLiveRecognitionPolicy.facePublicationConfidence, privacy: .public) tentative=\(self.diagnostics.worldCensusTentative, privacy: .public) confirmed=\(self.diagnostics.worldCensusConfirmed, privacy: .public) stale=\(self.diagnostics.worldCensusStale, privacy: .public) missing=\(self.diagnostics.worldCensusMissing, privacy: .public) depthAcceptance=\(self.diagnostics.worldCensusDepthAcceptance, privacy: .public) emptyProofs=\(self.diagnostics.worldCensusEmptyPlaneProofs, privacy: .public) occupiedHolds=\(self.diagnostics.worldCensusOccupiedHolds, privacy: .public) occlusionHolds=\(self.diagnostics.worldCensusOcclusionHolds, privacy: .public) missingDepthHolds=\(self.diagnostics.worldCensusMissingDepthHolds, privacy: .public) depthRetirements=\(self.diagnostics.worldCensusDepthProvenRetirements, privacy: .public) roiDeferred=\(self.diagnostics.roiDeferredRegions, privacy: .public) reprojectionPx=\(self.diagnostics.worldCensusAnchorErrorPixels, privacy: .public) ms=\(self.diagnostics.worldCensusMilliseconds, privacy: .public) arSession=\(self.diagnostics.spatialSessionID, privacy: .public) pipeline=\(self.diagnostics.spatialPipelineGeneration, privacy: .public) calibration=\(self.diagnostics.calibrationRevision, privacy: .public) resets=\(self.diagnostics.resetTrackingRunCount, privacy: .public)"
+            "census source=\(self.countSource.diagnosticName, privacy: .public) health=\(self.spatialTrackingHealth.diagnosticName, privacy: .public) tracks=\(snapshot.tracks.count, privacy: .public) physical=\(self.diagnostics.worldCensusPhysicalCount, privacy: .public) resolved=\(self.diagnostics.worldCensusResolvedCount, privacy: .public) unknown=\(self.diagnostics.worldCensusUnknownFaces, privacy: .public) suggestions=\(self.diagnostics.worldCensusSuggestionSummary, privacy: .public) candidateDetections30to79=\(self.diagnostics.worldCensusLowConfidenceCandidates, privacy: .public) strongDetections80=\(self.diagnostics.worldCensusStrongFaceDetections, privacy: .public) strongDetailReads80=\(self.diagnostics.worldCensus.strongFaceReads, privacy: .public) recoveredBelow50=\(self.diagnostics.worldCensusRecoveredBelowLegacyFloor, privacy: .public) noBoxFrames=\(self.diagnostics.worldCensusZeroDetectionFrames, privacy: .public) publications=\(self.diagnostics.worldCensus.facePublications, privacy: .public) conflicts=\(self.diagnostics.worldCensus.confidentFaceConflicts, privacy: .public) maintainFloor=\(CoachLiveRecognitionPolicy.candidateConfidence, privacy: .public) birthFloor=\(CoachLiveRecognitionPolicy.birthConfidence, privacy: .public) faceFloor=\(CoachLiveRecognitionPolicy.facePublicationConfidence, privacy: .public) tentative=\(self.diagnostics.worldCensusTentative, privacy: .public) confirmed=\(self.diagnostics.worldCensusConfirmed, privacy: .public) stale=\(self.diagnostics.worldCensusStale, privacy: .public) missing=\(self.diagnostics.worldCensusMissing, privacy: .public) depthAcceptance=\(self.diagnostics.worldCensusDepthAcceptance, privacy: .public) emptyProofs=\(self.diagnostics.worldCensusEmptyPlaneProofs, privacy: .public) occupiedHolds=\(self.diagnostics.worldCensusOccupiedHolds, privacy: .public) occlusionHolds=\(self.diagnostics.worldCensusOcclusionHolds, privacy: .public) missingDepthHolds=\(self.diagnostics.worldCensusMissingDepthHolds, privacy: .public) depthRetirements=\(self.diagnostics.worldCensusDepthProvenRetirements, privacy: .public) roiDeferred=\(self.diagnostics.roiDeferredRegions, privacy: .public) pass=\(self.diagnostics.recognitionPassSummary, privacy: .public) tableSkipped=\(self.diagnostics.tableCropsSkipped, privacy: .public) outsideBoxes=\(self.diagnostics.outsideTableDetectionsRejected, privacy: .public) reprojectionPx=\(self.diagnostics.worldCensusAnchorErrorPixels, privacy: .public) ms=\(self.diagnostics.worldCensusMilliseconds, privacy: .public) arSession=\(self.diagnostics.spatialSessionID, privacy: .public) pipeline=\(self.diagnostics.spatialPipelineGeneration, privacy: .public) calibration=\(self.diagnostics.calibrationRevision, privacy: .public) resets=\(self.diagnostics.resetTrackingRunCount, privacy: .public)"
         )
     }
 
@@ -2845,7 +3148,10 @@ final class CoachLiveSession: Identifiable {
             }.compactMap {
                 Self.projectedLocalRect(
                     center: $0.tablePoint,
-                    size: SIMD2(0.024, 0.032),
+                    size: SIMD2(
+                        calibration.tileDimensions.width,
+                        calibration.tileDimensions.length
+                    ),
                     projection: projection,
                     imageTransform: frame.imageTransform
                 )
@@ -2889,6 +3195,272 @@ final class CoachLiveSession: Identifiable {
         return TileBoundingBox(
             x: minX, y: minY,
             width: maxX - minX, height: maxY - minY
+        )
+    }
+
+    private static func projectedTablePolygon(
+        _ calibration: WorldTableCalibration,
+        projection: TableProjection,
+        imageTransform: FrameImageTransform
+    ) -> [SIMD2<Double>]? {
+        let half = calibration.extent * 0.5
+        let corners = [
+            SIMD2(-half.x, -half.y),
+            SIMD2(half.x, -half.y),
+            SIMD2(half.x, half.y),
+            SIMD2(-half.x, half.y),
+        ]
+        let projected = corners.compactMap {
+            projection.normalizedOrientedPoint(
+                ofTablePoint: SIMD2(Double($0.x), Double($0.y)),
+                imageTransform: imageTransform
+            )
+        }
+        return projected.count == corners.count ? projected : nil
+    }
+
+    private static func projectedRecognitionPolygon(
+        for zone: TableZoneID,
+        calibration: WorldTableCalibration,
+        projection: TableProjection,
+        imageTransform: FrameImageTransform
+    ) -> [SIMD2<Double>]? {
+        let polygon: [SIMD2<Float>]?
+        switch zone {
+        case .hand: polygon = calibration.handPolygon
+        case .pond: polygon = calibration.pondPolygon
+        case .meldLeft:
+            polygon = calibration.revealedZonePolygons[.tableRevealedLeft]
+        case .meldFar:
+            polygon = calibration.revealedZonePolygons[.tableRevealedFar]
+        case .meldRight:
+            polygon = calibration.revealedZonePolygons[.tableRevealedRight]
+        }
+        guard let polygon, polygon.count >= 3 else { return nil }
+        let center = polygon.reduce(SIMD2<Float>.zero, +) / Float(polygon.count)
+        let margin = max(
+            calibration.tileDimensions.width,
+            calibration.tileDimensions.length
+        )
+        let half = calibration.extent * 0.5
+        let expanded = polygon.map { point -> SIMD2<Float> in
+            let delta = point - center
+            let distance = simd_length(delta)
+            let grown = distance > 0 ? point + delta / distance * margin : point
+            return SIMD2(
+                min(half.x, max(-half.x, grown.x)),
+                min(half.y, max(-half.y, grown.y))
+            )
+        }
+        let projected = expanded.compactMap {
+            projection.normalizedOrientedPoint(
+                ofTablePoint: SIMD2(Double($0.x), Double($0.y)),
+                imageTransform: imageTransform
+            )
+        }
+        return projected.count == expanded.count ? projected : nil
+    }
+
+    private static func boundingBox(
+        _ polygon: [SIMD2<Double>]
+    ) -> TileBoundingBox? {
+        guard polygon.count >= 3,
+              let rawMinX = polygon.map(\.x).min(),
+              let rawMaxX = polygon.map(\.x).max(),
+              let rawMinY = polygon.map(\.y).min(),
+              let rawMaxY = polygon.map(\.y).max() else { return nil }
+        let minX = max(0, min(1, rawMinX))
+        let maxX = max(0, min(1, rawMaxX))
+        let minY = max(0, min(1, rawMinY))
+        let maxY = max(0, min(1, rawMaxY))
+        guard maxX > minX, maxY > minY else { return nil }
+        return TileBoundingBox(
+            x: minX,
+            y: minY,
+            width: maxX - minX,
+            height: maxY - minY
+        )
+    }
+
+    private static func rawImagePolygon(
+        _ polygon: [SIMD2<Double>],
+        imageTransform: FrameImageTransform,
+        imageResolution: CGSize
+    ) -> [CGPoint] {
+        polygon.map {
+            let raw = imageTransform.rawNormalized(fromOriented: $0)
+            return CGPoint(
+                x: raw.x * imageResolution.width,
+                y: raw.y * imageResolution.height
+            )
+        }
+    }
+
+    private static func pointInPolygon(
+        _ point: SIMD2<Double>,
+        vertices: [SIMD2<Double>]
+    ) -> Bool {
+        guard vertices.count >= 3 else { return false }
+        var inside = false
+        var j = vertices.count - 1
+        for i in vertices.indices {
+            let a = vertices[i]
+            let b = vertices[j]
+            if (a.y > point.y) != (b.y > point.y) {
+                let edgeX = (b.x - a.x) * (point.y - a.y)
+                    / (b.y - a.y) + a.x
+                if point.x < edgeX { inside.toggle() }
+            }
+            j = i
+        }
+        return inside
+    }
+
+    private static func modelSpaceTileSize(
+        _ box: TileBoundingBox,
+        orientedCropSize: CGSize
+    ) -> CGSize {
+        guard orientedCropSize.width > 0, orientedCropSize.height > 0 else {
+            return .zero
+        }
+        let scale = 640 / max(orientedCropSize.width, orientedCropSize.height)
+        return CGSize(
+            width: box.width * orientedCropSize.width * scale,
+            height: box.height * orientedCropSize.height * scale
+        )
+    }
+
+    private static func projectedDetailZoneRects(
+        snapshot: CensusSnapshot,
+        calibration: WorldTableCalibration,
+        projection: TableProjection,
+        imageTransform: FrameImageTransform
+    ) -> ROIScheduler.ZoneRects {
+        var firstByZone: [TableZoneID: CensusTrackSnapshot] = [:]
+        for track in snapshot.tracks.sorted(by: { $0.id < $1.id }) {
+            guard track.lifecycle == .confirmed
+                    || track.lifecycle == .stale
+                    || track.lifecycle == .temporarilyMissing,
+                  track.face == nil || track.faceConfidence < 0.80 else {
+                continue
+            }
+            let zone: TableZoneID?
+            switch track.semanticZone {
+            case .mineHand: zone = .hand
+            case .tablePond: zone = .pond
+            case .tableRevealedLeft: zone = .meldLeft
+            case .tableRevealedFar: zone = .meldFar
+            case .tableRevealedRight: zone = .meldRight
+            case .mineMeld, .ignoredWall, .boundaryUnresolved: zone = nil
+            }
+            if let zone, firstByZone[zone] == nil { firstByZone[zone] = track }
+        }
+        let size = SIMD2(
+            calibration.tileDimensions.width * 6,
+            calibration.tileDimensions.length * 4
+        )
+        func rect(_ zone: TableZoneID) -> TileBoundingBox? {
+            guard let track = firstByZone[zone] else { return nil }
+            return projectedLocalRect(
+                center: track.tablePoint,
+                size: size,
+                projection: projection,
+                imageTransform: imageTransform
+            )
+        }
+        return ROIScheduler.ZoneRects(
+            hand: rect(.hand),
+            pond: rect(.pond),
+            meldLeft: rect(.meldLeft),
+            meldRight: rect(.meldRight),
+            meldFar: rect(.meldFar)
+        )
+    }
+
+    @MainActor
+    private func feedTileMeasurementIfRequested(
+        detections: [DetectedTile],
+        frame: ARTableFrame,
+        projection: TableProjection,
+        calibration: WorldTableCalibration,
+        cameraWasStill: Bool,
+        at time: TimeInterval
+    ) {
+        guard calibrationDraft != nil, cameraWasStill, let arCapture else {
+            return
+        }
+        let tableFromWorld = simd_inverse(calibration.tableToWorld)
+        let candidates = detections.compactMap {
+            detection -> (DetectedTile, Float, SIMD2<Float>)? in
+            guard detection.confidence >= Double(CoachLiveRecognitionPolicy.birthConfidence),
+                  let depth = DepthSampler.inspect(
+                    atOrientedNormalized: SIMD2(
+                        detection.box.centerX,
+                        detection.box.centerY
+                    ),
+                    imageTransform: frame.imageTransform,
+                    depthMap: frame.depthMap,
+                    confidenceMap: frame.depthConfidence
+                  ).depthMeters,
+                  let world = projection.worldPoint(
+                    ofNormalizedOrientedPoint: SIMD2(
+                        detection.box.centerX,
+                        detection.box.centerY
+                    ),
+                    imageTransform: frame.imageTransform,
+                    depthMeters: Double(depth)
+                  ) else { return nil }
+            let world4 = SIMD4<Float>(
+                Float(world.x), Float(world.y), Float(world.z), 1
+            )
+            let local = tableFromWorld * world4
+            let center = SIMD2(Float(local.x), Float(local.z))
+            guard simd_length(center) <= 0.060 else { return nil }
+            return (detection, depth, center)
+        }
+        guard candidates.count == 1, let candidate = candidates.first else {
+            return
+        }
+        let box = candidate.0.box
+        let corners = [
+            SIMD2(box.x, box.y),
+            SIMD2(box.x + box.width, box.y),
+            SIMD2(box.x + box.width, box.y + box.height),
+            SIMD2(box.x, box.y + box.height),
+        ].compactMap { point -> SIMD2<Float>? in
+            let depth = Double(candidate.1)
+            guard let projectedWorld = projection.worldPoint(
+                ofNormalizedOrientedPoint: point,
+                imageTransform: frame.imageTransform,
+                depthMeters: depth
+            ) else { return nil }
+            let cornerWorld = SIMD4<Float>(
+                Float(projectedWorld.x), Float(projectedWorld.y),
+                Float(projectedWorld.z), 1
+            )
+            let local = tableFromWorld * cornerWorld
+            return SIMD2(Float(local.x), Float(local.z))
+        }
+        guard corners.count == 4 else { return }
+        let edgeLengths = corners.indices.map {
+            simd_distance(corners[$0], corners[($0 + 1) % corners.count])
+        }
+        guard let shortSide = edgeLengths.min(),
+              let longSide = edgeLengths.max() else { return }
+        guard let centerWorld = projection.worldPoint(
+            ofNormalizedOrientedPoint: SIMD2(box.centerX, box.centerY),
+            imageTransform: frame.imageTransform,
+            depthMeters: Double(candidate.1)
+        ) else { return }
+        let centerWorld4 = SIMD4<Float>(
+            Float(centerWorld.x), Float(centerWorld.y), Float(centerWorld.z), 1
+        )
+        let centerLocal = tableFromWorld * centerWorld4
+        arCapture.ingestTileMeasurementSample(
+            widthMeters: shortSide,
+            lengthMeters: longSide,
+            heightMeters: max(0, Float(centerLocal.y)),
+            timestamp: time
         )
     }
 
@@ -3310,6 +3882,9 @@ struct LiveDiagnostics {
     /// verification is pending; values such as `verifying hand 1/3` are
     /// intentionally compact enough for the production status line too.
     var roiVerification = "—"
+    var recognitionPassSummary = "—"
+    var tableCropsSkipped = 0
+    var outsideTableDetectionsRejected = 0
     var worldCensusTracks = 0
     var worldCensusTentative = 0
     var worldCensusConfirmed = 0
@@ -3331,12 +3906,15 @@ struct LiveDiagnostics {
     var worldCensusSuppressedMissFrames = 0
     var worldCensusDepthProvenRetirements = 0
     var worldCensusLowConfidenceCandidates = 0
+    var worldCensusContinuationOnlyDetections = 0
+    var worldCensusBirthEligibleDetections = 0
     var worldCensusStrongFaceDetections = 0
     var worldCensusRecoveredBelowLegacyFloor = 0
     var worldCensusZeroDetectionFrames = 0
     var worldCensusUnknownFaces = 0
     var worldCensusSuggestionSummary = "—"
     var worldCensusZoneSummary = "—"
+    var worldCensusOwnershipSummary = "—"
     var worldCensusDepthSummary = "—"
     /// Calibration-to-Live continuity audit. These values come from
     /// `ARTableCapture`'s run wrapper; they never control ARKit behavior.

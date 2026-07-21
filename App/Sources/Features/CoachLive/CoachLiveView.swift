@@ -448,8 +448,13 @@ struct CoachLiveView: View {
                 // automatic table-clear detector is off, so ending a hand is a
                 // deliberate tap).
                 HStack(spacing: 18) {
-                    Button("Rescan table") { session.rescanTable() }
+                    Button("Rescan table") {
+                        guard !session.recountState.isActive else { return }
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        session.requestRecount()
+                    }
                         .frame(minHeight: metrics.minimumEditHitTarget)
+                        .accessibilityHint("Requests one table recount after the camera is still")
                     Button("Recenter pond") { session.beginPondRecenter() }
                         .frame(minHeight: metrics.minimumEditHitTarget)
                     Button("End hand") { session.requestHandEnd() }
@@ -674,7 +679,6 @@ private struct SpatialTrackEditorSheet: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         faceCard
-                        removeTrackButton
                         statisticsSection
                     }
                     .padding(20)
@@ -760,18 +764,73 @@ private struct SpatialTrackEditorSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
+                faceActions
             }
             if let statistics = quickStatistics {
                 quickStats(statistics)
             }
-            NavigationLink(value: SpatialEditorRoute.face) {
-                SettingLikeAction(title: "Change face", systemImage: "square.grid.3x3")
-            }
-            .buttonStyle(.plain)
             Divider().overlay(MJColor.gold(0.12))
             regionPicker
+            Divider().overlay(MJColor.gold(0.12))
+            removeTrackButton
         }
         .mjCard()
+    }
+
+    /// Face commitment is intentionally beside the tile it changes. The
+    /// previous navigation-only control made an unresolved question mark look
+    /// like it had already been saved, while the real action lived one screen
+    /// deeper in the picker.
+    @ViewBuilder
+    private var faceActions: some View {
+        if let suggestedFace, originalFace == nil, !requiresManualResolution {
+            VStack(spacing: 6) {
+                Button {
+                    commit(face: suggestedFace)
+                } label: {
+                    Text("Use \(suggestedFace.code)")
+                        .frame(minWidth: 86, minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(MJColor.jadeAccent)
+                .accessibilityLabel("Use suggested face \(suggestedFace.code)")
+                .accessibilityHint("Confirms this face and closes the editor")
+
+                facePickerLink(title: "Change", systemImage: "square.grid.3x3")
+            }
+        } else if originalFace != nil, !isUserPinned {
+            VStack(spacing: 6) {
+                Button {
+                    commit(face: originalFace)
+                } label: {
+                    Text("This is correct")
+                        .frame(minWidth: 102, minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(MJColor.jadeAccent)
+                .accessibilityLabel("This tile is correct")
+                .accessibilityHint("Pins the recognized face and closes the editor")
+
+                facePickerLink(title: "Change", systemImage: "square.grid.3x3")
+            }
+        } else {
+            facePickerLink(
+                title: requiresManualResolution ? "Choose correct face" : (originalFace == nil ? "Choose face" : "Change face"),
+                systemImage: "square.grid.3x3"
+            )
+        }
+    }
+
+    private func facePickerLink(title: String, systemImage: String) -> some View {
+        NavigationLink(value: SpatialEditorRoute.face) {
+            Label(title, systemImage: systemImage)
+                .font(MJFont.ui(12, weight: .semibold))
+                .frame(minHeight: 44)
+        }
+        .buttonStyle(.bordered)
+        .tint(MJColor.gold)
+        .accessibilityLabel(title)
+        .accessibilityHint("Opens the tile face picker")
     }
 
     private var faceStatusTitle: String {
@@ -789,6 +848,9 @@ private struct SpatialTrackEditorSheet: View {
         }
         return "Face needed"
     }
+
+    private var isUserPinned: Bool { track?.faceIsUserPinned == true }
+    private var requiresManualResolution: Bool { track?.requiresManualFaceResolution == true }
 
     private var faceStatusDetail: String {
         guard let track else { return "This physical track is no longer available." }
@@ -912,13 +974,15 @@ private struct SpatialTrackEditorSheet: View {
             Label("Remove track", systemImage: "trash")
                 .font(MJFont.ui(14, weight: .semibold))
                 .foregroundStyle(Color(uiColor: .systemRed))
-                .frame(maxWidth: .infinity, minHeight: 44)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .overlay {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(Color(uiColor: .systemRed).opacity(0.55))
                 }
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Remove physical tile")
+        .accessibilityHint("Asks for confirmation before removing this track")
     }
 
     private func commit(face: Tile?) {
