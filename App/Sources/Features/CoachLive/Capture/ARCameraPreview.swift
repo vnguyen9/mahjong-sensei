@@ -132,15 +132,3 @@ struct ARCameraPreview: UIViewRepresentable {
         }
     }
 }
-
-extension UIInterfaceOrientation {
-    var cameraImageOrientation: CGImagePropertyOrientation {
-        switch self {
-        case .portrait: return .right
-        case .portraitUpsideDown: return .left
-        case .landscapeLeft: return .up
-        case .landscapeRight: return .down
-        default: return .right
-        }
-    }
-}

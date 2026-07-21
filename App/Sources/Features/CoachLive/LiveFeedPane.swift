@@ -248,7 +248,7 @@ struct LiveFeedPane: View {
             // here: doing so was the visible calibration → Live handoff.
             Color.clear
         } else {
-            CameraPreview(session: session.camera.session)
+            CameraPreview(camera: session.camera)
         }
         #endif
     }

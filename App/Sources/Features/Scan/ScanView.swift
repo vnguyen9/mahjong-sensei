@@ -31,7 +31,7 @@ struct ScanView: View {
             #if targetEnvironment(simulator)
             ScreenBackground(.camera)
             #else
-            CameraPreview(session: coordinator.camera.session)
+            CameraPreview(camera: coordinator.camera)
                 .ignoresSafeArea()
                 .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) },
                                   action: { previewFrame = $0 })
@@ -169,8 +169,11 @@ struct ScanView: View {
                 try? await Task.sleep(for: .milliseconds(200))
                 continue
             }
-            if let buffer = coordinator.camera.latestBuffer {
-                let frame = RecognizerFrame.buffer(buffer, orientation: .right)
+            if let cameraFrame = coordinator.camera.latestFrame {
+                let frame = RecognizerFrame.buffer(
+                    cameraFrame.pixelBuffer,
+                    orientation: cameraFrame.imageOrientation
+                )
                 var roi: TileBoundingBox?
                 if previewFrame.width > 0, reticleFrame.width > 0 {
                     roi = AspectFillMapping.normalizedImageRect(of: reticleFrame,
@@ -225,19 +228,26 @@ struct ScanView: View {
         #if targetEnvironment(simulator)
         coordinator.capture(mode, frame: nil)
         #else
-        guard let buffer = coordinator.camera.latestBuffer else {
+        guard let cameraFrame = coordinator.camera.latestFrame else {
             coordinator.capture(mode, frame: nil)
             return
         }
-        let photo = Self.photo(from: buffer)
-        let full = RecognizerFrame.buffer(buffer, orientation: .right)
+        let buffer = cameraFrame.pixelBuffer
+        let orientation = cameraFrame.imageOrientation
+        let photo = Self.photo(from: buffer, orientation: orientation)
+        let full = RecognizerFrame.buffer(buffer, orientation: orientation)
         var roi: TileBoundingBox?
         if previewFrame.width > 0, reticleFrame.width > 0 {
             roi = AspectFillMapping.normalizedImageRect(of: reticleFrame,
                                                         previewBounds: previewFrame,
                                                         orientedImageSize: full.orientedPixelSize)
         }
-        if let roi, let cropped = Self.croppedFrame(from: buffer, roiNormalized: roi, margin: 0.04) {
+        if let roi, let cropped = Self.croppedFrame(
+            from: buffer,
+            roiNormalized: roi,
+            orientation: orientation,
+            margin: 0.04
+        ) {
             // The crop already scopes to the ROI, so capture it with no post-filter.
             coordinator.capture(mode, frame: cropped, roi: nil, photo: photo)
         } else {
@@ -262,8 +272,9 @@ struct ScanView: View {
 
     private static let ciContext = CIContext()
     /// Snapshot a camera pixel buffer into a UIImage for the post-scan backdrop.
-    static func photo(from buffer: CVPixelBuffer) -> UIImage? {
-        let image = CIImage(cvPixelBuffer: buffer).oriented(.right)
+    static func photo(from buffer: CVPixelBuffer,
+                      orientation: CGImagePropertyOrientation = .right) -> UIImage? {
+        let image = CIImage(cvPixelBuffer: buffer).oriented(orientation)
         guard let cg = ciContext.createCGImage(image, from: image.extent) else { return nil }
         return UIImage(cgImage: cg)
     }
@@ -275,8 +286,9 @@ struct ScanView: View {
     /// is degenerate or can't be rendered (the caller then uses the full frame).
     static func croppedFrame(from buffer: CVPixelBuffer,
                              roiNormalized roi: TileBoundingBox,
+                             orientation: CGImagePropertyOrientation = .right,
                              margin: Double) -> RecognizerFrame? {
-        let image = CIImage(cvPixelBuffer: buffer).oriented(.right)
+        let image = CIImage(cvPixelBuffer: buffer).oriented(orientation)
         let W = Double(image.extent.width), H = Double(image.extent.height)
         guard W > 0, H > 0 else { return nil }
         let mx = roi.width * margin, my = roi.height * margin

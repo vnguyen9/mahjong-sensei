@@ -122,18 +122,24 @@ struct TrackerCard: View {
     }
 
     private func recordTapped() {
-        guard !isBusy, let buffer = coordinator.camera.latestBuffer else { return }
+        guard !isBusy, let cameraFrame = coordinator.camera.latestFrame else { return }
         Task {
             isBusy = true
             defer { isBusy = false }
-            let orientedSize = RecognizerFrame.buffer(buffer, orientation: .right).orientedPixelSize
+            let buffer = cameraFrame.pixelBuffer
+            let orientation = cameraFrame.imageOrientation
+            let orientedSize = RecognizerFrame.buffer(buffer, orientation: orientation).orientedPixelSize
             var roi: TileBoundingBox?
             if previewFrame.width > 0, reticleFrame.width > 0 {
                 roi = AspectFillMapping.normalizedImageRect(of: reticleFrame,
                                                              previewBounds: previewFrame,
                                                              orientedImageSize: orientedSize)
             }
-            let detections = await coordinator.recordScan(buffer: buffer, roi: roi)
+            let detections = await coordinator.recordScan(
+                buffer: buffer,
+                roi: roi,
+                imageOrientation: orientation
+            )
             commit(detections)
         }
     }

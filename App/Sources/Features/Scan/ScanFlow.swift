@@ -385,8 +385,13 @@ final class ScanCoordinator {
     /// merges/dedupes across crops, and returns the result for the caller to
     /// fold into `tracker.recordReplaceFromShot`.
     @MainActor
-    func recordScan(buffer: CVPixelBuffer, roi: TileBoundingBox? = nil) async -> [DetectedTile] {
-        await TiledTileRecognizer.recognize(buffer: buffer, roi: roi) { frame in
+    func recordScan(buffer: CVPixelBuffer, roi: TileBoundingBox? = nil,
+                    imageOrientation: CGImagePropertyOrientation = .right) async -> [DetectedTile] {
+        await TiledTileRecognizer.recognize(
+            buffer: buffer,
+            roi: roi,
+            imageOrientation: imageOrientation
+        ) { frame in
             let recognizer = await self.activeRecognizer()
             return (try? await recognizer.recognize(frame)) ?? .empty
         }

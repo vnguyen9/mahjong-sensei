@@ -1,5 +1,16 @@
 import SwiftUI
 import AVFoundation
+import ImageIO
+import UIKit
+
+/// One raw camera buffer and the display transform that makes it upright in
+/// the current window scene.  Capture consumers must take this snapshot rather
+/// than reading `latestBuffer` and the orientation separately while a rotation
+/// is in progress.
+struct CameraFrame {
+    let pixelBuffer: CVPixelBuffer
+    let imageOrientation: CGImagePropertyOrientation
+}
 
 /// The live-camera seam. Runs the back-camera session, drives the preview layer,
 /// and caches the latest frame so the shutter can run the bundled Core ML detector
@@ -16,13 +27,46 @@ final class CameraCapture: NSObject {
     /// torch can be toggled.
     private var videoDevice: AVCaptureDevice?
 
-    private let bufferLock = NSLock()
+    private let frameLock = NSLock()
     private var _latestBuffer: CVPixelBuffer?
+    private var _latestFrame: CameraFrame?
     /// The most recent camera frame (retained so the shutter can recognize a fresh
     /// frame on demand). Written on the frames queue, read on the main thread.
     var latestBuffer: CVPixelBuffer? {
-        bufferLock.lock(); defer { bufferLock.unlock() }
+        frameLock.lock(); defer { frameLock.unlock() }
         return _latestBuffer
+    }
+
+    /// The orientation that makes the camera's native landscape buffer match
+    /// the current window scene.  The buffer itself deliberately stays in its
+    /// native orientation: Vision, ROI mapping, crop creation, and tiled
+    /// recognition all receive this same transform instead of each attempting
+    /// to infer the device's current pose.
+    private var _imageOrientation: CGImagePropertyOrientation = .right
+    var imageOrientation: CGImagePropertyOrientation {
+        frameLock.lock(); defer { frameLock.unlock() }
+        return _imageOrientation
+    }
+
+    var latestFrame: CameraFrame? {
+        frameLock.lock(); defer { frameLock.unlock() }
+        return _latestFrame
+    }
+
+    func updateInterfaceOrientation(_ orientation: UIInterfaceOrientation) {
+        guard orientation != .unknown else { return }
+        let imageOrientation = orientation.cameraImageOrientation
+        frameLock.lock()
+        guard _imageOrientation != imageOrientation else {
+            frameLock.unlock()
+            return
+        }
+        // Do not let the last frame from the previous interface pose be
+        // combined with the just-rotated preview/reticle geometry. The next
+        // capture callback atomically publishes a fresh buffer + transform.
+        _latestFrame = nil
+        _imageOrientation = imageOrientation
+        frameLock.unlock()
     }
 
     /// Requests camera access and starts the session if granted.
@@ -91,28 +135,119 @@ extension CameraCapture: AVCaptureVideoDataOutputSampleBufferDelegate {
         // demand. A future enhancement runs detection continuously here with a
         // stability gate to auto-lock (see the plan).
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        bufferLock.lock()
+        frameLock.lock()
         _latestBuffer = pixelBuffer
-        bufferLock.unlock()
+        _latestFrame = CameraFrame(pixelBuffer: pixelBuffer, imageOrientation: _imageOrientation)
+        frameLock.unlock()
     }
 }
 
 /// Screen-space camera preview. Overlays (reticle, boxes) are drawn on top in 2D —
 /// no ARKit for the flat-hand MVP (per the plan's constraint).
-struct CameraPreview: UIViewRepresentable {
-    let session: AVCaptureSession
+struct CameraPreview: UIViewControllerRepresentable {
+    let camera: CameraCapture
 
-    func makeUIView(context: Context) -> PreviewView {
-        let view = PreviewView()
-        view.previewLayer.session = session
-        view.previewLayer.videoGravity = .resizeAspectFill
-        return view
+    func makeUIViewController(context: Context) -> PreviewController {
+        PreviewController(camera: camera)
     }
 
-    func updateUIView(_ uiView: PreviewView, context: Context) {}
+    func updateUIViewController(_ uiViewController: PreviewController, context: Context) {}
+
+    /// A controller boundary gives us UIKit's rotation-transition completion,
+    /// when `effectiveGeometry.interfaceOrientation` is final.  Reading it
+    /// only from a plain view's layout pass can race iPad's size transition.
+    final class PreviewController: UIViewController {
+        private let preview: PreviewView
+
+        init(camera: CameraCapture) {
+            preview = PreviewView(camera: camera)
+            super.init(nibName: nil, bundle: nil)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func loadView() { view = preview }
+
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            preview.publishInterfaceOrientation()
+        }
+
+        override func viewWillTransition(to size: CGSize,
+                                         with coordinator: any UIViewControllerTransitionCoordinator) {
+            super.viewWillTransition(to: size, with: coordinator)
+            coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+                self?.preview.publishInterfaceOrientation()
+            }
+        }
+    }
 
     final class PreviewView: UIView {
+        private let camera: CameraCapture
+
+        init(camera: CameraCapture) {
+            self.camera = camera
+            super.init(frame: .zero)
+            previewLayer.session = camera.session
+            previewLayer.videoGravity = .resizeAspectFill
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
         var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            publishInterfaceOrientation()
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            publishInterfaceOrientation()
+        }
+
+        /// Preview rotation and recognizer orientation are updated from one
+        /// window-scene value.  Do not rotate `AVCaptureVideoDataOutput`: its
+        /// native buffers are intentionally shared with Vision and all crop
+        /// paths, which use `camera.imageOrientation` below.
+        func publishInterfaceOrientation() {
+            let orientation =
+                window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
+            camera.updateInterfaceOrientation(orientation)
+            let angle = orientation.cameraPreviewRotationAngle
+            if let connection = previewLayer.connection,
+               connection.isVideoRotationAngleSupported(angle) {
+                connection.videoRotationAngle = angle
+            }
+        }
+    }
+}
+
+/// The raw back-camera buffer is landscape. These transforms are the one
+/// shared camera contract for the 2D Scan lanes and the AR preview: portrait
+/// remains the historic `.right` path, while every supported iPad rotation
+/// gets the matching Vision/CI orientation and preview rotation.
+extension UIInterfaceOrientation {
+    var cameraImageOrientation: CGImagePropertyOrientation {
+        switch self {
+        case .portrait: return .right
+        case .portraitUpsideDown: return .left
+        case .landscapeLeft: return .up
+        case .landscapeRight: return .down
+        default: return .right
+        }
+    }
+
+    var cameraPreviewRotationAngle: CGFloat {
+        switch self {
+        case .portrait: return 90
+        case .portraitUpsideDown: return 270
+        case .landscapeLeft: return 0
+        case .landscapeRight: return 180
+        default: return 90
+        }
     }
 }
