@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import ImageIO
 import UIKit
+import Recognition
 
 /// One raw camera buffer and the display transform that makes it upright in
 /// the current window scene.  Capture consumers must take this snapshot rather
@@ -55,7 +56,7 @@ final class CameraCapture: NSObject {
 
     func updateInterfaceOrientation(_ orientation: UIInterfaceOrientation) {
         guard orientation != .unknown else { return }
-        let imageOrientation = orientation.cameraImageOrientation
+        let imageOrientation = orientation.scanCameraImageOrientation
         frameLock.lock()
         guard _imageOrientation != imageOrientation else {
             frameLock.unlock()
@@ -217,7 +218,7 @@ struct CameraPreview: UIViewControllerRepresentable {
             let orientation =
                 window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
             camera.updateInterfaceOrientation(orientation)
-            let angle = orientation.cameraPreviewRotationAngle
+            let angle = orientation.scanCameraPreviewRotationAngle
             if let connection = previewLayer.connection,
                connection.isVideoRotationAngleSupported(angle) {
                 connection.videoRotationAngle = angle
@@ -226,11 +227,15 @@ struct CameraPreview: UIViewControllerRepresentable {
     }
 }
 
-/// The raw back-camera buffer is landscape. These transforms are the one
-/// shared camera contract for the 2D Scan lanes and the AR preview: portrait
-/// remains the historic `.right` path, while every supported iPad rotation
-/// gets the matching Vision/CI orientation and preview rotation.
+/// The raw `AVCaptureVideoDataOutput` back-camera buffer is landscape. UIKit's
+/// `landscapeLeft`/`landscapeRight` name the *interface*, which is opposite to
+/// the physical device turn. Keep this mapping local to the non-AR capture
+/// pipeline: ARKit has its own captured-image coordinate system and is already
+/// calibrated through `ARFrame.displayTransform`.
 extension UIInterfaceOrientation {
+    /// ARKit's captured-image transform. This is intentionally separate from
+    /// `scanCameraImageOrientation`: ARKit's image coordinates are not the
+    /// `AVCaptureVideoDataOutput` rear-camera coordinates used by Scan.
     var cameraImageOrientation: CGImagePropertyOrientation {
         switch self {
         case .portrait: return .right
@@ -241,13 +246,21 @@ extension UIInterfaceOrientation {
         }
     }
 
-    var cameraPreviewRotationAngle: CGFloat {
+    private var scanCameraOrientation: ScanCameraOrientation {
         switch self {
-        case .portrait: return 90
-        case .portraitUpsideDown: return 270
-        case .landscapeLeft: return 0
-        case .landscapeRight: return 180
-        default: return 90
+        case .portrait: return .portrait
+        case .portraitUpsideDown: return .portraitUpsideDown
+        case .landscapeLeft: return .landscapeLeft
+        case .landscapeRight: return .landscapeRight
+        default: return .portrait
         }
+    }
+
+    var scanCameraImageOrientation: CGImagePropertyOrientation {
+        scanCameraOrientation.imageOrientation
+    }
+
+    var scanCameraPreviewRotationAngle: CGFloat {
+        scanCameraOrientation.previewRotationAngle
     }
 }
