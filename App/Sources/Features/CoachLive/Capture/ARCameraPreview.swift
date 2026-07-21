@@ -80,7 +80,7 @@ struct ARCameraPreview: UIViewRepresentable {
             let drawableSize = CGSize(width: drawable.texture.width, height: drawable.texture.height)
             let interfaceOrientation =
                 window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
-            capture.updateImageOrientation(interfaceOrientation.cameraImageOrientation)
+            capture.updateInterfaceOrientation(interfaceOrientation)
             let displayed = Self.displayedImage(
                 frame: frame,
                 interfaceOrientation: interfaceOrientation,
@@ -95,7 +95,7 @@ struct ARCameraPreview: UIViewRepresentable {
         private func publishInterfaceOrientation() {
             let orientation =
                 window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
-            capture.updateImageOrientation(orientation.cameraImageOrientation)
+            capture.updateInterfaceOrientation(orientation)
         }
 
         /// ARKit's display transform is the preview authority, including the

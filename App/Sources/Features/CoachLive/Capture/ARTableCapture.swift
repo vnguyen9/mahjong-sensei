@@ -130,6 +130,13 @@ final class ARTableCapture: NSObject {
     @ObservationIgnored private let frameLock = NSLock()
     @ObservationIgnored nonisolated(unsafe) private var _latestFrame: ARTableFrame?
     @ObservationIgnored private let orientationLock = NSLock()
+    /// The interface orientation is display state, not ARKit camera state.
+    /// Keep it independently from the frame cache so every frame snapshots
+    /// one coherent raw-image/oriented-image transform while the iPad rotates.
+    /// Storing UIKit's raw value also lets world-point projection use the
+    /// exact same orientation as the recognizer/depth path.
+    @ObservationIgnored nonisolated(unsafe) private var interfaceOrientationRaw: Int =
+        UIInterfaceOrientation.portrait.rawValue
     @ObservationIgnored nonisolated(unsafe) private var imageOrientationRaw: UInt32 =
         CGImagePropertyOrientation.right.rawValue
     /// The most recent frame ARKit has delivered, cached behind a lock so
@@ -143,18 +150,47 @@ final class ARTableCapture: NSObject {
         return _latestFrame
     }
 
+    /// Publishes the window-scene orientation from the one persistent AR
+    /// surface. This never reconfigures or otherwise touches the AR session.
+    /// It solely determines how the *next* captured image is handed to
+    /// Vision, depth sampling, crops, and ARKit's display projection.
+    nonisolated func updateInterfaceOrientation(
+        _ orientation: UIInterfaceOrientation
+    ) {
+        guard orientation != .unknown else { return }
+        orientationLock.lock()
+        interfaceOrientationRaw = orientation.rawValue
+        imageOrientationRaw = orientation.cameraImageOrientation.rawValue
+        orientationLock.unlock()
+    }
+
+    /// Compatibility bridge for the legacy non-AR camera preview. Production
+    /// LiDAR Coach Live calls `updateInterfaceOrientation(_:)` directly so it
+    /// never has to reconstruct display orientation from EXIF orientation.
     nonisolated func updateImageOrientation(
         _ orientation: CGImagePropertyOrientation
     ) {
-        orientationLock.lock()
-        imageOrientationRaw = orientation.rawValue
-        orientationLock.unlock()
+        let interfaceOrientation: UIInterfaceOrientation
+        switch orientation {
+        case .right: interfaceOrientation = .portrait
+        case .left: interfaceOrientation = .portraitUpsideDown
+        case .up: interfaceOrientation = .landscapeLeft
+        case .down: interfaceOrientation = .landscapeRight
+        default: interfaceOrientation = .portrait
+        }
+        updateInterfaceOrientation(interfaceOrientation)
     }
 
     nonisolated private var currentImageOrientation: CGImagePropertyOrientation {
         orientationLock.lock()
         defer { orientationLock.unlock() }
         return CGImagePropertyOrientation(rawValue: imageOrientationRaw) ?? .right
+    }
+
+    nonisolated private var currentInterfaceOrientation: UIInterfaceOrientation {
+        orientationLock.lock()
+        defer { orientationLock.unlock() }
+        return UIInterfaceOrientation(rawValue: interfaceOrientationRaw) ?? .portrait
     }
 
     // MARK: - Internal (main-actor-only) bookkeeping
@@ -353,16 +389,6 @@ final class ARTableCapture: NSObject {
         )
         guard projected.x.isFinite, projected.y.isFinite else { return nil }
         return projected
-    }
-
-    private var currentInterfaceOrientation: UIInterfaceOrientation {
-        switch currentImageOrientation {
-        case .right: return .portrait
-        case .left: return .portraitUpsideDown
-        case .up: return .landscapeLeft
-        case .down: return .landscapeRight
-        default: return .portrait
-        }
     }
 
     /// Keeps exactly one named AR anchor for the fitted table origin. Tile

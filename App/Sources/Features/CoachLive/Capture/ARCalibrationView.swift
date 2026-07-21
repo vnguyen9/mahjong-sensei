@@ -316,10 +316,26 @@ final class ARCalibrationViewController: UIViewController, ARSCNViewDelegate {
         publishInterfaceOrientation()
     }
 
+    /// SwiftUI keeps this controller mounted when calibration becomes Live,
+    /// so an iPad rotation does not cause another controller lifecycle event.
+    /// Publish after UIKit has committed the new window-scene geometry and
+    /// force only the renderer layout; deliberately do not run, pause, or
+    /// reset the shared AR session.
+    override func viewWillTransition(to size: CGSize,
+                                     with coordinator: any UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            guard let self else { return }
+            self.publishInterfaceOrientation()
+            self.sceneView.setNeedsLayout()
+            self.sceneView.layoutIfNeeded()
+        }
+    }
+
     private func publishInterfaceOrientation() {
         let orientation =
-            view.window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
-        capture.updateImageOrientation(orientation.cameraImageOrientation)
+            view.window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .unknown
+        capture.updateInterfaceOrientation(orientation)
     }
 
     // MARK: - Setup
