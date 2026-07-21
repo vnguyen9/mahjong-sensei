@@ -281,6 +281,7 @@ swift test --package-path Packages/Recognition
 
 Xcode 26.5 SDK / deployment target iOS 26.0:
 - generic iOS build: passed
+- generic physical-device (`iphoneos`, arm64) build: passed
 - separate iPhone iOS 26.5 Simulator gate: passed
 - separate iPad iOS 26.5 Simulator gate: passed
 ```

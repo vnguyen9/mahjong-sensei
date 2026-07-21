@@ -191,7 +191,9 @@ final class ARTableCapture: NSObject {
     /// True once `ARWorldTrackingConfiguration` reports support — false on
     /// the Simulator (and any device lacking the needed sensors), which is
     /// exactly the case `start()` maps to `captureStage = .unavailable`.
-    static var isSupported: Bool { ARWorldTrackingConfiguration.isSupported }
+    nonisolated static var isSupported: Bool {
+        ARWorldTrackingConfiguration.isSupported
+    }
     nonisolated static var supportsSceneDepth: Bool {
         ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth)
             || ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
