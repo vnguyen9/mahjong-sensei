@@ -2,6 +2,17 @@ import Foundation
 import MahjongCore
 import Recognition
 
+/// The census has two separate presentation obligations: gameplay needs only
+/// face-resolved tiles, while the live AR surface must account for every
+/// confirmed physical tile.  Keeping those views separate prevents an
+/// uncertain classifier result from making a real tile disappear or from
+/// corrupting scoring and conservation math.
+struct CensusPresentation {
+    var knownState: TrackedTableState
+    var unknownTracks: [SpatialUnknownTile]
+    var physicalZoneCounts: [SemanticZoneID: Int]
+}
+
 enum CensusStateAdapter {
     static func makeBootstrapState(
         preserving legacy: TrackedTableState
@@ -29,18 +40,19 @@ enum CensusStateAdapter {
         )
     }
 
-    static func makeState(
+    static func makePresentation(
         snapshot: CensusSnapshot,
         preserving legacy: TrackedTableState,
         tableExtent: SIMD2<Float>,
         censusRevision: Int
-    ) -> TrackedTableState {
+    ) -> CensusPresentation {
         var hand: [TrackedTile] = []
         var bonus: [TrackedTile] = []
         var myMeld: [TrackedTile] = []
         var pond: [TrackedTile] = []
         var opponent: [RelativeSeat: [TrackedTile]] = [:]
         var unresolved: [TrackedTile] = []
+        let physical = CensusPhysicalPresentation.make(snapshot: snapshot)
 
         let eligible = snapshot.tracks.filter {
             $0.lifecycle != .tentative && $0.lifecycle != .retired
@@ -55,7 +67,9 @@ enum CensusStateAdapter {
         }
 
         for track in eligible {
-            guard case .tile(let tile)? = track.face else { continue }
+            guard case .tile(let tile)? = track.face else {
+                continue
+            }
             let life: TrackedTile.Life = track.lifecycle == .confirmed
                 ? .live
                 : .missing
@@ -114,7 +128,7 @@ enum CensusStateAdapter {
             + myMeld.filter { !$0.face.isBonus }.count
         let unseen = max(0, 136 - mineCount - seen.reduce(0, +))
 
-        return TrackedTableState(
+        let knownState = TrackedTableState(
             revision: legacy.revision + censusRevision,
             phase: legacy.phase,
             handIndex: legacy.handIndex,
@@ -135,5 +149,27 @@ enum CensusStateAdapter {
             handTileCount: hand.filter { !$0.face.isBonus }.count,
             isMyHandComplete: legacy.isMyHandComplete
         )
+        return CensusPresentation(
+            knownState: knownState,
+            unknownTracks: physical.unknownTracks,
+            physicalZoneCounts: physical.zoneCounts
+        )
+    }
+
+    /// Compatibility seam for callers that only need resolved gameplay state.
+    /// New AR presentation code must use `makePresentation` so unknown physical
+    /// anchors remain visible and countable.
+    static func makeState(
+        snapshot: CensusSnapshot,
+        preserving legacy: TrackedTableState,
+        tableExtent: SIMD2<Float>,
+        censusRevision: Int
+    ) -> TrackedTableState {
+        makePresentation(
+            snapshot: snapshot,
+            preserving: legacy,
+            tableExtent: tableExtent,
+            censusRevision: censusRevision
+        ).knownState
     }
 }

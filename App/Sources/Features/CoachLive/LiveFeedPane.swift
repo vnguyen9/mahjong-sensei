@@ -503,6 +503,9 @@ struct LiveFeedPane: View {
         if session.isWarmingUp { return "Starting…" }
         if session.detectorUnavailable { return "LIVE · detector unavailable" }
         if session.thermal == .throttled { return "LIVE · cooling" }
+        if session.diagnostics.roiVerification.hasPrefix("verifying ") {
+            return "Tracking table · \(session.diagnostics.roiVerification)"
+        }
         if session.countSource == .spatialBootstrapping {
             return "Tracking table · \(session.diagnostics.worldCensusTracks) tile candidates"
         }
@@ -560,6 +563,7 @@ struct LiveFeedPane: View {
             Text("config \(session.diagnostics.configurationRunCount) · reset \(session.diagnostics.resetTrackingRunCount)/\(session.diagnostics.removeExistingAnchorsRunCount) · \(session.diagnostics.lastConfigurationReason)\(session.diagnostics.lastConfigurationUsedReset ? " ⚠︎" : "")")
             Text("rec: \(session.diagnostics.recognizerType) · mode \(session.arCapture != nil && !session.usingFallbackCapture ? "AR" : "2D")")
             Text(session.diagnostics.roiPlan)
+            Text("verification \(session.diagnostics.roiVerification)")
             Text("err(\(session.recognizerErrorCount)): \(session.lastPipelineError ?? "—")")
             #if DEBUG
             let geo = session.calibratedTableGeometry

@@ -7,7 +7,7 @@ import simd
 /// Stable identity for the five table-space regions
 /// `ROIScheduler.projectedZoneRects` reports — shared by explicit recount
 /// requests and the per-zone staleness/rescan-prompt tracker.
-enum TableZoneID: CaseIterable, Hashable {
+enum TableZoneID: CaseIterable, Hashable, Sendable {
     case hand, pond, meldLeft, meldRight, meldFar
 
     /// The rescan-prompt chip's zone name ("Pan left to check ___ ←").
@@ -18,6 +18,19 @@ enum TableZoneID: CaseIterable, Hashable {
         case .meldLeft:  return "the tiles on your left"
         case .meldRight: return "the tiles on your right"
         case .meldFar:   return "the far side"
+        }
+    }
+
+    /// Compact, stable name for diagnostics. Keep this distinct from the
+    /// customer-facing `displayName`: it is a machine-auditable account of
+    /// work that really reached the recognizer.
+    var debugLabel: String {
+        switch self {
+        case .hand: return "hand"
+        case .pond: return "pond"
+        case .meldLeft: return "left"
+        case .meldRight: return "right"
+        case .meldFar: return "far"
         }
     }
 }
@@ -43,6 +56,24 @@ enum TableZoneID: CaseIterable, Hashable {
 ///    changed, in the RAW/un-rotated grid `MotionDetector` builds), the
 ///    my-turn flag, and whether the camera just settled — picks a plan.
 struct ROIScheduler {
+
+    /// The one-at-a-time first pass after calibration. It deliberately lives
+    /// in the scheduler (rather than in a second recognizer loop), so it
+    /// shares the normal thermal budget and cannot starve a region forever.
+    enum VerificationStatus: Equatable {
+        case inactive
+        case verifying(zone: TableZoneID, successfulReads: Int)
+        case complete
+
+        var debugLabel: String {
+            switch self {
+            case .inactive: return "—"
+            case let .verifying(zone, reads):
+                return "verifying \(zone.debugLabel) \(reads)/3"
+            case .complete: return "verified"
+            }
+        }
+    }
 
     /// One named zone's oriented-image rect (or `nil` if it didn't project
     /// onto this frame at all — see `projectedZoneRects`). The three meld
@@ -100,6 +131,11 @@ struct ROIScheduler {
     /// still gets caught eventually.
     var fullFrameInterval: TimeInterval = 20
 
+    /// The only crop budget. Call sites must execute every crop returned by
+    /// `decide`; keeping this cap here means a third planned crop can never
+    /// silently disappear in the AR loop.
+    var maximumCropsPerTick = 2
+
     private var lastFullFrameAt: TimeInterval?
     /// Debug-only breadcrumb (Lane B chunk E's HUD requirement) — which
     /// named zones the most recent `.crops` plan targeted, in priority
@@ -107,9 +143,107 @@ struct ROIScheduler {
     /// by `decide` itself — purely for `LiveFeedPane`'s triple-tap HUD.
     private(set) var lastPlanLabels: [String] = []
 
+    /// Labels for work that has been selected but has not reached the
+    /// recognizer yet. They are intentionally private: the production HUD
+    /// reports `lastPlanLabels`, which is updated only by
+    /// `recordCropExecution` / `recordFullFrameExecution`.
+    private var plannedZoneIDs: [TableZoneID] = []
+    private var pending: [TableZoneID: PendingCrop] = [:]
+    private var fairQueue = DeferredRegionWorkQueue<TableZoneID>()
+    private var verificationQueue = BoundedRegionVerificationQueue<TableZoneID>()
+
+    private struct PendingCrop {
+        var rect: TileBoundingBox
+        /// A deferred crop may outlive a camera pan. Keep it queued, but do
+        /// not execute its stale image-space rectangle until it projects on
+        /// the current frame again.
+        var isProjected: Bool
+    }
+
     init(fullFrameInterval: TimeInterval = 20) {
         self.fullFrameInterval = fullFrameInterval
     }
+
+    /// Starts the non-blocking confirmation pass. It does not run a model and
+    /// it does not bypass cadence; the next normal inference opportunities
+    /// consume the queue in the requested physical order.
+    mutating func beginPostCalibrationVerification() {
+        verificationQueue.begin(
+            order: [.hand, .pond, .meldLeft, .meldFar, .meldRight]
+        )
+    }
+
+    var verificationStatus: VerificationStatus {
+        guard let zone = verificationQueue.current else {
+            return verificationQueue.isComplete ? .complete : .inactive
+        }
+        return .verifying(
+            zone: zone,
+            successfulReads: verificationQueue.successfulReadsForCurrent
+        )
+    }
+
+    /// Reports that selected crop work reached the recognizer. Failed crop
+    /// plumbing deliberately remains pending. `stabilizedZoneIDs` is optional
+    /// because face/anchor stability belongs to the census layer, not this
+    /// scheduler; passing it allows that layer to end a zone before its third
+    /// successful read.
+    mutating func recordCropExecution(
+        executedIndices: [Int],
+        recognizerSucceeded: Bool,
+        stabilizedZoneIDs: Set<TableZoneID> = []
+    ) {
+        let executed = executedIndices.compactMap { index in
+            plannedZoneIDs.indices.contains(index) ? plannedZoneIDs[index] : nil
+        }
+        guard !executed.isEmpty else {
+            lastPlanLabels = []
+            return
+        }
+
+        // It was an actual recognizer invocation even if Vision returned an
+        // error, so it belongs in the HUD. It stays queued on failure.
+        lastPlanLabels = executed.map(\.debugLabel)
+        guard recognizerSucceeded else { return }
+
+        // Keep confirmation genuinely ordered. A second crop can still do
+        // useful normal tracking work, but it cannot advance the next region
+        // until the head has received its bounded reads.
+        let verificationHead = verificationQueue.current
+        for zone in executed {
+            pending.removeValue(forKey: zone)
+            fairQueue.complete(zone)
+            if zone == verificationHead {
+                recordSuccessfulVerificationRead(for: zone,
+                                                 stabilized: stabilizedZoneIDs.contains(zone))
+            }
+        }
+    }
+
+    /// A successful tiled full-frame read advances only the queue head. The
+    /// recognizer has looked at everything, but maintaining the requested
+    /// hand → pond → left → far → right order keeps the status honest.
+    mutating func recordFullFrameExecution(
+        recognizerSucceeded: Bool,
+        stabilizedZoneIDs: Set<TableZoneID> = []
+    ) {
+        lastPlanLabels = ["full"]
+        guard recognizerSucceeded else { return }
+        for zone in plannedZoneIDs {
+            pending.removeValue(forKey: zone)
+            fairQueue.complete(zone)
+        }
+        if let zone = verificationQueue.current,
+           plannedZoneIDs.contains(zone) {
+            recordSuccessfulVerificationRead(for: zone,
+                                             stabilized: stabilizedZoneIDs.contains(zone))
+        }
+    }
+
+    /// Region identities paired with the most recently returned crop/full
+    /// plan. The session uses this only to calculate census stabilization for
+    /// the exact work that reached Vision.
+    var plannedRegions: [TableZoneID] { plannedZoneIDs }
 
     /// Projects the tracker's fixed table-space zone geometry into
     /// oriented-normalized image rects — see the type doc's phase 1. A
@@ -277,17 +411,16 @@ struct ROIScheduler {
         let dueForFullFrame = justSettled || lastFullFrameAt == nil || t - lastFullFrameAt! >= fullFrameInterval
         if dueForFullFrame {
             lastFullFrameAt = t
-            lastPlanLabels = ["full"]
+            // The HUD becomes "full" only after the recognizer actually
+            // runs; this plan can still be abandoned by a later guard.
+            plannedZoneIDs = zones.identified.map(\.id)
+            lastPlanLabels = []
             return .fullFrame
         }
 
-        guard let motionField else {
-            lastPlanLabels = []
-            return .none
-        }
-
         func dirty(_ rect: TileBoundingBox) -> Bool {
-            isDirty(
+            guard let motionField else { return false }
+            return isDirty(
                 rect,
                 motionField: motionField,
                 imageResolution: imageResolution,
@@ -296,34 +429,91 @@ struct ROIScheduler {
             )
         }
 
-        let handEntry: (String, TileBoundingBox)? = zones.hand.flatMap { dirty($0) ? ("hand", $0) : nil }
-        let pondEntry: (String, TileBoundingBox)? = zones.pond.flatMap { dirty($0) ? ("pond", $0) : nil }
-        let meldEntries: [(String, TileBoundingBox)] = zones.melds.filter(dirty).map { ("meld", $0) }
+        // A dirty region is retained until a recognizer invocation succeeds.
+        // This is the key difference from the old `prefix(2)` call-site cap:
+        // a third region is deferred, not forgotten.
+        let projected = Dictionary(uniqueKeysWithValues: zones.identified)
+        for id in pending.keys {
+            guard var old = pending[id] else { continue }
+            if let current = projected[id] {
+                old.rect = current
+                old.isProjected = true
+                fairQueue.setAvailable(true, for: id)
+            } else {
+                old.isProjected = false
+                fairQueue.setAvailable(false, for: id)
+            }
+            pending[id] = old
+        }
+        for (id, rect) in zones.identified where dirty(rect) {
+            if var old = pending[id] {
+                old.rect = rect
+                pending[id] = old
+            } else {
+                pending[id] = PendingCrop(rect: rect, isProjected: true)
+                fairQueue.enqueue(id)
+            }
+        }
 
-        var ordered: [(String, TileBoundingBox)] = []
-        if myTurn, let handEntry { ordered.append(handEntry) }
-        if let pondEntry { ordered.append(pondEntry) }
-        ordered.append(contentsOf: meldEntries)
-        if !myTurn, let handEntry { ordered.append(handEntry) }
+        // The verification queue is allowed to request an otherwise-still
+        // region. If it is offscreen, do not manufacture a crop; it remains
+        // queued until its exact calibrated polygon projects again.
+        if let verificationZone = verificationQueue.current,
+           let rect = projected[verificationZone] {
+            if var old = pending[verificationZone] {
+                old.rect = rect
+                pending[verificationZone] = old
+            } else {
+                pending[verificationZone] = PendingCrop(rect: rect, isProjected: true)
+                fairQueue.enqueue(verificationZone)
+            }
+        }
 
-        guard !ordered.isEmpty else {
+        guard !pending.isEmpty else {
+            plannedZoneIDs = []
             lastPlanLabels = []
             return .none
         }
 
-        let crops = ordered.compactMap { _, rect -> CGRect? in
-            let cropRect = ROICropMapper.cropRect(forZoneImageRect: rect, orientedImageSize: orientedImageSize,
+        let orderedIDs = fairQueue.select(
+            maximum: maximumCropsPerTick,
+            priority: verificationQueue.current,
+            preferred: myTurn ? .hand : nil
+        )
+
+        var selected: [(TableZoneID, CGRect)] = []
+        for id in orderedIDs {
+            guard let pendingCrop = pending[id] else { continue }
+            guard pendingCrop.isProjected else { continue }
+            let cropRect = ROICropMapper.cropRect(forZoneImageRect: pendingCrop.rect,
+                                                  orientedImageSize: orientedImageSize,
                                                   imageResolution: imageResolution,
                                                   imageOrientation: imageOrientation)
-            return cropRect.width >= 2 && cropRect.height >= 2 ? cropRect : nil
+            guard cropRect.width >= 2, cropRect.height >= 2 else { continue }
+            selected.append((id, cropRect))
         }
-        guard !crops.isEmpty else {
+
+        guard !selected.isEmpty else {
+            plannedZoneIDs = []
             lastPlanLabels = []
             return .none
         }
 
-        lastPlanLabels = ordered.map(\.0)
-        return .crops(crops)
+        plannedZoneIDs = selected.map(\.0)
+        // Do not claim a crop in diagnostics before it ran.
+        lastPlanLabels = []
+        return .crops(selected.map(\.1))
+    }
+
+    private mutating func recordSuccessfulVerificationRead(
+        for zone: TableZoneID,
+        stabilized: Bool
+    ) {
+        verificationQueue.recordSuccessfulRead(
+            for: zone,
+            stabilized: stabilized,
+            maximumReads: 3
+        )
     }
 
     /// Whether any changed `MotionField` cell (native/raw grid space)

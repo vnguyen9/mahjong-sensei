@@ -8,6 +8,7 @@ import Recognition
 struct HandStrip: View {
     @Environment(CoachLiveSession.self) private var session
     let onTapTile: (TrackID) -> Void
+    let onTapUnknown: (TrackID) -> Void
 
     /// The first hand/drawn tile matching the recommended discard's face —
     /// mirrors the old `CoachView`'s `firstIndex(of:)` convention (rings one
@@ -24,6 +25,9 @@ struct HandStrip: View {
             HStack(spacing: 2.5) {
                 ForEach(session.handTiles) { tracked in
                     tile(tracked)
+                }
+                ForEach(unknownHandTiles) { unknown in
+                    unknownTile(unknown)
                 }
             }
             if let drawn = session.drawnTile {
@@ -56,5 +60,27 @@ struct HandStrip: View {
                 }
             }
             .onTapGesture { onTapTile(tracked.id) }
+    }
+
+    private var unknownHandTiles: [SpatialUnknownTile] {
+        session.spatialUnknownTiles.filter {
+            $0.zone == .mineHand
+        }
+    }
+
+    private func unknownTile(_ tile: SpatialUnknownTile) -> some View {
+        Button { onTapUnknown(tile.id) } label: {
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .strokeBorder(MJColor.amberZone, style: StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
+                .frame(width: 22, height: 31)
+                .overlay {
+                    Text("?")
+                        .font(MJFont.ui(14, weight: .bold))
+                        .foregroundStyle(MJColor.creamHeading)
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Unknown tile in your area")
+        .accessibilityHint("Double tap to identify its face.")
     }
 }

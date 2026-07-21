@@ -9,6 +9,7 @@ struct MapTab: View {
     @Environment(CoachLiveSession.self) private var session
     @Environment(\.liveCompression) private var compression
     let onTapUnresolved: () -> Void
+    let onTapUnknown: (TrackID) -> Void
 
     private var pondTileWidth: CGFloat { compression == .full ? 16 : 13 }
     private var meldTileWidth: CGFloat { compression == .full ? 15 : 13 }
@@ -32,6 +33,7 @@ struct MapTab: View {
                     seatRow(.right)
                 }
                 Spacer(minLength: 0)
+                myRevealedUnknownRow
             }
             .padding(12)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -50,6 +52,13 @@ struct MapTab: View {
                 .buttonStyle(.plain)
                 .padding(10)
             }
+
+            if !session.spatialUnknownTiles.isEmpty {
+                unknownSummary
+                    .padding(10)
+                    .padding(.bottom, session.unresolved.isEmpty ? 42 : 0)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -66,6 +75,9 @@ struct MapTab: View {
                         }
                     }
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
+            ForEach(unknownTiles(in: .tablePond)) { tile in
+                unknownTile(tile)
             }
         }
         .frame(maxWidth: 210)
@@ -85,13 +97,92 @@ struct MapTab: View {
                         TileRow(meld.tiles, theme: .jade, width: meldTileWidth, spacing: 1.5)
                     }
                 }
+                unknownRow(for: seat)
             }
         } else {
-            Text("\(windEnglish(wind)) · \(session.concealedCounts[seat] ?? 13) · concealed")
-                .font(MJFont.ui(11)).foregroundStyle(MJColor.cream(0.55))
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(Color.white.opacity(0.06), in: Capsule())
+            VStack(spacing: 3) {
+                Text("\(windEnglish(wind)) · \(session.concealedCounts[seat] ?? 13) · concealed")
+                    .font(MJFont.ui(11)).foregroundStyle(MJColor.cream(0.55))
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(Color.white.opacity(0.06), in: Capsule())
+                unknownRow(for: seat)
+            }
         }
+    }
+
+    private var unknownSummary: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: "questionmark.square.dashed")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("\(session.spatialUnknownTiles.count) physical tile\(session.spatialUnknownTiles.count == 1 ? "" : "s") need faces")
+                    .font(MJFont.ui(11, weight: .bold))
+            }
+            let boundary = unknownTiles(in: .boundaryUnresolved)
+            if !boundary.isEmpty {
+                HStack(spacing: 2) {
+                    ForEach(boundary) { tile in unknownTile(tile) }
+                }
+            }
+        }
+        .foregroundStyle(MJColor.inkOnAmber)
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(MJColor.amberZone, in: Capsule())
+        .accessibilityLabel("\(session.spatialUnknownTiles.count) physical tiles need face identification")
+    }
+
+    @ViewBuilder
+    private var myRevealedUnknownRow: some View {
+        let tiles = unknownTiles(in: .mineMeld)
+        if !tiles.isEmpty {
+            VStack(spacing: 3) {
+                Text("Your revealed tiles")
+                    .font(MJFont.ui(10, weight: .semibold))
+                    .foregroundStyle(MJColor.cream(0.55))
+                HStack(spacing: 2) {
+                    ForEach(tiles) { tile in unknownTile(tile) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func unknownRow(for seat: RelativeSeat) -> some View {
+        let tiles = unknownTiles(in: semanticZone(for: seat))
+        if !tiles.isEmpty {
+            HStack(spacing: 2) {
+                ForEach(tiles) { tile in unknownTile(tile) }
+            }
+        }
+    }
+
+    private func semanticZone(for seat: RelativeSeat) -> SemanticZoneID {
+        switch seat {
+        case .me: return .mineMeld
+        case .left: return .tableRevealedLeft
+        case .across: return .tableRevealedFar
+        case .right: return .tableRevealedRight
+        }
+    }
+
+    private func unknownTiles(in zone: SemanticZoneID) -> [SpatialUnknownTile] {
+        session.spatialUnknownTiles.filter { $0.zone == zone }
+    }
+
+    private func unknownTile(_ tile: SpatialUnknownTile) -> some View {
+        Button { onTapUnknown(tile.id) } label: {
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .strokeBorder(MJColor.amberZone, style: StrokeStyle(lineWidth: 1.4, dash: [3, 2]))
+                .frame(width: meldTileWidth, height: meldTileWidth * 1.35)
+                .overlay {
+                    Text("?")
+                        .font(MJFont.ui(12, weight: .bold))
+                        .foregroundStyle(MJColor.creamHeading)
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Unknown physical tile")
+        .accessibilityHint("Double tap to identify its face.")
     }
 }
 

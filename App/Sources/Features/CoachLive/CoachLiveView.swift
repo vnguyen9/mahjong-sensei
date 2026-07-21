@@ -27,6 +27,7 @@ enum CoachLiveSheet: Identifiable, Hashable {
     case adjustCount(Tile)
     case fixEvent(UUID)
     case pickHandTile(TrackID)
+    case pickUnknownTile(TrackID)
     case adviceDetail
 
     var id: String {
@@ -35,6 +36,7 @@ enum CoachLiveSheet: Identifiable, Hashable {
         case let .adjustCount(tile):  return "adjust-\(tile.classIndex)"
         case let .fixEvent(id):       return "fix-\(id)"
         case let .pickHandTile(id):   return "pick-\(id.raw)"
+        case let .pickUnknownTile(id): return "unknown-\(id.raw)"
         case .adviceDetail:           return "advice"
         }
     }
@@ -210,12 +212,10 @@ struct CoachLiveView: View {
             VStack(spacing: 6) {
                 HStack(spacing: 8) {
                     Circle().fill(MJColor.liveRed).frame(width: 7, height: 7)
-                    Text(session.countSource == .spatialBootstrapping
-                         ? "Tracking table"
-                         : "Tracking live table")
+                    Text(collapsedTrackingStatus)
                         .font(MJFont.ui(13, weight: .semibold))
                     Spacer()
-                    Text("\(session.diagnostics.worldCensusTracks) physical tiles")
+                    Text("\(session.liveTileCount) physical tiles")
                         .font(MJFont.ui(13, weight: .bold))
                 }
                 .foregroundStyle(MJColor.creamHeading)
@@ -227,6 +227,15 @@ struct CoachLiveView: View {
             .padding(.bottom, 16)
         }
         .buttonStyle(.plain)
+    }
+
+    private var collapsedTrackingStatus: String {
+        if session.diagnostics.roiVerification.hasPrefix("verifying ") {
+            return "Tracking table · \(session.diagnostics.roiVerification)"
+        }
+        return session.countSource == .spatialBootstrapping
+            ? "Tracking table"
+            : "Tracking live table"
     }
 
     // MARK: - Bracket-reassign confirmation (A3)
@@ -257,7 +266,10 @@ struct CoachLiveView: View {
             CorrectionHintBanner()
             tabContent
                 .frame(maxWidth: .infinity, minHeight: 84, maxHeight: .infinity)
-            HandStrip { id in sheet = .pickHandTile(id) }
+            HandStrip(
+                onTapTile: { id in sheet = .pickHandTile(id) },
+                onTapUnknown: { id in sheet = .pickUnknownTile(id) }
+            )
             AdviceLine { sheet = .adviceDetail }
             // Always-available one-shot recount affordance, AR mode only.
             if session.isARCaptureActive {
@@ -303,7 +315,11 @@ struct CoachLiveView: View {
 
     @ViewBuilder private var tabContent: some View {
         switch tab {
-        case .map:    MapTab { sheet = .assign }
+        case .map:
+            MapTab(
+                onTapUnresolved: { sheet = .assign },
+                onTapUnknown: { id in sheet = .pickUnknownTile(id) }
+            )
         case .counts: CountsTab { tile in sheet = .adjustCount(tile) }
         case .events: EventsTab { id in sheet = .fixEvent(id) }
         }
@@ -338,6 +354,13 @@ struct CoachLiveView: View {
         case let .pickHandTile(id):
             CorrectionPicker(current: currentHandFace(id), confirmVerb: "Use", onConfirm: { tile in
                 session.overrideHandTile(id, as: tile)
+                sheet = nil
+            }, onRemove: nil)
+            .presentationDetents([.height(460)])
+            .presentationBackground(.clear)
+        case let .pickUnknownTile(id):
+            CorrectionPicker(current: nil, confirmVerb: "Set tile", onConfirm: { tile in
+                session.overrideSpatialUnknownTile(id, as: tile)
                 sheet = nil
             }, onRemove: nil)
             .presentationDetents([.height(460)])

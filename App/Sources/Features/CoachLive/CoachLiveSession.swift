@@ -60,6 +60,15 @@ final class CoachLiveSession: Identifiable {
     var concealedCounts: [RelativeSeat: Int] = [:]
     var pond: [PondEntry] = []
     var unresolved: [UnresolvedTile] = []
+    /// Confirmed physical census anchors whose tile face is not known yet.
+    /// These are intentionally separate from `unresolved`: the latter is a
+    /// resolved-face gameplay tile with an uncertain *zone*, while these are
+    /// spatially zoned but must not enter scoring until the user or recognizer
+    /// supplies a face.
+    var spatialUnknownTiles: [SpatialUnknownTile] = []
+    /// Physical AR anchors by semantic region. This is the authoritative total
+    /// in healthy LiDAR mode; never mix it with image-space tracker counts.
+    var physicalZoneCounts: [SemanticZoneID: Int] = [:]
     /// 34-slot, classIndex-keyed — same shape as `ScanSession.seenHistogram`.
     var seenHistogram: [Int] = Array(repeating: 0, count: Tile.baseClassCount)
     /// Pond + opponent melds only — kept exactly as the engine (`recomputeAdvice`/
@@ -76,7 +85,19 @@ final class CoachLiveSession: Identifiable {
     /// hand would read 0 tiles seen under the old `seenTotal`-based pill even
     /// mid-hand, which is what motivated this fix.
     var liveTileCount: Int {
-        handTiles.count + (drawnTile == nil ? 0 : 1)
+        if countSource == .worldCensus {
+            return physicalZoneCounts.reduce(0) { partial, entry in
+                switch entry.key {
+                case .mineHand, .mineMeld, .tablePond,
+                        .tableRevealedLeft, .tableRevealedFar,
+                        .tableRevealedRight, .boundaryUnresolved:
+                    return partial + entry.value
+                case .ignoredWall:
+                    return partial
+                }
+            }
+        }
+        return handTiles.count + (drawnTile == nil ? 0 : 1)
             + myMelds.reduce(0) { $0 + $1.tiles.count }
             + opponentMelds.values.reduce(0) { $0 + $1.reduce(0) { $0 + $1.tiles.count } }
             + pond.count + unresolved.count
@@ -257,6 +278,14 @@ final class CoachLiveSession: Identifiable {
     }
     private var calibrationDraft: CalibrationDraft?
     private var calibrationHasBeenFinalized = false
+    /// Consumed by the already-running AR loop. Confirmation does not create
+    /// a second recognizer/session; it merely asks its ROI scheduler to make
+    /// the first fair verification pass across the five marked regions.
+    private var pendingSpatialVerification = false
+    private struct VerificationSignatureState {
+        var signature: String
+        var repeatedReads: Int
+    }
     private var needsFreshARStartAfterCalibrationCancel = false
     private var calibrationDecision = "FRESH"
 
@@ -351,6 +380,7 @@ final class CoachLiveSession: Identifiable {
         arCapture?.invalidatePersistedCalibration()
         arCapture?.updateTableCalibration(calibration)
         recountRequest = .fullTable
+        pendingSpatialVerification = true
         calibrationHasBeenFinalized = true
         countSource = ARTableCapture.supportsSceneDepth
             ? .worldCensus
@@ -866,6 +896,7 @@ final class CoachLiveSession: Identifiable {
             var motionGate = CameraMotionGate()
             let motion = MotionDetector()
             var roiScheduler = ROIScheduler()
+            var verificationSignatures: [TableZoneID: VerificationSignatureState] = [:]
             let pixelBufferCropper = PixelBufferCropper()
             var recognizer: (any Recognizer)?
             var lastInference = CACurrentMediaTime() - 10   // due immediately once tracking starts
@@ -882,6 +913,11 @@ final class CoachLiveSession: Identifiable {
                 }
                 self.diagnostics.loopTicks += 1
                 self.refreshSpatialContinuityDiagnostics(capture: arCapture)
+                if self.pendingSpatialVerification {
+                    roiScheduler.beginPostCalibrationVerification()
+                    self.pendingSpatialVerification = false
+                    self.diagnostics.roiVerification = roiScheduler.verificationStatus.debugLabel
+                }
 
                 // Startup overlay: `.starting` → `.findingTable` the instant
                 // ARKit is delivering frames and hunting for the table.
@@ -1206,7 +1242,9 @@ final class CoachLiveSession: Identifiable {
                     let roiLabel: String
                     switch plan {
                     case .fullFrame: roiLabel = "full"
-                    case .crops: roiLabel = roiScheduler.lastPlanLabels.isEmpty ? "crop" : roiScheduler.lastPlanLabels.joined(separator: "+")
+                    // The scheduler has selected work, but only reports
+                    // zone labels after a crop actually reaches Vision.
+                    case .crops: roiLabel = "pending"
                     case .none: roiLabel = "none"
                     }
                     self.diagnostics.roiPlan = self.useROIScheduler ? "roi: \(roiLabel)" : "roi: off"
@@ -1271,7 +1309,6 @@ final class CoachLiveSession: Identifiable {
                             .prefix(3)
                             .map { "\($0.tile.code)@\(String(format: "%.2f", $0.confidence))" }
                         if self.isEnded { break pollLoop }
-
                         // Pixel-space detections → table-space `DetectedTile`s
                         // (the seam that keeps `Recognition` ARKit-free — see
                         // `TableProjection`/`DetectionProjector`'s own docs).
@@ -1292,6 +1329,19 @@ final class CoachLiveSession: Identifiable {
                             at: now
                         )
                         self.updateWorldCensusDiagnostics()
+                        let stableZones = fullRecognizerSucceeded
+                            ? Self.stabilizedVerificationZones(
+                                candidates: Set(roiScheduler.plannedRegions),
+                                snapshot: self.worldCensusController?.snapshot,
+                                states: &verificationSignatures
+                            )
+                            : []
+                        roiScheduler.recordFullFrameExecution(
+                            recognizerSucceeded: fullRecognizerSucceeded,
+                            stabilizedZoneIDs: stableZones
+                        )
+                        self.diagnostics.roiPlan = "roi: \(roiScheduler.lastPlanLabels.joined(separator: "+"))"
+                        self.diagnostics.roiVerification = roiScheduler.verificationStatus.debugLabel
                         if let outcome = self.ingestEventEngine(
                             tracker: tracker,
                             legacyDetections: projected,
@@ -1308,16 +1358,19 @@ final class CoachLiveSession: Identifiable {
 
                     case let .crops(rects):
                         self.recountRequest = nil
-                        // Cap 2 crops/tick (thermal/latency budget) even
-                        // though `ROIScheduler` may return more candidates.
+                        // `ROIScheduler` owns the thermal budget. Every crop
+                        // it returns is executed; deferred regions remain in
+                        // the scheduler instead of being silently dropped.
                         var mergedImageSpace: [DetectedTile] = []
                         var visibleRegionRect: TileBoundingBox?
                         var censusCoverageRects: [TileBoundingBox] = []
                         var cropRecognizerSucceeded = true
                         var attemptedCrop = false
-                        for rect in rects.prefix(2) {
+                        var executedCropIndices: [Int] = []
+                        for (cropIndex, rect) in rects.enumerated() {
                             guard let cropBuffer = pixelBufferCropper.crop(frame.pixelBuffer, to: rect) else { continue }
                             attemptedCrop = true
+                            executedCropIndices.append(cropIndex)
                             self.diagnostics.inferencesRun += 1
                             // Crop the NATIVE (un-rotated) buffer, then
                             // orient it exactly like the full frame — Vision
@@ -1405,6 +1458,28 @@ final class CoachLiveSession: Identifiable {
                             at: now
                         )
                         self.updateWorldCensusDiagnostics()
+                        let cropBatchSucceeded = attemptedCrop && cropRecognizerSucceeded
+                        let stableZones = cropBatchSucceeded
+                            ? Self.stabilizedVerificationZones(
+                                candidates: Set(executedCropIndices.compactMap { index in
+                                    roiScheduler.plannedRegions.indices.contains(index)
+                                        ? roiScheduler.plannedRegions[index]
+                                        : nil
+                                }),
+                                snapshot: self.worldCensusController?.snapshot,
+                                states: &verificationSignatures
+                            )
+                            : []
+                        roiScheduler.recordCropExecution(
+                            executedIndices: executedCropIndices,
+                            recognizerSucceeded: cropBatchSucceeded,
+                            stabilizedZoneIDs: stableZones
+                        )
+                        let actualLabels = roiScheduler.lastPlanLabels
+                        self.diagnostics.roiPlan = actualLabels.isEmpty
+                            ? "roi: none"
+                            : "roi: \(actualLabels.joined(separator: "+"))"
+                        self.diagnostics.roiVerification = roiScheduler.verificationStatus.debugLabel
                         if let outcome = self.ingestEventEngine(
                             tracker: tracker,
                             legacyDetections: projected,
@@ -1794,6 +1869,23 @@ final class CoachLiveSession: Identifiable {
         recomputeAdvice()
     }
 
+    /// Resolves a physical census anchor that is known to exist but whose face
+    /// is unknown. Unlike a hand correction this is valid in every semantic
+    /// region; `CensusStateAdapter` will place it into gameplay only after the
+    /// face is pinned, so it cannot pollute scores while it remains unknown.
+    func overrideSpatialUnknownTile(_ id: TrackID, as tile: Tile) {
+        let handledByCensus = MainActor.assumeIsolated { () -> Bool in
+            guard worldCensusIsActive,
+                  let controller = worldCensusController else {
+                return false
+            }
+            controller.pinFace(tile, trackID: id)
+            return true
+        }
+        guard handledByCensus else { return }
+        publishAfterCorrection()
+    }
+
     /// Adjust the seen count for a tile class. No single facade call maps to
     /// this, so the real path reaches the target by inserting/removing pond
     /// tracks of that face (both count toward `seenHistogram`).
@@ -1945,6 +2037,8 @@ final class CoachLiveSession: Identifiable {
         isEnded = true
         loopTask?.cancel()
         loopTask = nil
+        spatialUnknownTiles = []
+        physicalZoneCounts = [:]
         // `ARTableCapture` is `@MainActor`-isolated; `CoachLiveSession`
         // itself isn't (its intent methods are called directly from SwiftUI
         // action closures, which already run on the main actor at runtime
@@ -2166,19 +2260,82 @@ final class CoachLiveSession: Identifiable {
     ) -> TrackedTableState {
         switch countSource {
         case .legacy2D:
+            clearSpatialPresentation()
             return legacy
         case .spatialBootstrapping:
+            clearSpatialPresentation()
             return CensusStateAdapter.makeBootstrapState(preserving: legacy)
         case .worldCensus:
             break
         }
-        guard let controller = worldCensusController else { return .empty }
-        return CensusStateAdapter.makeState(
+        guard let controller = worldCensusController else {
+            clearSpatialPresentation()
+            return .empty
+        }
+        let presentation = CensusStateAdapter.makePresentation(
             snapshot: controller.snapshot,
             preserving: legacy,
             tableExtent: controller.tableOrigin.extent,
             censusRevision: controller.revision
         )
+        spatialUnknownTiles = presentation.unknownTracks
+        physicalZoneCounts = presentation.physicalZoneCounts
+        return presentation.knownState
+    }
+
+    @MainActor
+    private func clearSpatialPresentation() {
+        spatialUnknownTiles = []
+        physicalZoneCounts = [:]
+    }
+
+    /// A verification region is stable after two successful reads expose the
+    /// same physical identities with the same resolved/unknown faces. Empty
+    /// regions still receive all three reads; they cannot "stabilize" merely
+    /// because the recognizer saw nothing twice.
+    private static func stabilizedVerificationZones(
+        candidates: Set<TableZoneID>,
+        snapshot: CensusSnapshot?,
+        states: inout [TableZoneID: VerificationSignatureState]
+    ) -> Set<TableZoneID> {
+        guard let snapshot else { return [] }
+        var stable: Set<TableZoneID> = []
+        for zone in candidates {
+            let semanticZone: SemanticZoneID
+            switch zone {
+            case .hand: semanticZone = .mineHand
+            case .pond: semanticZone = .tablePond
+            case .meldLeft: semanticZone = .tableRevealedLeft
+            case .meldFar: semanticZone = .tableRevealedFar
+            case .meldRight: semanticZone = .tableRevealedRight
+            }
+            let tracks = snapshot.tracks.filter {
+                $0.semanticZone == semanticZone
+                    && $0.lifecycle != .tentative
+                    && $0.lifecycle != .retired
+            }.sorted { $0.id < $1.id }
+            guard !tracks.isEmpty else {
+                states.removeValue(forKey: zone)
+                continue
+            }
+            let signature = tracks.map {
+                "\($0.id.value):\(String(describing: $0.face))"
+            }.joined(separator: "|")
+            if let previous = states[zone], previous.signature == signature {
+                let repeatedReads = previous.repeatedReads + 1
+                states[zone] = VerificationSignatureState(
+                    signature: signature,
+                    repeatedReads: repeatedReads
+                )
+                if repeatedReads >= 2 { stable.insert(zone) }
+            } else {
+                states[zone] = VerificationSignatureState(
+                    signature: signature,
+                    repeatedReads: 1
+                )
+            }
+        }
+        return stable
     }
 
     @MainActor
@@ -3013,6 +3170,10 @@ struct LiveDiagnostics {
     /// on `startLoop`'s image-space path or the mock path (no scheduler
     /// runs there).
     var roiPlan = "—"
+    /// The bounded post-confirmation region pass. `—` means no calibration
+    /// verification is pending; values such as `verifying hand 1/3` are
+    /// intentionally compact enough for the production status line too.
+    var roiVerification = "—"
     var worldCensusTracks = 0
     var worldCensusTentative = 0
     var worldCensusConfirmed = 0
