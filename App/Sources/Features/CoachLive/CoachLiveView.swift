@@ -42,6 +42,23 @@ enum CoachLiveSheet: Identifiable, Hashable {
     }
 }
 
+/// The gameplay drawer always leaves a useful control surface on screen.
+/// In particular, iPad never collapses it to a handle-only strip: Map,
+/// Counts, and Events remain immediately reachable while the camera stays
+/// full-screen behind it.
+private enum GameplayDrawerDetent: Int, Comparable {
+    case peek
+    case compact
+    case expanded
+
+    static func < (lhs: GameplayDrawerDetent, rhs: GameplayDrawerDetent) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+
+    var next: GameplayDrawerDetent { GameplayDrawerDetent(rawValue: rawValue + 1) ?? self }
+    var previous: GameplayDrawerDetent { GameplayDrawerDetent(rawValue: rawValue - 1) ?? self }
+}
+
 /// Full-screen AR with a draggable Map ⇄ Counts ⇄ Events gameplay sheet.
 /// The AR surface is mounted by `CoachLiveFlow`; this view supplies only
 /// transparent live chrome and gameplay state, so sheet movement cannot resize
@@ -59,7 +76,7 @@ struct CoachLiveView: View {
     /// Live begins with the table unobscured.  The gameplay surface is a
     /// bottom sheet, not a second half of the camera renderer, so dragging it
     /// can never crop/re-layout ARKit's camera or projected geometry.
-    @State private var gameplaySheetExpanded = false
+    @State private var gameplayDrawerDetent: GameplayDrawerDetent = .peek
     @State private var showExitConfirm = false
     /// Non-nil while the bracket-reassign confirmation (A3) is up — which
     /// zone chip was tapped, so the dialog's copy and the confirm action
@@ -147,27 +164,47 @@ struct CoachLiveView: View {
             }
             Button("Cancel", role: .cancel) { reassignZone = nil }
         }
+        .onChange(of: tab) { _, _ in
+            // Selecting another tab is an intentional request to inspect its
+            // contents, rather than merely changing a hidden selection in the
+            // iPad peek state.
+            if gameplayDrawerDetent == .peek {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+                    gameplayDrawerDetent = .compact
+                }
+            }
+        }
     }
 
     // MARK: - Full-screen AR + gameplay sheet
 
     private func gameplaySheet(height: CGFloat) -> some View {
-        let collapsedHeight: CGFloat = 132
-        let expandedHeight = min(height * 0.72, max(480, height - 120))
-        let currentHeight = gameplaySheetExpanded ? expandedHeight : collapsedHeight
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        // The iPad peek is deliberately tall enough to retain the segmented
+        // Map / Counts / Events control. A down-swipe steps through these
+        // detents; it never removes the drawer from the user’s reach.
+        let peekHeight: CGFloat = isPad ? 218 : 132
+        let compactHeight = min(height * (isPad ? 0.54 : 0.58), max(isPad ? 420 : 360, height - 180))
+        let expandedHeight = min(height * (isPad ? 0.78 : 0.72), max(isPad ? 560 : 480, height - 120))
+        let currentHeight: CGFloat
+        switch gameplayDrawerDetent {
+        case .peek: currentHeight = peekHeight
+        case .compact: currentHeight = compactHeight
+        case .expanded: currentHeight = expandedHeight
+        }
 
         return VStack(spacing: 0) {
             Capsule()
                 .fill(MJColor.cream(0.35))
                 .frame(width: 36, height: 5)
                 .padding(.top, 9)
-                .padding(.bottom, gameplaySheetExpanded ? 7 : 10)
+                .padding(.bottom, gameplayDrawerDetent == .peek ? 10 : 7)
 
-            if gameplaySheetExpanded {
-                statePane(compression: compression(for: expandedHeight - 22))
-                    .environment(\.liveCompression, compression(for: expandedHeight - 22))
+            if gameplayDrawerDetent == .peek {
+                peekSheetSummary
             } else {
-                collapsedSheetSummary
+                statePane(compression: compression(for: currentHeight - 22))
+                    .environment(\.liveCompression, compression(for: currentHeight - 22))
             }
         }
         .frame(maxWidth: .infinity, minHeight: currentHeight, maxHeight: currentHeight, alignment: .top)
@@ -178,9 +215,9 @@ struct CoachLiveView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            if !gameplaySheetExpanded {
+            if gameplayDrawerDetent == .peek {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                    gameplaySheetExpanded = true
+                    gameplayDrawerDetent = .compact
                 }
             }
         }
@@ -189,44 +226,42 @@ struct CoachLiveView: View {
                 .onEnded { value in
                     if value.translation.height < -36 {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                            gameplaySheetExpanded = true
+                            gameplayDrawerDetent = gameplayDrawerDetent.next
                         }
                     } else if value.translation.height > 36 {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                            gameplaySheetExpanded = false
+                            gameplayDrawerDetent = gameplayDrawerDetent.previous
                         }
                     }
                 }
         )
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(gameplaySheetExpanded ? "Gameplay details" : "Gameplay summary")
-        .accessibilityHint(gameplaySheetExpanded ? "Swipe down to collapse." : "Swipe up for map, counts, and events.")
+        .accessibilityLabel(gameplayDrawerDetent == .peek ? "Gameplay controls" : "Gameplay details")
+        .accessibilityHint(gameplayDrawerDetent == .peek
+            ? "Map, Counts, and Events remain available. Swipe up for more detail."
+            : "Swipe down for a smaller gameplay drawer.")
     }
 
-    private var collapsedSheetSummary: some View {
-        Button {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                gameplaySheetExpanded = true
+    private var peekSheetSummary: some View {
+        VStack(spacing: 10) {
+            LiveSegmentedBar(selection: $tab)
+            HStack(spacing: 8) {
+                Circle().fill(MJColor.liveRed).frame(width: 7, height: 7)
+                Text(collapsedTrackingStatus)
+                    .font(MJFont.ui(13, weight: .semibold))
+                Spacer()
+                Text("\(session.liveTileCount) physical tiles")
+                    .font(MJFont.ui(13, weight: .bold))
             }
-        } label: {
-            VStack(spacing: 6) {
-                HStack(spacing: 8) {
-                    Circle().fill(MJColor.liveRed).frame(width: 7, height: 7)
-                    Text(collapsedTrackingStatus)
-                        .font(MJFont.ui(13, weight: .semibold))
-                    Spacer()
-                    Text("\(session.liveTileCount) physical tiles")
-                        .font(MJFont.ui(13, weight: .bold))
-                }
-                .foregroundStyle(MJColor.creamHeading)
-                Text("Swipe up for map, counts, and events")
-                    .font(MJFont.ui(11, weight: .medium))
-                    .foregroundStyle(MJColor.cream(0.58))
-            }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 16)
+            .foregroundStyle(MJColor.creamHeading)
+            Text("Swipe up for more table details")
+                .font(MJFont.ui(11, weight: .medium))
+                .foregroundStyle(MJColor.cream(0.58))
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 16)
+        .frame(maxWidth: 560)
+        .frame(maxWidth: .infinity, alignment: .top)
     }
 
     private var collapsedTrackingStatus: String {
