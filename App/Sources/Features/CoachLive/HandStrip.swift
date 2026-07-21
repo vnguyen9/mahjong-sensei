@@ -22,20 +22,24 @@ struct HandStrip: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
-            HStack(spacing: 2.5) {
-                ForEach(session.handTiles) { tracked in
-                    tile(tracked)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                HStack(spacing: 2.5) {
+                    ForEach(session.handTiles) { tracked in
+                        tile(tracked)
+                    }
+                    ForEach(unknownHandTiles) { unknown in
+                        unknownTile(unknown)
+                    }
                 }
-                ForEach(unknownHandTiles) { unknown in
-                    unknownTile(unknown)
+                if let drawn = session.drawnTile {
+                    tile(drawn)
                 }
             }
-            if let drawn = session.drawnTile {
-                tile(drawn)
-            }
+            .fixedSize(horizontal: true, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .center)
+        .defaultScrollAnchor(.center)
         .fixedSize(horizontal: false, vertical: true)
     }
 

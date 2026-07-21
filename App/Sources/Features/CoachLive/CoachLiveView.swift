@@ -38,17 +38,17 @@ struct LiveControlMetrics: Equatable {
 
     fileprivate static func iPad(detent: GameplayDrawerDetent) -> LiveControlMetrics {
         switch detent {
-        case .peek:
+        case .small:
             return LiveControlMetrics(scale: 1.1, segmentedHeight: 40, paneWidthCap: 620,
                                       countTileWidthCap: 24, handTileWidth: 24,
                                       pondTileWidth: 18, meldTileWidth: 17,
                                       minimumEditHitTarget: 44)
-        case .compact:
+        case .medium:
             return LiveControlMetrics(scale: 1.25, segmentedHeight: 46, paneWidthCap: 680,
                                       countTileWidthCap: 28, handTileWidth: 28,
                                       pondTileWidth: 20, meldTileWidth: 19,
                                       minimumEditHitTarget: 44)
-        case .expanded:
+        case .big:
             return LiveControlMetrics(scale: 1.45, segmentedHeight: 52, paneWidthCap: 760,
                                       countTileWidthCap: 32, handTileWidth: 32,
                                       pondTileWidth: 24, meldTileWidth: 22,
@@ -103,9 +103,9 @@ enum CoachLiveSheet: Identifiable, Hashable {
 /// Counts, and Events remain immediately reachable while the camera stays
 /// full-screen behind it.
 fileprivate enum GameplayDrawerDetent: Int, Comparable {
-    case peek
-    case compact
-    case expanded
+    case small
+    case medium
+    case big
 
     static func < (lhs: GameplayDrawerDetent, rhs: GameplayDrawerDetent) -> Bool {
         lhs.rawValue < rhs.rawValue
@@ -151,7 +151,7 @@ struct CoachLiveView: View {
         // Both devices start with the camera-first lowest detent. On iPad the
         // lowest detent still contains the selected Map / Counts / Events
         // content; iPhone retains its original lightweight summary.
-        _gameplayDrawerDetent = State(initialValue: .peek)
+        _gameplayDrawerDetent = State(initialValue: .small)
     }
 
     /// Compression from the space actually AVAILABLE to the state pane
@@ -230,9 +230,9 @@ struct CoachLiveView: View {
             // the legacy promotion only for a phone state where content is
             // intentionally summarized.
             if UIDevice.current.userInterfaceIdiom != .pad,
-               gameplayDrawerDetent == .peek {
+               gameplayDrawerDetent == .small {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                    gameplayDrawerDetent = .compact
+                    gameplayDrawerDetent = .medium
                 }
             }
         }
@@ -243,32 +243,37 @@ struct CoachLiveView: View {
     private func gameplaySheet(height: CGFloat) -> some View {
         let isPad = UIDevice.current.userInterfaceIdiom == .pad
         let metrics = isPad ? LiveControlMetrics.iPad(detent: gameplayDrawerDetent) : .phone
-        // Roughly 15% taller than the former 260pt iPad floor: enough room for
-        // the selected tab's actual content while preserving most of the AR
-        // camera. A down-swipe never moves below this useful floor.
-        let peekHeight: CGFloat = isPad ? min(300, height * 0.48) : 132
-        let compactHeight = min(height * (isPad ? 0.62 : 0.58), max(isPad ? 500 : 360, height - 170))
-        let expandedHeight = min(height * (isPad ? 0.82 : 0.72), max(isPad ? 620 : 480, height - 110))
+        // Small is a useful floor rather than a hidden handle. iPad's three
+        // stops deliberately prioritize camera visibility: ~one third,
+        // slightly above one third, and just above half of the screen.
+        let smallHeight: CGFloat = isPad ? min(330, height * 0.32) : 132
+        let mediumHeight: CGFloat = isPad
+            ? max(smallHeight + 20, height * 0.34)
+            : min(height * 0.58, max(360, height - 180))
+        let bigHeight: CGFloat = isPad
+            ? max(mediumHeight + 80, min(height * 0.56, height - 110))
+            : min(height * 0.72, max(480, height - 120))
         let currentHeight: CGFloat
         switch gameplayDrawerDetent {
-        case .peek: currentHeight = peekHeight
-        case .compact: currentHeight = compactHeight
-        case .expanded: currentHeight = expandedHeight
+        case .small: currentHeight = smallHeight
+        case .medium: currentHeight = mediumHeight
+        case .big: currentHeight = bigHeight
         }
 
         return VStack(spacing: 0) {
             drawerHandle
 
-            if gameplayDrawerDetent == .peek {
-                if isPad {
-                    iPadPeekPane(metrics: metrics)
-                        .environment(\.liveCompression, .compact)
-                } else {
-                    phonePeekSummary
-                }
+            if !isPad, gameplayDrawerDetent == .small {
+                phoneSmallSummary
+            } else if gameplayDrawerDetent == .big {
+                // Leave a realistic budget for the fixed tab/hand/action rows
+                // before deciding which secondary controls Big can fit.
+                let bigCompression = compression(for: currentHeight - 100)
+                statePane(compression: bigCompression, metrics: metrics)
+                    .environment(\.liveCompression, bigCompression)
             } else {
-                statePane(compression: compression(for: currentHeight - 44), metrics: metrics)
-                    .environment(\.liveCompression, compression(for: currentHeight - 44))
+                compactDrawerPane(metrics: metrics)
+                    .environment(\.liveCompression, .compact)
             }
         }
         .frame(maxWidth: .infinity, minHeight: currentHeight, maxHeight: currentHeight, alignment: .top)
@@ -279,8 +284,8 @@ struct CoachLiveView: View {
             Rectangle().fill(MJColor.gold(0.18)).frame(height: 1)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(gameplayDrawerDetent == .peek ? "Gameplay controls" : "Gameplay details")
-        .accessibilityHint(gameplayDrawerDetent == .peek
+        .accessibilityLabel(gameplayDrawerDetent == .small ? "Gameplay controls" : "Gameplay details")
+        .accessibilityHint(gameplayDrawerDetent == .small
             ? "Map, Counts, and Events remain available. Swipe up for more detail."
             : "Swipe down for a smaller gameplay drawer.")
     }
@@ -322,13 +327,17 @@ struct CoachLiveView: View {
 
     private var drawerDetentAccessibilityValue: String {
         switch gameplayDrawerDetent {
-        case .peek: return "Lowest"
-        case .compact: return "Middle"
-        case .expanded: return "Highest"
+        case .small: return "Small"
+        case .medium: return "Medium"
+        case .big: return "Big"
         }
     }
 
-    private func iPadPeekPane(metrics: LiveControlMetrics) -> some View {
+    /// Small and Medium intentionally contain only the primary table surface:
+    /// tab selection, a terse tracking row, the selected content, and the
+    /// player's hand. Secondary advice, correction tips, actions, and waits
+    /// are reserved for Big so these two stops cannot overstuff or overlap.
+    private func compactDrawerPane(metrics: LiveControlMetrics) -> some View {
         VStack(spacing: 8) {
             LiveSegmentedBar(selection: $tab)
             HStack(spacing: 8) {
@@ -341,7 +350,13 @@ struct CoachLiveView: View {
             }
             .foregroundStyle(MJColor.creamHeading)
             tabContent
-                .frame(maxWidth: .infinity, minHeight: 84, maxHeight: .infinity)
+                .frame(maxWidth: .infinity,
+                       minHeight: gameplayDrawerDetent == .small ? 44 : 84,
+                       maxHeight: .infinity)
+            HandStrip(
+                onTapTile: { id in sheet = .pickHandTile(id) },
+                onTapUnknown: { id in sheet = .pickUnknownTile(id) }
+            )
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 10)
@@ -349,10 +364,10 @@ struct CoachLiveView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    private var phonePeekSummary: some View {
+    private var phoneSmallSummary: some View {
         Button {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                gameplayDrawerDetent = .compact
+                gameplayDrawerDetent = .medium
             }
         } label: {
             VStack(spacing: 6) {
@@ -409,14 +424,18 @@ struct CoachLiveView: View {
     private func statePane(compression: LiveCompression, metrics: LiveControlMetrics) -> some View {
         VStack(spacing: 10) {
             LiveSegmentedBar(selection: $tab)
-            CorrectionHintBanner()
+            if compression == .full {
+                CorrectionHintBanner()
+            }
             tabContent
                 .frame(maxWidth: .infinity, minHeight: 84, maxHeight: .infinity)
             HandStrip(
                 onTapTile: { id in sheet = .pickHandTile(id) },
                 onTapUnknown: { id in sheet = .pickUnknownTile(id) }
             )
-            AdviceLine { sheet = .adviceDetail }
+            if compression != .minimal {
+                AdviceLine { sheet = .adviceDetail }
+            }
             // Always-available one-shot recount affordance, AR mode only.
             if session.isARCaptureActive {
                 // Rescan (force a fresh read) + manual hand-end (the AR path's
@@ -437,7 +456,7 @@ struct CoachLiveView: View {
             // WaitChips fold at `.minimal` — excluded entirely (not just
             // emptied) so their VStack slot + spacing is reclaimed for the
             // tab-content region (e.g. keeps the Counts grid larger at 70%).
-            if compression != .minimal {
+            if compression == .full {
                 WaitChips()
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             }

@@ -3,8 +3,9 @@ import DesignSystem
 import MahjongCore
 import Recognition
 
-/// Top-down table schematic: pond center, opponents at their relative
-/// edges, unresolved chip bottom-trailing (UI plan §9 — design-critical).
+/// Top-down table schematic with an allocated region for every seat and the
+/// pond. Nothing is overlaid on the pond: compact drawer heights shrink each
+/// region, while labels and tile rows stay inside their own bounds.
 struct MapTab: View {
     @Environment(CoachLiveSession.self) private var session
     @Environment(\.liveCompression) private var compression
@@ -17,9 +18,52 @@ struct MapTab: View {
     private var pondCloudMaxWidth: CGFloat {
         metrics.minimumEditHitTarget == 0 ? 210 : metrics.paneWidthCap * 0.6
     }
+    private var hasBottomRegion: Bool {
+        !unknownTiles(in: .mineMeld).isEmpty
+            || !unknownTiles(in: .boundaryUnresolved).isEmpty
+            || !session.unresolved.isEmpty
+    }
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
+        GeometryReader { geo in
+            let horizontalGap = max(3, 5 * metrics.scale)
+            let pondWidth = min(pondCloudMaxWidth, geo.size.width * 0.46)
+            let sideWidth = max(72, (geo.size.width - pondWidth - horizontalGap * 2 - 8) / 2)
+
+            VStack(spacing: 3) {
+                seatRow(.across)
+                    .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44)
+
+                HStack(spacing: horizontalGap) {
+                    seatRow(.left)
+                        .frame(width: sideWidth)
+                        .frame(maxHeight: .infinity)
+                        .clipped()
+
+                    ScrollView(.vertical, showsIndicators: false) {
+                        pondCloud
+                            .frame(maxWidth: pondWidth)
+                    }
+                    .frame(width: pondWidth)
+                    .frame(maxHeight: .infinity)
+
+                    seatRow(.right)
+                        .frame(width: sideWidth)
+                        .frame(maxHeight: .infinity)
+                        .clipped()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if hasBottomRegion {
+                    bottomRegion
+                        .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44)
+                }
+            }
+            .padding(4)
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(RadialGradient(colors: [Color(hex: 0x17594A), Color(hex: 0x0D362C)],
                                      center: .init(x: 0.5, y: 0.45), startRadius: 0, endRadius: 240))
@@ -27,45 +71,8 @@ struct MapTab: View {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .strokeBorder(MJColor.gold(0.22), lineWidth: 1)
                 }
-
-            VStack {
-                seatRow(.across)
-                Spacer(minLength: 0)
-                HStack(alignment: .center) {
-                    seatRow(.left)
-                    Spacer(minLength: 0)
-                    seatRow(.right)
-                }
-                Spacer(minLength: 0)
-                myRevealedUnknownRow
-            }
-            .padding(12 * metrics.scale)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            pondCloud
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            if !session.unresolved.isEmpty {
-                Button(action: onTapUnresolved) {
-                    Text("\(session.unresolved.count) ? · tap")
-                        .font(MJFont.ui(11 * metrics.scale, weight: .bold))
-                        .foregroundStyle(MJColor.inkOnAmber)
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(MJColor.amberZone, in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .frame(minWidth: metrics.minimumEditHitTarget, minHeight: metrics.minimumEditHitTarget)
-                .padding(10 * metrics.scale)
-            }
-
-            if !session.spatialUnknownTiles.isEmpty {
-                unknownSummary
-                    .padding(10 * metrics.scale)
-                    .padding(.bottom, session.unresolved.isEmpty ? 42 : 0)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     /// `.center`-anchored wrap layout of the discard pond.
@@ -92,60 +99,74 @@ struct MapTab: View {
     @ViewBuilder
     private func seatRow(_ seat: RelativeSeat) -> some View {
         let wind = seat.wind(mySeatWind: session.seatWind)
-        if let melds = session.opponentMelds[seat], !melds.isEmpty {
-            VStack(spacing: 4) {
-                Text(windEnglish(wind))
-                    .font(MJFont.ui(11 * metrics.scale, weight: .semibold))
-                    .foregroundStyle(MJColor.cream(0.55))
-                VStack(spacing: 2) {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                if let melds = session.opponentMelds[seat], !melds.isEmpty {
+                    Text(windEnglish(wind))
+                        .font(MJFont.ui(11 * metrics.scale, weight: .semibold))
+                        .foregroundStyle(MJColor.cream(0.55))
                     ForEach(Array(melds.enumerated()), id: \.offset) { _, meld in
                         TileRow(meld.tiles, theme: .jade, width: meldTileWidth, spacing: 1.5)
                     }
+                } else {
+                    Text("\(windEnglish(wind)) · \(session.concealedCounts[seat] ?? 13) · concealed")
+                        .font(MJFont.ui(11 * metrics.scale))
+                        .foregroundStyle(MJColor.cream(0.55))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
+                        .padding(.horizontal, 8 * metrics.scale)
+                        .padding(.vertical, 4 * metrics.scale)
+                        .background(Color.white.opacity(0.06), in: Capsule())
                 }
                 unknownRow(for: seat)
             }
-        } else {
-            VStack(spacing: 3) {
-                Text("\(windEnglish(wind)) · \(session.concealedCounts[seat] ?? 13) · concealed")
-                        .font(MJFont.ui(11 * metrics.scale)).foregroundStyle(MJColor.cream(0.55))
-                    .padding(.horizontal, 10 * metrics.scale).padding(.vertical, 5 * metrics.scale)
-                    .background(Color.white.opacity(0.06), in: Capsule())
-                unknownRow(for: seat)
-            }
+            .frame(minHeight: 44)
         }
     }
 
-    private var unknownSummary: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 5) {
-                Image(systemName: "questionmark.square.dashed")
-                    .font(.system(size: 11, weight: .semibold))
-                Text("\(session.spatialUnknownTiles.count) physical tile\(session.spatialUnknownTiles.count == 1 ? "" : "s") need faces")
-                    .font(MJFont.ui(11 * metrics.scale, weight: .bold))
-            }
+    private var bottomRegion: some View {
+        HStack(spacing: 6) {
+            myRevealedUnknownRow
+                .frame(maxWidth: .infinity, alignment: .leading)
             let boundary = unknownTiles(in: .boundaryUnresolved)
             if !boundary.isEmpty {
-                HStack(spacing: 2) {
-                    ForEach(boundary) { tile in unknownTile(tile) }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 2) {
+                        ForEach(boundary) { tile in unknownTile(tile) }
+                    }
                 }
+                .frame(maxWidth: .infinity)
+            }
+            if !session.unresolved.isEmpty {
+                Button(action: onTapUnresolved) {
+                    Text("\(session.unresolved.count) ? · tap")
+                        .font(MJFont.ui(11 * metrics.scale, weight: .bold))
+                        .foregroundStyle(MJColor.inkOnAmber)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .padding(.horizontal, 8)
+                        .background(MJColor.amberZone, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .frame(minWidth: 44, minHeight: 44)
             }
         }
-        .foregroundStyle(MJColor.inkOnAmber)
-        .padding(.horizontal, 10 * metrics.scale).padding(.vertical, 6 * metrics.scale)
-        .background(MJColor.amberZone, in: Capsule())
-        .accessibilityLabel("\(session.spatialUnknownTiles.count) physical tiles need face identification")
     }
 
     @ViewBuilder
     private var myRevealedUnknownRow: some View {
         let tiles = unknownTiles(in: .mineMeld)
         if !tiles.isEmpty {
-            VStack(spacing: 3) {
+            HStack(spacing: 3) {
                 Text("Your revealed tiles")
                     .font(MJFont.ui(10 * metrics.scale, weight: .semibold))
                     .foregroundStyle(MJColor.cream(0.55))
-                HStack(spacing: 2) {
-                    ForEach(tiles) { tile in unknownTile(tile) }
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 2) {
+                        ForEach(tiles) { tile in unknownTile(tile) }
+                    }
                 }
             }
         }
