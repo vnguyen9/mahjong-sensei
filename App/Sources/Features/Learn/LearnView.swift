@@ -17,7 +17,7 @@ struct LearnView: View {
                         NavigationLink { TilesView() } label: {
                             hubCard(title: "Tiles", zh: "牌",
                                     subtitle: "Suits, honors, how a hand is built — and every tile.") {
-                                MahjongTileView(.p(5), theme: .jade, width: 40, showsBadge: false)
+                                MahjongTileView(.p(5), width: 40, showsBadge: false)
                             }
                         }
                         .buttonStyle(.plain)
@@ -33,7 +33,7 @@ struct LearnView: View {
                         NavigationLink { WindExplainerView() } label: {
                             hubCard(title: "Seats & winds", zh: "門風",
                                     subtitle: "The compass behind the #1 confusion.") {
-                                MahjongTileView(.east, theme: .jade, width: 40, showsBadge: false)
+                                MahjongTileView(.east, width: 40, showsBadge: false)
                             }
                         }
                         .buttonStyle(.plain)

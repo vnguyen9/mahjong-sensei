@@ -37,7 +37,7 @@ struct LiveControlMetrics: Equatable {
         minimumEditHitTarget: 0
     )
 
-    fileprivate static func iPad(detent: GameplayDrawerDetent) -> LiveControlMetrics {
+    fileprivate static func iPad(detent: CameraDrawerDetent) -> LiveControlMetrics {
         switch detent {
         case .small:
             return LiveControlMetrics(scale: 1.1, segmentedHeight: 40, paneWidthCap: 620,
@@ -99,23 +99,6 @@ enum CoachLiveSheet: Identifiable, Hashable {
     }
 }
 
-/// The gameplay drawer always leaves a useful control surface on screen.
-/// In particular, iPad never collapses it to a handle-only strip: Map,
-/// Counts, and Events remain immediately reachable while the camera stays
-/// full-screen behind it.
-fileprivate enum GameplayDrawerDetent: Int, Comparable {
-    case small
-    case medium
-    case big
-
-    static func < (lhs: GameplayDrawerDetent, rhs: GameplayDrawerDetent) -> Bool {
-        lhs.rawValue < rhs.rawValue
-    }
-
-    var next: GameplayDrawerDetent { GameplayDrawerDetent(rawValue: rawValue + 1) ?? self }
-    var previous: GameplayDrawerDetent { GameplayDrawerDetent(rawValue: rawValue - 1) ?? self }
-}
-
 /// Full-screen AR with a draggable Map ⇄ Counts ⇄ Events gameplay sheet.
 /// The AR surface is mounted by `CoachLiveFlow`; this view supplies only
 /// transparent live chrome and gameplay state, so sheet movement cannot resize
@@ -133,7 +116,7 @@ struct CoachLiveView: View {
     /// Live begins with the table unobscured.  The gameplay surface is a
     /// bottom sheet, not a second half of the camera renderer, so dragging it
     /// can never crop/re-layout ARKit's camera or projected geometry.
-    @State private var gameplayDrawerDetent: GameplayDrawerDetent
+    @State private var gameplayDrawerDetent: CameraDrawerDetent
     @State private var showExitConfirm = false
     /// Non-nil while the bracket-reassign confirmation (A3) is up — which
     /// zone chip was tapped, so the dialog's copy and the confirm action
@@ -252,13 +235,10 @@ struct CoachLiveView: View {
         // Small is a useful floor rather than a hidden handle. iPad's three
         // stops deliberately prioritize camera visibility: ~one third,
         // slightly above one third, and just above half of the screen.
-        let smallHeight: CGFloat = isPad ? min(330, height * 0.32) : 132
-        let mediumHeight: CGFloat = isPad
-            ? max(smallHeight + 20, height * 0.34)
-            : min(height * 0.58, max(360, height - 180))
-        let bigHeight: CGFloat = isPad
-            ? max(mediumHeight + 80, min(height * 0.56, height - 110))
-            : min(height * 0.72, max(480, height - 120))
+        let heights = CameraDrawerHeights.resolved(for: height, isPad: isPad)
+        let smallHeight = heights.small
+        let mediumHeight = heights.medium
+        let bigHeight = heights.big
         let currentHeight: CGFloat
         switch gameplayDrawerDetent {
         case .small: currentHeight = smallHeight
@@ -267,7 +247,8 @@ struct CoachLiveView: View {
         }
 
         return VStack(spacing: 0) {
-            drawerHandle
+            CameraDrawerHandle(detent: $gameplayDrawerDetent,
+                               noun: "gameplay drawer")
 
             if !isPad, gameplayDrawerDetent == .small {
                 phoneSmallSummary
@@ -296,47 +277,8 @@ struct CoachLiveView: View {
             : "Swipe down for a smaller gameplay drawer.")
     }
 
-    /// The drag target is isolated from the drawer content so scrolling Events
-    /// or tapping tiles never changes detents accidentally. Its 44pt frame is
-    /// large enough for touch and VoiceOver while the visible capsule remains
-    /// visually quiet.
-    private var drawerHandle: some View {
-        Capsule()
-            .fill(MJColor.cream(0.35))
-            .frame(width: 36, height: 5)
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                    gameplayDrawerDetent = gameplayDrawerDetent.next
-                }
-            }
-            .gesture(
-                DragGesture(minimumDistance: 8)
-                    .onEnded { value in
-                        if value.translation.height < -36 {
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                                gameplayDrawerDetent = gameplayDrawerDetent.next
-                            }
-                        } else if value.translation.height > 36 {
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                                gameplayDrawerDetent = gameplayDrawerDetent.previous
-                            }
-                        }
-                    }
-            )
-            .accessibilityLabel("Resize gameplay drawer")
-            .accessibilityValue(drawerDetentAccessibilityValue)
-            .accessibilityHint("Swipe up or down to resize the drawer")
-            .accessibilityAddTraits(.isButton)
-    }
-
     private var drawerDetentAccessibilityValue: String {
-        switch gameplayDrawerDetent {
-        case .small: return "Small"
-        case .medium: return "Medium"
-        case .big: return "Big"
-        }
+        gameplayDrawerDetent.accessibilityValue
     }
 
     /// Small and Medium intentionally contain only the primary table surface:
@@ -742,7 +684,7 @@ private struct SpatialTrackEditorSheet: View {
                 .foregroundStyle(MJColor.creamHeading)
             HStack(spacing: 14) {
                 if let face = displayedFace {
-                    MahjongTileView(face, theme: .jade, width: 46)
+                    MahjongTileView(face, width: 46)
                         .opacity(originalFace == nil ? 0.72 : 1)
                 } else {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)

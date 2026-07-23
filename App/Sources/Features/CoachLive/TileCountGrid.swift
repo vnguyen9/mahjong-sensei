@@ -90,7 +90,7 @@ struct TileCountGrid: View {
         let isDead = combined >= 4
         return Button { onTap(tile) } label: {
             VStack(spacing: Self.cellGap) {
-                MahjongTileView(tile, theme: .jade, width: width)
+                MahjongTileView(tile, width: width)
                 if handHistogram != nil {
                     SeenPips(table: table, hand: hand, scale: pipScale)
                 } else {

@@ -75,7 +75,7 @@ struct TileDetailSheet: View {
 
     private func header(_ name: TileName) -> some View {
         HStack(alignment: .center, spacing: 16) {
-            MahjongTileView(tile, theme: .jade, width: 52)
+            MahjongTileView(tile, width: 52)
             VStack(alignment: .leading, spacing: 4) {
                 Text(name.english)
                     .font(MJFont.serif(19, weight: .bold))

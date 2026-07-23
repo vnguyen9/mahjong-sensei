@@ -82,11 +82,11 @@ struct AdviceLine: View {
 
     private func discardAdvice(_ best: RankedDiscard) -> some View {
         HStack(spacing: 4) {
-            MahjongTileView(best.tile, theme: .jade, width: 19 * metrics.scale)
+            MahjongTileView(best.tile, width: 19 * metrics.scale)
             Text("→ \(shantenLabel(best.shantenAfter)) · waits")
                 .font(MJFont.ui(12 * metrics.scale, weight: .semibold)).foregroundStyle(MJColor.lightGold)
             ForEach(Array(best.displayWaits.prefix(4).enumerated()), id: \.offset) { _, w in
-                MahjongTileView(w.tile, theme: .jade, width: 19 * metrics.scale)
+                MahjongTileView(w.tile, width: 19 * metrics.scale)
             }
             Text("· \(best.displayWaits.reduce(0) { $0 + $1.liveCount }) live · \(pct(best.nextDrawOdds)) next draw")
                 .font(MJFont.ui(12 * metrics.scale, weight: .semibold)).foregroundStyle(MJColor.lightGold)
@@ -98,7 +98,7 @@ struct AdviceLine: View {
             Text("\(shantenLabel(waitSet.shanten)) · waits")
                 .font(MJFont.ui(12 * metrics.scale, weight: .semibold)).foregroundStyle(MJColor.lightGold)
             ForEach(Array(waitSet.displayWaits.prefix(4).enumerated()), id: \.offset) { _, w in
-                MahjongTileView(w.tile, theme: .jade, width: 19 * metrics.scale)
+                MahjongTileView(w.tile, width: 19 * metrics.scale)
             }
             Text("· \(waitSet.totalLive) live · \(pct(waitSet.nextDrawOdds)) next draw")
                 .font(MJFont.ui(12 * metrics.scale, weight: .semibold)).foregroundStyle(MJColor.lightGold)
@@ -140,7 +140,7 @@ struct WaitChips: View {
 
     private func chip(_ w: (tile: Tile, seenCount: Int, liveCount: Int)) -> some View {
         HStack(spacing: 5 * metrics.scale) {
-            MahjongTileView(w.tile, theme: .jade, width: 19 * metrics.scale)
+            MahjongTileView(w.tile, width: 19 * metrics.scale)
             SeenPips(seen: w.seenCount)
             Text("\(w.liveCount) live").font(MJFont.ui(11.5 * metrics.scale)).foregroundStyle(MJColor.cream(0.7))
         }
@@ -187,7 +187,7 @@ struct AdviceDetailSheet: View {
 
     private func row(_ option: RankedDiscard, isBest: Bool) -> some View {
         HStack(spacing: 10) {
-            MahjongTileView(option.tile, theme: .jade, width: 26)
+            MahjongTileView(option.tile, width: 26)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text("\(shantenLabel(option.shantenAfter)) · \(option.ukeireTotal) tiles")
@@ -224,7 +224,7 @@ struct AdviceDetailSheet: View {
             if !waitSet.displayWaits.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(Array(waitSet.displayWaits.enumerated()), id: \.offset) { _, w in
-                        MahjongTileView(w.tile, theme: .jade, width: 26)
+                        MahjongTileView(w.tile, width: 26)
                     }
                 }
             }

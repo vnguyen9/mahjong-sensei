@@ -6,10 +6,13 @@
 public struct ObservationCollector: Sendable {
     public var locator: TileLocating
     public var classifier: TileClassifying?
+    public var cropper: RecognizerFrameCropper
 
-    public init(locator: TileLocating, classifier: TileClassifying? = nil) {
+    public init(locator: TileLocating, classifier: TileClassifying? = nil,
+                cropper: RecognizerFrameCropper = .init()) {
         self.locator = locator
         self.classifier = classifier
+        self.cropper = cropper
     }
 
     /// - Parameters:
@@ -32,23 +35,35 @@ public struct ObservationCollector: Sendable {
             return .failed(.locatorThrew(String(describing: error)))
         }
 
+        let crops = localizations.map { cropper.crop(input.frame, box: $0.box, frameID: frameID) }
+        var hypotheses = [TileFaceHypothesis?](repeating: nil, count: localizations.count)
+        if let classifier {
+            let indexed = crops.enumerated().compactMap { index, crop in crop.map { (index, $0) } }
+            do {
+                if let batch = classifier as? any BatchTileClassifying {
+                    let values = try await batch.classify(indexed.map(\.1))
+                    guard values.count == indexed.count else {
+                        return .failed(.classifierThrew("batch result count mismatch"))
+                    }
+                    for (pair, value) in zip(indexed, values) { hypotheses[pair.0] = value }
+                } else {
+                    for (index, crop) in indexed {
+                        hypotheses[index] = try await classifier.classify(crop)
+                    }
+                }
+            } catch {
+                return .failed(.classifierThrew(String(describing: error)))
+            }
+        }
+
         var observations: [TileObservation] = []
         observations.reserveCapacity(localizations.count)
-        for localization in localizations {
-            var hypothesis: TileFaceHypothesis?
-            if let classifier {
-                let crop = TileCrop(frame: input.frame, frameID: frameID)
-                do {
-                    hypothesis = try await classifier.classify(crop)
-                } catch {
-                    return .failed(.classifierThrew(String(describing: error)))
-                }
-            }
+        for (index, localization) in localizations.enumerated() {
             observations.append(TileObservation(frameID: frameID,
                                                   box: localization.box,
                                                   confidence: localization.confidence,
                                                   poseHint: localization.poseHint,
-                                                  faceHypothesis: hypothesis))
+                                                  faceHypothesis: hypotheses[index]))
         }
 
         let batch = ObservationBatch(frameID: frameID, observations: observations,

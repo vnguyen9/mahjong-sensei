@@ -40,7 +40,7 @@ struct EventsTab: View {
                 .font(MJFont.ui(12.5 * metrics.scale, weight: .semibold)).foregroundStyle(MJColor.cream)
             Text(event.verb)
                 .font(MJFont.ui(12.5 * metrics.scale)).foregroundStyle(MJColor.cream(0.6))
-            TileRow(event.tiles, theme: .jade, width: 18 * metrics.scale, spacing: 1.5 * metrics.scale)
+            TileRow(event.tiles, width: 18 * metrics.scale, spacing: 1.5 * metrics.scale)
             if let delta = event.waitDelta {
                 Text("wait \(delta > 0 ? "+" : "")\(delta)")
                     .font(MJFont.ui(10 * metrics.scale, weight: .bold))

@@ -33,6 +33,20 @@ struct CorrectView: View {
             CapturedBackdrop(photo: session.capturedPhoto, fallback: .content)
             VStack(spacing: 0) {
                 header
+                if let evidenceImage {
+                    Image(uiImage: evidenceImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 720, maxHeight: 170)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(MJColor.gold(0.24), lineWidth: 1)
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 10)
+                        .accessibilityLabel("Captured hand evidence")
+                }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(countSummary)
                         .font(MJFont.ui(14, weight: .bold))
@@ -77,6 +91,27 @@ struct CorrectView: View {
             .presentationDetents([.height(target.isAdd ? 360 : 416)])
             .presentationBackground(.clear)
         }
+    }
+
+    private var evidenceImage: UIImage? {
+        guard let photo = session.capturedPhoto else { return nil }
+        guard let roi = session.capturedROI, let cg = photo.cgImage else { return photo }
+        let bounds = CGRect(x: 0, y: 0, width: cg.width, height: cg.height)
+        let marginX = roi.width * 0.04
+        let marginY = roi.height * 0.04
+        let x = max(0, roi.x - marginX)
+        let y = max(0, roi.y - marginY)
+        let maxX = min(1, roi.x + roi.width + marginX)
+        let maxY = min(1, roi.y + roi.height + marginY)
+        let crop = CGRect(
+            x: x * Double(cg.width),
+            y: y * Double(cg.height),
+            width: (maxX - x) * Double(cg.width),
+            height: (maxY - y) * Double(cg.height)
+        ).integral.intersection(bounds)
+        guard crop.width >= 2, crop.height >= 2,
+              let cropped = cg.cropping(to: crop) else { return photo }
+        return UIImage(cgImage: cropped)
     }
 
     private var header: some View {
@@ -237,7 +272,7 @@ private struct TrayTile: View {
     private var past: Bool { abs(drag.height) > removeThreshold }
 
     var body: some View {
-        MahjongTileView(detected.tile, theme: .jade, width: width)
+        MahjongTileView(detected.tile, width: width)
             .overlay {
                 if flagged {
                     RoundedRectangle(cornerRadius: max(6, width * 0.22), style: .continuous)
@@ -459,7 +494,7 @@ struct TileFaceSelectionGrid: View {
                         selection = tile
                         UISelectionFeedbackGenerator().selectionChanged()
                     } label: {
-                        MahjongTileView(tile, theme: .jade, width: 44)
+                        MahjongTileView(tile, width: 44)
                             .frame(minWidth: 44, minHeight: 54)
                             .overlay {
                                 if tile == selection {

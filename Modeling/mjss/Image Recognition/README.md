@@ -2,6 +2,10 @@
 
 Train **YOLO26n** with Ultralytics on Apple Silicon (MPS) for **Hong Kong–style** physical tile detection: **43 classes** (suits + honors + flowers/seasons + `back`).
 
+Tracker V2 uses the bundled one-class locator plus a separate two-head
+MobileNetV3-Small classifier. The classifier predicts the same 43 faces and a
+crop-validity probability; “unknown” is derived from calibrated rejection gates.
+
 ## Setup
 
 ```bash
@@ -111,6 +115,26 @@ You can stop local MPS training if you switch fully to cloud — packaging does 
 ## iOS
 
 When training finishes, see **[docs/ios-inference.md](docs/ios-inference.md)** for Core ML export and iPhone 15+ integration (class list, preprocessing, SDK options).
+
+### Tracker V2 face classifier
+
+Build source-grouped crops (12% context, locator jitter, partial/background
+invalids, and optional locator-mined hard negatives), train, calibrate, and
+export:
+
+```bash
+python scripts/build_tile_classifier_dataset.py --clean \
+  --locator runs/tile-locator-v3/weights/best.pt
+python scripts/train_tile_classifier.py --epochs 45 --device mps
+python scripts/export_tile_classifier_coreml.py \
+  --install-resources ../../../App/Sources/Resources/Models
+```
+
+The crop builder assigns source images—not individual crops—to splits and does
+not horizontally mirror glyphs. Do not enable `trackerPipelineV2` by default
+until held-out table-scene gates, invalid-crop false acceptance, calibration,
+edit-reduction, and iPhone 15 latency gates all pass. During development, add
+`-trackerPipelineV2 YES` to the scheme launch arguments.
 
 ## Label notes
 

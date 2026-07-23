@@ -79,7 +79,7 @@ struct MapTab: View {
     private var pondCloud: some View {
         FlowLayout(spacing: 2, lineSpacing: 3) {
             ForEach(session.pond) { entry in
-                MahjongTileView(entry.tile, theme: .jade, width: pondTileWidth)
+                MahjongTileView(entry.tile, width: pondTileWidth)
                     .overlay {
                         if entry.isNewest {
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
@@ -106,7 +106,7 @@ struct MapTab: View {
                         .font(MJFont.ui(11 * metrics.scale, weight: .semibold))
                         .foregroundStyle(MJColor.cream(0.55))
                     ForEach(Array(melds.enumerated()), id: \.offset) { _, meld in
-                        TileRow(meld.tiles, theme: .jade, width: meldTileWidth, spacing: 1.5)
+                        TileRow(meld.tiles, width: meldTileWidth, spacing: 1.5)
                     }
                 } else {
                     Text("\(windEnglish(wind)) · \(session.concealedCounts[seat] ?? 13) · concealed")

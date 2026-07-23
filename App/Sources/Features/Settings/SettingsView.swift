@@ -22,7 +22,10 @@ struct SettingsView: View {
                         VStack(spacing: 0) {
                             SettingRow(name: "Language", value: "English")
                             Divider().overlay(MJColor.gold(0.12))
-                            SettingRow(name: "Appearance", value: "Jade · Dark")
+                            NavigationLink { TileThemeSettingsView() } label: {
+                                SettingRow(name: "Appearance", value: app.tileTheme?.displayName ?? "Auto")
+                            }
+                            .buttonStyle(.plain)
                             Divider().overlay(MJColor.gold(0.12))
                             NavigationLink { HouseRulesView() } label: {
                                 SettingRow(name: "House rules", value: "Family default")
@@ -76,15 +79,31 @@ struct SettingsView: View {
 struct AdvancedSettingsView: View {
     @Environment(AppState.self) private var app
     @Environment(\.dismiss) private var dismiss
+    @State private var coachCoordinator = ScanCoordinator()
 
     var body: some View {
-        ZStack {
-            ScreenBackground(.content)
-            VStack(spacing: 0) {
-                MJBackHeader(title: "Advanced") { dismiss() }
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        VStack(spacing: 0) {
+        @Bindable var coachCoordinator = coachCoordinator
+        return NavigationStack(path: $coachCoordinator.path) {
+            ZStack {
+                ScreenBackground(.content)
+                VStack(spacing: 0) {
+                    MJBackHeader(title: "Advanced") { dismiss() }
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 20) {
+                            VStack(spacing: 0) {
+                            Button {
+                                coachCoordinator.startCoachLive()
+                            } label: {
+                                SettingRow(
+                                    name: "Coach Live",
+                                    value: coachCoordinator.isCoachLiveAvailable
+                                        ? "Start session" : "Requires LiDAR iPad"
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!coachCoordinator.isCoachLiveAvailable)
+                            .accessibilityHint("Starts live table coaching and calibration.")
+                            Divider().overlay(MJColor.gold(0.12))
                             NavigationLink { DetectionSettingsView() } label: {
                                 SettingRow(
                                     name: "Detection settings",
@@ -93,27 +112,52 @@ struct AdvancedSettingsView: View {
                             }
                             .buttonStyle(.plain)
                             #if DEBUG
+                            // PROMOTION: Move this link outside DEBUG when the experimental game is ready for production users.
                             Divider().overlay(MJColor.gold(0.12))
                             NavigationLink { GameLauncherView() } label: {
                                 SettingRow(name: "Mahjong game · Experimental", value: "")
                             }
                             .buttonStyle(.plain)
+                            Divider().overlay(MJColor.gold(0.12))
+                            NavigationLink { ModelLabView() } label: {
+                                SettingRow(name: "Model Lab · Live detectors", value: "")
+                            }
+                            .buttonStyle(.plain)
                             #endif
-                        }
-                        .mjCard(padding: 4)
+                            }
+                            .mjCard(padding: 4)
 
-                        Text("Advanced options affect on-device detection and experimental tools.")
-                            .font(MJFont.ui(12))
-                            .foregroundStyle(MJColor.cream(0.55))
-                            .fixedSize(horizontal: false, vertical: true)
+                            Text("Advanced options affect on-device detection and experimental tools.")
+                                .font(MJFont.ui(12))
+                                .foregroundStyle(MJColor.cream(0.55))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(20)
+                        .padding(.bottom, 100)
                     }
-                    .padding(20)
-                    .padding(.bottom, 100)
+                }
+            }
+            .navigationDestination(for: ScanRoute.self) { route in
+                switch route {
+                case .correct: CorrectView()
+                case .context: ContextView()
+                case .result:
+                    ResultView(session: coachCoordinator.session) {
+                        coachCoordinator.restart()
+                    }
                 }
             }
         }
+        .environment(coachCoordinator)
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
+        .fullScreenCover(item: $coachCoordinator.coachLive) { session in
+            CoachLiveFlowView(
+                session: session,
+                onExit: { coachCoordinator.endCoachLive() },
+                onScoreHandoff: { coachCoordinator.beginScoreHandoff(from: session) }
+            )
+        }
     }
 
     private var detectionSummary: String {
@@ -161,6 +205,15 @@ struct DetectionSettingsView: View {
                                 .buttonStyle(.plain)
                                 .accessibilityValue(model == app.devDetectorModel ? "Selected" : "Not selected")
                             }
+                        }
+                        .mjCard(padding: 4)
+
+                        VStack(spacing: 0) {
+                            SettingToggleRow(
+                                name: "Tracker Developer Mode",
+                                subtitle: "Shows the Pro input, exact confidence, timing, and guide diagnostics after a Tracker scan.",
+                                isOn: $app.trackerDeveloperMode
+                            )
                         }
                         .mjCard(padding: 4)
                         #else

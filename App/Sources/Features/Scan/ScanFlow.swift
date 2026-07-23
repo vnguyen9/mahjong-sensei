@@ -110,6 +110,9 @@ final class ScanSession {
     /// The photo grabbed at the shutter — the whole post-scan flow sits on a
     /// blurred, green-tinted copy of it. Nil for mock/demo captures.
     var capturedPhoto: UIImage?
+    /// Score's viewfinder crop in normalized upright-photo coordinates. The
+    /// correction screen uses it to show the exact evidence region that was read.
+    var capturedROI: TileBoundingBox?
     var seatWind: Wind = .east
     var roundWind: Wind = .east
     var isSelfDraw: Bool = true
@@ -228,6 +231,13 @@ final class ScanCoordinator {
     /// Tracker mode's running 34-tile "seen" count — one persistent instance
     /// per Scan tab, alongside `session` (Tracker plan chunk 1/§2).
     let tracker = TrackerSession()
+    /// Camera/drawer presentation lasts only for this app process. Persisted
+    /// counts never force a fresh launch to cover the camera with the grid.
+    let trackerPresentation = TrackerPresentationState()
+    /// Tracker's current shutter target. This is process-lifetime UI state so
+    /// ScanView can morph the shared reticle between table and Score-style hand
+    /// geometry without persisting a presentation choice.
+    var trackerCaptureIntent: TrackerCaptureIntent = .table
     /// The back-camera capture, hoisted here (out of `ScanView`'s `@State`) so
     /// the Coach Live cover can attach a *second* preview layer to the same
     /// running `AVCaptureSession` — a zero-blink transition, since two sessions
@@ -250,13 +260,15 @@ final class ScanCoordinator {
     /// `frame` is nil — e.g. the Simulator has no camera — falls back to the demo
     /// hand. `photo` is the shutter-moment still used as the post-scan backdrop.
     func capture(_ mode: ScanMode, frame: RecognizerFrame? = nil,
-                 roi: TileBoundingBox? = nil, photo: UIImage? = nil) {
+                 roi: TileBoundingBox? = nil, photo: UIImage? = nil,
+                 photoROI: TileBoundingBox? = nil) {
         guard !isRecognizing else { return }
         Task { @MainActor in
             isRecognizing = true
             defer { isRecognizing = false }
             session.mode = mode
             session.capturedPhoto = photo   // nil clears any stale photo (mock path)
+            session.capturedROI = photoROI
 
             let result: RecognitionResult
             if let frame {
@@ -358,6 +370,7 @@ final class ScanCoordinator {
         session.isDealer = (live.seatWind == .east)
         session.mode = .score
         session.capturedPhoto = live.lastFrameSnapshot
+        session.capturedROI = nil
         live.end()                  // stop the tracking loop (+ pause AR) before we drop the cover
         #if !targetEnvironment(simulator)
         camera.requestAndStart()    // Scan's own preview resumes (Lane B chunk G)

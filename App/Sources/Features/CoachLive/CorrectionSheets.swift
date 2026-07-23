@@ -46,7 +46,7 @@ struct UnresolvedAssignSheet: View {
     private func row(_ item: UnresolvedTile) -> some View {
         HStack(spacing: 12) {
             if let tile = item.tile {
-                MahjongTileView(tile, theme: .jade, width: 34)
+                MahjongTileView(tile, width: 34)
             } else {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .strokeBorder(MJColor.cream(0.3), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
@@ -94,7 +94,7 @@ struct CountAdjustSheet<Footer: View>: View {
             MJColor.sheetGlass.ignoresSafeArea()
             VStack(spacing: 16) {
                 SheetGrabber().padding(.top, 10)
-                MahjongTileView(tile, theme: .jade, width: 34)
+                MahjongTileView(tile, width: 34)
                 Text(MahjongData.name(for: tile).english)
                     .font(MJFont.ui(14, weight: .semibold)).foregroundStyle(MJColor.creamHeading)
 
@@ -173,7 +173,7 @@ struct EventFixSheet: View {
                     Text("Fix this event").font(MJFont.serif(15, weight: .bold)).foregroundStyle(MJColor.creamHeading)
 
                     HStack(spacing: 10) {
-                        TileRow(tiles, theme: .jade, width: 26, spacing: 4)
+                        TileRow(tiles, width: 26, spacing: 4)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(windEnglish(actor)).font(MJFont.ui(13, weight: .semibold)).foregroundStyle(MJColor.creamHeading)
                             Text(event.verb).font(MJFont.ui(11)).foregroundStyle(MJColor.cream(0.6))
@@ -186,7 +186,7 @@ struct EventFixSheet: View {
                         Text("Tile").eyebrowStyle()
                         Button { pickingTile = true } label: {
                             HStack {
-                                if let first = tiles.first { MahjongTileView(first, theme: .jade, width: 28) }
+                                if let first = tiles.first { MahjongTileView(first, width: 28) }
                                 Spacer(minLength: 0)
                                 Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(MJColor.cream(0.4))
                             }

@@ -32,7 +32,7 @@ struct TilesBasics: View {
         HStack(spacing: 6) {
             ForEach(Array(tiles.enumerated()), id: \.offset) { _, t in
                 Button { onTapTile(t) } label: {
-                    MahjongTileView(t, theme: .jade, width: width)
+                    MahjongTileView(t, width: width)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(Text(MahjongData.name(for: t).english))
@@ -175,7 +175,7 @@ struct TilesBasics: View {
     private func meldChip(_ kind: MeldKind, _ tiles: [Tile], _ label: String, _ zh: String, _ note: String) -> some View {
         Button { onTapMeld(kind) } label: {
             VStack(spacing: 6) {
-                TileRow(tiles, theme: .jade, width: 24, spacing: 2)
+                TileRow(tiles, width: 24, spacing: 2)
                     .frame(height: 34)
                 VStack(spacing: 1) {
                     Text("\(label) \(zh)")

@@ -21,6 +21,7 @@ struct ScanView: View {
     @State private var lookupTile: Tile?
     @State private var lookupRect: CGRect?
     @State private var sheetTile: TileSelection?
+    @State private var scoreLiveDetector: TrackerLiveDetectorController?
 
     init(initialMode: ScanMode = .lookup) {
         _mode = State(initialValue: initialMode)
@@ -31,7 +32,8 @@ struct ScanView: View {
             #if targetEnvironment(simulator)
             ScreenBackground(.camera)
             #else
-            CameraPreview(camera: coordinator.camera)
+            CameraPreview(camera: coordinator.camera,
+                          trackerReticleFrame: mode == .tracker ? reticleFrame : .zero)
                 .ignoresSafeArea()
                 .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) },
                                   action: { previewFrame = $0 })
@@ -47,7 +49,8 @@ struct ScanView: View {
                     .frame(width: size.width, height: size.height)
                     .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) },
                                       action: { reticleFrame = $0 })
-                    .position(x: geo.size.width / 2, y: geo.size.height * 0.42)
+                    .position(x: geo.size.width / 2,
+                              y: reticleCenterY(for: mode, in: geo.size))
             }
             .allowsHitTesting(false)
 
@@ -62,6 +65,14 @@ struct ScanView: View {
             }
             #endif
 
+            if mode == .tracker {
+                TrackerCard(previewFrame: previewFrame, reticleFrame: reticleFrame)
+            }
+
+            if mode == .score {
+                scoreDetectionOverlay
+            }
+
             VStack(spacing: 0) {
                 VStack(spacing: 12) {
                     SegmentedToggle(selection: $mode,
@@ -69,10 +80,6 @@ struct ScanView: View {
                                               (ScanMode.tracker, "Tracker")],
                                     fontSize: 12, hPad: 11, vPad: 9)
                     HintPill(text: hint)
-                    CoachLiveButton(isAvailable: coordinator.isCoachLiveAvailable) {
-                        coordinator.startCoachLive()
-                    }
-                        .padding(.top, 2)
                 }
                 .padding(.top, 16)
 
@@ -87,7 +94,7 @@ struct ScanView: View {
                                 if let tile = lookupTile { sheetTile = TileSelection(tile) }
                             }
                     case .tracker:
-                        TrackerCard(previewFrame: previewFrame, reticleFrame: reticleFrame)
+                        EmptyView()
                     case .score:
                         ScanStatusCard(isBusy: coordinator.isRecognizing) { shutterTapped() }
                         PhotosPicker(selection: $photoItem, matching: .images, photoLibrary: .shared()) {
@@ -117,14 +124,17 @@ struct ScanView: View {
             #if !targetEnvironment(simulator)
             torchOn = false
             coordinator.camera.requestAndStart()
+            updateScoreDetector(for: mode)
             #endif
         }
         .onDisappear {
             #if !targetEnvironment(simulator)
             coordinator.camera.stop()
+            scoreLiveDetector?.stop()
             #endif
         }
         .onChange(of: photoItem) { _, item in loadPhoto(item) }
+        .onChange(of: mode) { _, newMode in updateScoreDetector(for: newMode) }
         .task(id: mode) { await runLookupLoop() }
         .sheet(item: $sheetTile) { sel in
             TileDetailSheet(tile: sel.tile)
@@ -133,9 +143,12 @@ struct ScanView: View {
 
     private var hint: String {
         switch mode {
-        case .score:   return "Lay your hand flat, face-up"
+        case .score:   return "Point the camera straight at your face-up hand tiles"
         case .lookup:  return "Point the camera at one tile"
-        case .tracker: return "Frame the table, then Record"
+        case .tracker:
+            return coordinator.trackerCaptureIntent == .hand
+                ? "Point the camera straight at your face-up hand tiles"
+                : "Hold the camera directly above the table for the clearest scan"
         }
     }
 
@@ -143,14 +156,25 @@ struct ScanView: View {
     /// hand laid flat is a long horizontal strip, so Score gets a wide, short band
     /// spanning nearly the screen; Lens frames a single tile, so it stays tight.
     /// Tracker gets a near–full-frame window so a 0.5× whole-table shot (hand +
-    /// pond) fits in one Record.
+    /// pond) fits in one scan.
     private func reticleSize(for mode: ScanMode, in screen: CGSize) -> CGSize {
         switch mode {
         case .score:   return CGSize(width: max(240, screen.width - 32), height: 132)
-        case .tracker: return CGSize(width: max(240, screen.width - 32),
-                                     height: min(screen.height * 0.58, screen.height - 320))
+        case .tracker where coordinator.trackerCaptureIntent == .hand:
+            return CGSize(width: max(240, screen.width - 32), height: 132)
+        case .tracker:
+            let availableWidth = max(240, screen.width - 32)
+            let availableHeight = max(320, screen.height - 230)
+            let aspect: CGFloat = screen.width > screen.height ? 4 / 3 : 3 / 4
+            let width = min(availableWidth, availableHeight * aspect)
+            return CGSize(width: width, height: width / aspect)
         case .lookup:  return CGSize(width: 280, height: 150)
         }
+    }
+
+    private func reticleCenterY(for mode: ScanMode, in screen: CGSize) -> CGFloat {
+        mode == .tracker && coordinator.trackerCaptureIntent == .table
+            ? screen.height * 0.49 : screen.height * 0.42
     }
 
     /// While in What's-this mode, poll the live frame ~3×/s and identify the largest
@@ -249,11 +273,145 @@ struct ScanView: View {
             margin: 0.04
         ) {
             // The crop already scopes to the ROI, so capture it with no post-filter.
-            coordinator.capture(mode, frame: cropped, roi: nil, photo: photo)
+            coordinator.capture(mode, frame: cropped, roi: nil, photo: photo,
+                                photoROI: roi)
         } else {
-            coordinator.capture(mode, frame: full, roi: roi, photo: photo)
+            coordinator.capture(mode, frame: full, roi: roi, photo: photo,
+                                photoROI: roi)
         }
         #endif
+    }
+
+    @ViewBuilder
+    private var scoreDetectionOverlay: some View {
+        if let detector = scoreLiveDetector,
+           detector.orientedImageSize.width > 0,
+           let roi = scoreGuideROI(orientedImageSize: detector.orientedImageSize) {
+            // The Canvas below does NOT necessarily share the CameraPreview's
+            // frame: the preview `.ignoresSafeArea()`s (global, full-screen),
+            // while this Canvas sits in the plain ZStack and is laid out within
+            // the safe area. Mapping boxes with `previewFrame` (the preview's
+            // real global rect) keeps the math correct, then translating by
+            // this Canvas's own global origin puts the result back into the
+            // Canvas's local drawing space.
+            GeometryReader { proxy in
+                let canvasOrigin = proxy.frame(in: .global).origin
+                Canvas { context, _ in
+                    for detection in detector.detections where
+                        detection.confidence >= TrackerLiveDetectorPolicy.reviewFloor
+                            && roi.containsCenter(of: detection.box)
+                            && TileFace(detectorLabel: detection.label) != nil {
+                        // Prefer the preview layer's own authoritative
+                        // conversion (correct under aspect-fill + rotation);
+                        // fall back to the reconstructed aspect-fill math
+                        // only while the preview hasn't registered yet.
+                        let metadataBox = NormalizedRectOrientation.metadataRect(
+                            fromOriented: detection.box,
+                            orientation: detector.frameOrientation
+                        )
+                        let globalRect = coordinator.camera.globalRect(fromMetadata: metadataBox.cgRect)
+                            ?? AspectFillMapping.previewRect(
+                                ofNormalized: detection.box,
+                                previewBounds: previewFrame,
+                                orientedImageSize: detector.orientedImageSize
+                            )
+                        let rect = globalRect.offsetBy(dx: -canvasOrigin.x, dy: -canvasOrigin.y)
+                        guard rect.width > 1, rect.height > 1 else { continue }
+                        let color = scoreMarkerColor(detection.label)
+                        context.stroke(
+                            Path(roundedRect: rect, cornerRadius: 5),
+                            with: .color(color),
+                            lineWidth: 2
+                        )
+                        let label = context.resolve(
+                            Text(scoreShortLabel(detection.label))
+                                .font(.caption2.weight(.bold).monospaced())
+                                .foregroundStyle(Color.black)
+                        )
+                        let measured = label.measure(in: CGSize(width: 120, height: 36))
+                        // Not enough room above the box (e.g. it sits near the
+                        // canvas top in a dense scene) — draw the chip inside
+                        // the box's top edge instead of letting it run off.
+                        let chipY = rect.minY - measured.height - 5 < 0
+                            ? rect.minY
+                            : rect.minY - measured.height - 5
+                        let chip = CGRect(
+                            x: rect.minX,
+                            y: chipY,
+                            width: measured.width + 8,
+                            height: measured.height + 4
+                        )
+                        context.fill(Path(roundedRect: chip, cornerRadius: 3),
+                                     with: .color(color))
+                        context.draw(
+                            label,
+                            at: CGPoint(x: chip.minX + 4 + measured.width / 2,
+                                        y: chip.midY)
+                        )
+                    }
+                }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private func updateScoreDetector(for mode: ScanMode) {
+        #if !targetEnvironment(simulator)
+        if mode == .score {
+            if scoreLiveDetector == nil {
+                scoreLiveDetector = TrackerLiveDetectorController(camera: coordinator.camera)
+            }
+            scoreLiveDetector?.start()
+        } else {
+            scoreLiveDetector?.stop()
+        }
+        #endif
+    }
+
+    private func scoreGuideROI(orientedImageSize: CGSize) -> TileBoundingBox? {
+        guard previewFrame.width > 0, reticleFrame.width > 0 else { return nil }
+        return AspectFillMapping.normalizedImageRect(
+            of: reticleFrame,
+            previewBounds: previewFrame,
+            orientedImageSize: orientedImageSize
+        )
+    }
+
+    private func scoreMarkerColor(_ label: String) -> Color {
+        guard case let .tile(tile)? = TileFace(detectorLabel: label) else { return .gray }
+        switch tile {
+        case .suited(.characters, _): return Color(red: 0.96, green: 0.45, blue: 0.40)
+        case .suited(.dots, _): return Color(red: 0.40, green: 0.78, blue: 0.94)
+        case .suited(.bamboo, _): return Color(red: 0.45, green: 0.86, blue: 0.50)
+        case .wind, .dragon: return MJColor.gold
+        case .flower, .season: return Color(red: 0.85, green: 0.55, blue: 0.95)
+        }
+    }
+
+    private func scoreShortLabel(_ raw: String) -> String {
+        guard let face = TileFace(detectorLabel: raw) else { return raw }
+        switch face {
+        case .tile(.suited(.characters, let rank)): return "\(rank) Char"
+        case .tile(.suited(.dots, let rank)): return "\(rank) Dot"
+        case .tile(.suited(.bamboo, let rank)): return "\(rank) Bam"
+        case .tile(.wind(let wind)):
+            switch wind {
+            case .east: return "East"
+            case .south: return "South"
+            case .west: return "West"
+            case .north: return "North"
+            }
+        case .tile(.dragon(let dragon)):
+            switch dragon {
+            case .red: return "Red"
+            case .green: return "Green"
+            case .white: return "White"
+            }
+        case .tile(.flower(let flower)): return "Flower \(flower.rawValue)"
+        case .tile(.season(let season)): return "Season \(season.rawValue)"
+        case .back: return "Back"
+        }
     }
 
     /// Photo picker: decode the chosen still and run recognition on it.
@@ -436,4 +594,13 @@ extension CGImagePropertyOrientation {
         @unknown default: self = .up
         }
     }
+}
+
+private extension TileBoundingBox {
+    func containsCenter(of box: TileBoundingBox) -> Bool {
+        box.centerX >= x && box.centerX <= x + width
+            && box.centerY >= y && box.centerY <= y + height
+    }
+
+    var cgRect: CGRect { CGRect(x: x, y: y, width: width, height: height) }
 }

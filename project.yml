@@ -32,6 +32,8 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: App/Sources
+        excludes:
+          - Resources/Models/MahjongTileLocatorV3.mlpackage
     dependencies:
       - package: MahjongCore
       - package: MahjongData
@@ -68,3 +70,43 @@ targets:
         # unqualified iPhone setting portrait-only.
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_NSCameraUsageDescription: "Mahjong Sensei reads your tiles on-device. Images are processed live and never leave your device."
+
+  MahjongSenseiTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: App/Tests
+    dependencies:
+      - target: MahjongSensei
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lumiodatalabs.MahjongSenseiTests
+        SWIFT_VERSION: "5.0"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Mahjong Sensei.app/Mahjong Sensei"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+  MahjongSenseiUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: App/UITests
+    dependencies:
+      - target: MahjongSensei
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lumiodatalabs.MahjongSenseiUITests
+        SWIFT_VERSION: "5.0"
+        TEST_TARGET_NAME: MahjongSensei
+
+schemes:
+  MahjongSensei:
+    build:
+      targets:
+        MahjongSensei: all
+        MahjongSenseiTests: [test]
+    test:
+      targets:
+        - MahjongSenseiTests
+        - MahjongSenseiUITests

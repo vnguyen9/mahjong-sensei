@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 import MahjongCore
 import Recognition
 
@@ -38,6 +39,8 @@ final class TrackerSession {
     }
 
     private let store: TrackerStore
+    private let logger = Logger(subsystem: "com.lumiodatalabs.MahjongSensei",
+                                category: "TrackerReview")
 
     init(store: TrackerStore = .shared) {
         self.store = store
@@ -88,6 +91,27 @@ final class TrackerSession {
         return changed
     }
 
+    /// Commits a reviewed scan as one transaction. Capture, classification,
+    /// cancellation, and editor changes cannot mutate persisted counts before
+    /// this method succeeds.
+    @discardableResult
+    func apply(_ draft: TrackerReviewDraft) throws -> Set<Int> {
+        let projection = draft.applicationProjection(hand: hand)
+        guard projection.conservationFailureIDs.isEmpty else {
+            throw TrackerApplyError.conservation
+        }
+        let next = projection.histogram
+        var changed: Set<Int> = []
+        for index in seenHistogram.indices where seenHistogram[index] != next[index] {
+            changed.insert(index)
+        }
+        guard !changed.isEmpty else { return [] }
+        seenHistogram = next
+        persist()
+        logger.info("applied reviewed scan tiles=\(draft.includedCount) suggestions=\(projection.suggestedEvidenceIDs.count) skipped=\(projection.skippedEvidenceIDs.count) corrected=\(draft.tiles.filter { $0.status == .userCorrected || $0.status == .manuallyAdded }.count) excluded=\(draft.tiles.filter(\.isExcluded).count) changedFaces=\(changed.count)")
+        return changed
+    }
+
     /// Table count stepper — clamped so table + hand ≤ 4.
     func setCount(classIndex: Int, count: Int) {
         guard (0..<Tile.baseClassCount).contains(classIndex),
@@ -100,6 +124,26 @@ final class TrackerSession {
     }
 
     func setHand(_ tiles: [Tile]) {
+        hand = tiles
+        persist()
+    }
+
+    /// Replaces the hand as one reviewed transaction. Both photographed and
+    /// manually entered hands use this seam, so Cancel never leaks partial
+    /// edits into persisted Tracker state.
+    func applyHand(_ tiles: [Tile]) throws {
+        guard tiles.count <= Self.maxHandSize else {
+            throw TrackerHandApplyError.tooManyTiles(tiles.count)
+        }
+        let grouped = Dictionary(grouping: tiles, by: { $0 })
+        for (tile, copies) in grouped {
+            let cap = tile.isBonus ? 1 : 4
+            let tableCopies = tile.isBonus ? 0 : tableSeen(tile)
+            guard copies.count + tableCopies <= cap else {
+                throw TrackerHandApplyError.conservation(tile)
+            }
+        }
+        guard hand != tiles else { return }
         hand = tiles
         persist()
     }
@@ -134,5 +178,19 @@ final class TrackerSession {
         let snapshot = TrackerStore.Persisted(seen: seenHistogram, hand: hand)
         let store = store
         Task { await store.save(snapshot) }
+    }
+}
+
+enum TrackerHandApplyError: Error, LocalizedError {
+    case tooManyTiles(Int)
+    case conservation(Tile)
+
+    var errorDescription: String? {
+        switch self {
+        case .tooManyTiles(let count):
+            return "A hand can contain at most \(TrackerSession.maxHandSize) tiles; this draft contains \(count)."
+        case .conservation:
+            return "The proposed hand and table contain more copies of a tile than exist in the set."
+        }
     }
 }

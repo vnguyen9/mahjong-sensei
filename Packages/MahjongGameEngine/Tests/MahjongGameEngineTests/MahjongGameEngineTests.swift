@@ -147,7 +147,7 @@ final class MahjongGameEngineTests: XCTestCase {
         // executes the promised 1,000 full hands before a simulator release.
         let rounds = ProcessInfo.processInfo.environment["MJ_FULL_SIM_STRESS"] == "1" ? 1_000 : 24
         for seed in 0..<rounds {
-            var game = try GameState.newGame(seed: UInt64(seed), dealer: seed % 4)
+            var game = try GameState.newGame(seed: UInt64(seed), dealer: seed % 4, rulesProfile: .hkClassicV3)
             var guardTurns = 0
             while !game.isTerminal {
                 guardTurns += 1
@@ -167,6 +167,177 @@ final class MahjongGameEngineTests: XCTestCase {
             XCTAssertEqual(game.terminal?.payments.reduce(0, +), 0)
         }
     }
+
+    func testMatchStartsWithFixedTableSeatsAndDeterministicHandSeed() throws {
+        let config = try MatchConfiguration(seed: 99, humanSeat: 3, botDifficulty: .hard)
+        let first = try MatchState(configuration: config)
+        let second = try MatchState(configuration: config)
+        XCTAssertEqual(first.currentDealer, 0)
+        XCTAssertEqual(first.prevailingWind, .east)
+        XCTAssertEqual(first.configuration.humanSeat, 3)
+        XCTAssertEqual(first.configuration.botDifficulty, .hard)
+        XCTAssertEqual(first.currentHand.seed, MatchState.handSeed(matchSeed: 99, handIndex: 0))
+        XCTAssertEqual(first.currentHand.wallOrder, second.currentHand.wallOrder)
+        XCTAssertThrowsError(try MatchConfiguration(humanSeat: 4))
+    }
+
+    func testMatchDealerRepeatsForDealerWinAndExhaustiveDraw() throws {
+        var match = try MatchState(configuration: MatchConfiguration(seed: 5))
+        try match.recordForTesting(result(winner: 0, faan: 4))
+        XCTAssertEqual(match.currentDealer, 0)
+        XCTAssertEqual(match.dealerRepeatCount, 2)
+        try match.advanceForTesting()
+        try match.recordForTesting(TerminalResult(cause: "exhaustive"))
+        XCTAssertEqual(match.currentDealer, 0)
+        XCTAssertEqual(match.dealerRepeatCount, 3)
+        XCTAssertEqual(match.prevailingWind, .east)
+    }
+
+    func testMatchRotatesWindAfterFourPassedDealershipsAndEndsAfterNorth() throws {
+        var match = try MatchState(configuration: MatchConfiguration(seed: 10))
+        var contexts: [(Wind, Int)] = []
+        for hand in 0..<16 {
+            contexts.append((match.prevailingWind, match.currentDealer))
+            try match.recordForTesting(result(winner: (match.currentDealer + 1) % 4, faan: 3))
+            if hand < 15 { try match.advanceForTesting() }
+        }
+        XCTAssertEqual(contexts.map(\.0), [.east, .east, .east, .east, .south, .south, .south, .south, .west, .west, .west, .west, .north, .north, .north, .north])
+        XCTAssertEqual(contexts.map(\.1), [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3])
+        XCTAssertTrue(match.isMatchComplete)
+        XCTAssertEqual(match.summary.handsPlayed, 16)
+        XCTAssertEqual(match.totals.reduce(0, +), 0)
+        XCTAssertThrowsError(try match.advanceToNextHand())
+    }
+
+    func testMatchLedgerAndStatsStayZeroSum() throws {
+        var match = try MatchState(configuration: MatchConfiguration(seed: 4))
+        try match.recordForTesting(result(winner: 2, faan: 6, payments: [-16, 0, 16, 0]))
+        XCTAssertEqual(match.totals, [-16, 0, 16, 0])
+        XCTAssertEqual(match.totals.reduce(0, +), 0)
+        XCTAssertEqual(match.seatStats[2].wins, 1)
+        XCTAssertEqual(match.seatStats[2].biggestFaan, 6)
+        XCTAssertEqual(match.history[0].totalsAfter, match.totals)
+        XCTAssertEqual(match.summary.standings.first, 2)
+    }
+
+    func testMatchReplayRoundTripAfterARealHand() throws {
+        var match = try MatchState(configuration: MatchConfiguration(seed: 21, humanSeat: 2))
+        var turns = 0
+        while !match.currentHand.isTerminal {
+            turns += 1
+            XCTAssertLessThan(turns, 300)
+            let actor = try XCTUnwrap(match.currentActor)
+            let actions = match.legalActions(for: actor)
+            let fallback = try XCTUnwrap(actions.first)
+            let action = actions.first(where: { $0.kind == .win })
+                ?? actions.first(where: { $0.kind == .discard })
+                ?? actions.first(where: { $0.kind == .pass })
+                ?? fallback
+            try match.apply(actionID: action.id)
+        }
+        let data = try JSONEncoder().encode(match.serializeReplay())
+        let decoded = try JSONDecoder().decode(MatchReplayV1.self, from: data)
+        let rebuilt = try MatchState.replay(decoded)
+        XCTAssertEqual(rebuilt.serializeReplay(), match.serializeReplay())
+        XCTAssertEqual(rebuilt.totals.reduce(0, +), 0)
+    }
+
+    func testRulesProfilesAndDataDrivenSettlement() throws {
+        XCTAssertEqual(RulesProfile.hk3FaanV2.id, GameState.rulesProfileID)
+        XCTAssertFalse(RulesProfile.hk3FaanV2.permitsSevenPairs)
+        XCTAssertTrue(RulesProfile.hkClassicV3.permitsSevenPairs)
+        XCTAssertTrue(RulesProfile.hkClassicV3.permitsThirteenOrphans)
+        XCTAssertEqual(SettlementPolicy.halfSpicyV2.payments(faan: 3, winner: 0, source: .discard, discarder: 1), [8, -8, 0, 0])
+        let selfDraw = SettlementPolicy.classicHalfSpicy.payments(faan: 5, winner: 2, source: .selfDraw, discarder: nil)
+        XCTAssertEqual(selfDraw.reduce(0, +), 0)
+        XCTAssertEqual(selfDraw[2], 36)
+        XCTAssertEqual(SettlementPolicy.classicFullSpicy.payments(faan: 5, winner: 2, source: .selfDraw, discarder: nil)[2], 72)
+        let classic = try GameState.newGame(seed: 1, rulesProfile: .hkClassicV3)
+        XCTAssertEqual(classic.rulesProfile.id, RulesProfile.hkClassicV3.id)
+        XCTAssertEqual(try GameState.replay(classic.serializeReplay()).rulesProfile, .hkClassicV3)
+        let settings = MatchRulesConfiguration(minimumFaan: 1, faanCap: 10, scoreFlowers: false, settlementStyle: .fullSpicy)
+        let custom = try settings.makeProfile()
+        XCTAssertEqual(custom.minimumFaan, 1)
+        XCTAssertEqual(custom.faanCap, 10)
+        XCTAssertFalse(custom.scoreFlowers)
+        XCTAssertEqual(try RulesProfile.resolve(id: custom.id, rulesHash: custom.rulesHash), custom)
+    }
+
+    func testClassicProfilePermitsSevenPairsButV2RejectsIt() throws {
+        // Seven honor pairs cannot also decompose as four standard sets + pair.
+        let tiles = [27, 28, 29, 30, 31, 32, 33].flatMap { [$0 * 4, $0 * 4 + 1] }
+        let wall = wallWithDealerTiles(tiles)
+        var classic = try GameState.newGame(seed: 0, suppliedWall: wall, rulesProfile: .hkClassicV3)
+        XCTAssertTrue(classic.legalMask(for: 0)[1], "\(classic.players[0].concealed.map { $0.tile.code })")
+        try classic.apply(actionID: 1)
+        XCTAssertEqual(classic.terminal?.winner, 0)
+        // All Honors is a limit and correctly suppresses the lesser seven-pairs
+        // display line; the legal-win path above proves seven-pairs admission.
+        XCTAssertEqual(classic.terminal?.faan, 13)
+        let v2 = try GameState.newGame(seed: 0, suppliedWall: wall, rulesProfile: .hk3FaanV2)
+        XCTAssertFalse(v2.legalMask(for: 0)[1])
+    }
+
+    func testClassicProfilePermitsThirteenOrphansButV2RejectsIt() throws {
+        let terminalOrHonorClasses = [0, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33]
+        let tiles = terminalOrHonorClasses.map { $0 * 4 } + [1]
+        let wall = wallWithDealerTiles(tiles)
+        var classic = try GameState.newGame(seed: 0, suppliedWall: wall, rulesProfile: .hkClassicV3)
+        XCTAssertTrue(classic.legalMask(for: 0)[1])
+        try classic.apply(actionID: 1)
+        XCTAssertEqual(classic.terminal?.winner, 0)
+        XCTAssertEqual(classic.terminal?.faan, 13)
+        let v2 = try GameState.newGame(seed: 0, suppliedWall: wall, rulesProfile: .hk3FaanV2)
+        XCTAssertFalse(v2.legalMask(for: 0)[1])
+    }
+
+    func testSevenFlowersKeepsItsThreeFaanPatternBelowTheMinimumSetting() throws {
+        var wall = Array(0..<144)
+        let assignments = [(52, 136), (143, 137), (142, 138), (141, 139), (140, 140), (139, 141), (138, 142)]
+        for (position, tile) in assignments {
+            wall.swapAt(position, wall.firstIndex(of: tile)!)
+        }
+        let profile = try MatchRulesConfiguration(minimumFaan: 1, faanCap: 10).makeProfile()
+        let game = try GameState.newGame(seed: 0, suppliedWall: wall, rulesProfile: profile)
+        XCTAssertEqual(game.terminal?.winSource, .flowerSeven)
+        XCTAssertEqual(game.terminal?.faan, 3)
+        XCTAssertEqual(game.terminal?.patternBreakdown.first?.faan, 3)
+    }
+
+    func testDifficultyPoliciesAreDeterministicAndLegal() async throws {
+        let game = try GameState.newGame(seed: 45)
+        let seat = try XCTUnwrap(game.currentActor)
+        let observation = game.observation(for: seat)
+        let mask = game.legalMask(for: seat)
+        for difficulty in BotDifficulty.allCases {
+            let policy = DifficultyMahjongPolicy(difficulty: difficulty, seed: 99)
+            let first = try await policy.decision(for: observation, legalMask: mask)
+            let second = try await policy.decision(for: observation, legalMask: mask)
+            XCTAssertEqual(first, second, "\(difficulty)")
+            XCTAssertTrue(mask[first.actionID], "\(difficulty) selected an illegal action")
+        }
+        let model = try await ModelMahjongPolicy().decision(for: observation, legalMask: mask)
+        XCTAssertTrue(mask[model.actionID])
+    }
+}
+
+private func result(winner: Int, faan: Int, payments: [Int]? = nil) -> TerminalResult {
+    var defaultPayments = [0, 0, 0, 0]
+    defaultPayments[winner] = 8
+    defaultPayments[(winner + 1) % 4] = -8
+    let payment = payments ?? defaultPayments
+    return TerminalResult(cause: "win", winner: winner, faan: faan, payments: payment)
+}
+
+private func wallWithDealerTiles(_ dealerTiles: [Int]) -> [Int] {
+    precondition(dealerTiles.count == 14)
+    var wall = Array(0..<144)
+    let dealerPositions = (0..<13).map { $0 * 4 } + [52]
+    for (position, tile) in zip(dealerPositions, dealerTiles) {
+        let source = wall.firstIndex(of: tile)!
+        wall.swapAt(position, source)
+    }
+    return wall
 }
 
 private func histogram(_ tiles: [TileInstance]) -> [Int] {

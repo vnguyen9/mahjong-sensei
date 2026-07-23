@@ -6,43 +6,78 @@ import MahjongData
 import EfficiencyEngine
 import CoachEngine
 
-/// Stay-open hand editor: tap or drag tiles from the palette into the hand strip
-/// without dismissing. Tapping a hand tile opens `TrackerTileSheet`.
-///
-/// Sheet height is locked to a large detent (no content-driven shrink) so empty
-/// vs filled hand feels the same size.
+/// One atomic hand editor shared by camera recognition and manual entry.
+/// `initialTiles` is a proposal only; TrackerSession is changed once, on Apply.
 struct TrackerHandSheet: View {
     let tracker: TrackerSession
+    let sourceImage: UIImage?
+    let onScanHand: (() -> Void)?
+    let onApplied: (() -> Void)?
+    private let isPad: Bool
+
     @Environment(\.dismiss) private var dismiss
-
+    @State private var draft: [Tile]
     @State private var suit: HandSuitTab = .man
-    @State private var inspectTile: TileSelection?
+    @State private var editTarget: HandEditTarget?
+    @State private var errorMessage: String?
 
-    private var hand: [Tile] { tracker.hand }
-
-    /// Reserved height for ~3 wrapped rows of 32pt tiles + padding.
     private static let handAreaMinHeight: CGFloat = 128
 
-    var body: some View {
-        ZStack {
-            MJColor.sheetGlass.ignoresSafeArea()
-            VStack(spacing: 0) {
-                SheetGrabber()
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 6)
-                    .padding(.bottom, 2)
+    init(tracker: TrackerSession,
+         initialTiles: [Tile]? = nil,
+         sourceImage: UIImage? = nil,
+         onScanHand: (() -> Void)? = nil,
+         onApplied: (() -> Void)? = nil) {
+        self.tracker = tracker
+        self.sourceImage = sourceImage
+        self.onScanHand = onScanHand
+        self.onApplied = onApplied
+        isPad = UIDevice.current.userInterfaceIdiom == .pad
+        _draft = State(initialValue: initialTiles ?? tracker.hand)
+    }
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Your hand (\(hand.count)/\(TrackerSession.maxHandSize))")
-                        .font(MJFont.serif(15, weight: .bold))
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if let sourceImage {
+                        Image(uiImage: sourceImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity, maxHeight: isPad ? 300 : 190)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .accessibilityLabel("Photographed hand")
+                    }
+
+                    Text("Your hand (\(draft.count)/\(TrackerSession.maxHandSize))")
+                        .font(MJFont.serif(17, weight: .bold))
                         .foregroundStyle(MJColor.creamHeading)
 
                     handArea
 
                     Text(hintText)
-                        .font(MJFont.ui(11, weight: oddsLine == nil ? .regular : .semibold))
-                        .foregroundStyle(oddsLine == nil ? MJColor.cream(0.5) : MJColor.creamHeading)
-                        .frame(minHeight: 16, alignment: .leading)
+                        .font(.footnote)
+                        .foregroundStyle(oddsLine == nil ? MJColor.cream(0.62) : MJColor.creamHeading)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let onScanHand {
+                        Button {
+                            dismiss()
+                            onScanHand()
+                        } label: {
+                            Label(sourceImage == nil ? "Scan Hand" : "Scan Again",
+                                  systemImage: "camera.viewfinder")
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityHint("Opens the camera with a wide hand guide. Unsaved edits are discarded.")
+                    }
+
+                    Divider().overlay(MJColor.gold(0.18))
+
+                    Text("Enter Hand Tiles")
+                        .font(.headline)
+                        .foregroundStyle(MJColor.creamHeading)
 
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 6) {
@@ -53,104 +88,166 @@ struct TrackerHandSheet: View {
                         .padding(.horizontal, 2)
                     }
 
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5),
-                              spacing: 10) {
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5),
+                        spacing: 10
+                    ) {
                         ForEach(suit.options, id: \.self) { tile in
                             paletteTile(tile)
                         }
                     }
                     .padding(.horizontal, 4)
 
-                    Spacer(minLength: 8)
-
-                    GoldButton("Done") { dismiss() }
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 18)
-                .padding(.top, 8)
+                .padding(20)
+                .padding(.bottom, 24)
+                .frame(maxWidth: 720)
+                .frame(maxWidth: .infinity)
+            }
+            .background(MJColor.sheetGlass.ignoresSafeArea())
+            .navigationTitle(sourceImage == nil ? "Edit Hand" : "Review Hand")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Apply Hand") { apply() }
+                        .disabled(!isDraftValid)
+                        .accessibilityHint("Replaces the saved hand with this reviewed draft.")
+                }
             }
         }
-        .presentationDetents([.large])
-        .presentationDragIndicator(.hidden)
+        .presentationDetents(isPad ? [.fraction(0.94)] : [.large])
         .presentationBackground(.clear)
         .preferredColorScheme(.dark)
-        .sheet(item: $inspectTile) { sel in
-            TrackerTileSheet(tile: sel.tile, tracker: tracker)
+        .sheet(item: $editTarget) { target in
+            TrackerHandTileDraftEditor(
+                tile: target.tile,
+                onReplace: { replacement in
+                    guard draft.indices.contains(target.index) else { return }
+                    draft[target.index] = replacement
+                    editTarget = nil
+                },
+                onRemove: {
+                    guard draft.indices.contains(target.index) else { return }
+                    draft.remove(at: target.index)
+                    editTarget = nil
+                }
+            )
+            .presentationDetents(isPad ? [.fraction(0.88)] : [.large])
+        }
+        .alert("Hand not applied", isPresented: Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage ?? "Check the hand and try again.")
         }
     }
-
-    private var hintText: String {
-        if let oddsLine { return oddsLine }
-        if hand.count >= TrackerSession.maxHandSize {
-            return "Hand full (\(TrackerSession.maxHandSize)) — tap a tile above to edit"
-        }
-        return "Tap or drag tiles below to add · tap hand to edit counts"
-    }
-
-    // MARK: Hand area (stable height + wrap)
 
     private var handArea: some View {
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(MJColor.cardRaised)
 
-            if hand.isEmpty {
+            if draft.isEmpty {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .strokeBorder(MJColor.gold(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
                     .padding(8)
                     .overlay {
-                        Text("Drop tiles here")
-                            .font(MJFont.ui(11, weight: .medium))
-                            .foregroundStyle(MJColor.gold(0.7))
+                        Text("Scan your hand or add tiles below")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(MJColor.gold(0.78))
                     }
             } else {
-                TrackerHandTilesView(tiles: hand, tileWidth: 32) { tile in
-                    inspectTile = TileSelection(tile)
+                let columns = [GridItem(.adaptive(minimum: 36), spacing: 7)]
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 7) {
+                    ForEach(Array(draft.enumerated()), id: \.offset) { index, tile in
+                        Button {
+                            editTarget = HandEditTarget(index: index, tile: tile)
+                            UISelectionFeedbackGenerator().selectionChanged()
+                        } label: {
+                            MahjongTileView(tile, width: 34)
+                                .frame(minWidth: 44, minHeight: 52)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Edit \(MahjongData.name(for: tile).english)")
+                    }
                 }
                 .padding(8)
             }
         }
         .frame(maxWidth: .infinity, minHeight: Self.handAreaMinHeight, alignment: .topLeading)
-        .dropDestination(for: TileTransfer.self) { items, _ in
-            guard let first = items.first else { return false }
-            return add(first.tile)
-        }
     }
 
-    // MARK: Palette
+    private var hintText: String {
+        if let oddsLine { return oddsLine }
+        if draft.count >= TrackerSession.maxHandSize {
+            return "Hand full — tap a tile above to change or remove it."
+        }
+        return "Tap a detected tile to correct or remove it. Add missing tiles below."
+    }
 
     private func paletteTile(_ tile: Tile) -> some View {
-        let allowed = tracker.canAddToHand(tile)
+        let allowed = canAdd(tile)
         return Button {
-            _ = add(tile)
+            guard allowed else {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                return
+            }
+            draft.append(tile)
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
         } label: {
-            MahjongTileView(tile, theme: .jade, width: 44)
+            MahjongTileView(tile, width: 44)
+                .frame(minWidth: 44, minHeight: 54)
         }
         .buttonStyle(.plain)
-        .draggable(TileTransfer(tile)) {
-            MahjongTileView(tile, theme: .jade, width: 40)
-        }
-        .opacity(allowed ? 1 : 0.4)
+        .opacity(allowed ? 1 : 0.38)
         .disabled(!allowed)
+        .accessibilityLabel("Add \(MahjongData.name(for: tile).english)")
     }
 
-    @discardableResult
-    private func add(_ tile: Tile) -> Bool {
-        guard tracker.canAddToHand(tile) else {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            return false
+    private func canAdd(_ tile: Tile) -> Bool {
+        guard draft.count < TrackerSession.maxHandSize else { return false }
+        let cap = tile.isBonus ? 1 : 4
+        let inDraft = draft.filter { $0 == tile }.count
+        let onTable = tile.isBonus ? 0 : tracker.tableSeen(tile)
+        return inDraft + onTable < cap
+    }
+
+    private var isDraftValid: Bool {
+        guard draft.count <= TrackerSession.maxHandSize else { return false }
+        let grouped = Dictionary(grouping: draft, by: { $0 })
+        return grouped.allSatisfy { tile, copies in
+            copies.count + (tile.isBonus ? 0 : tracker.tableSeen(tile))
+                <= (tile.isBonus ? 1 : 4)
         }
-        tracker.setHand(hand + [tile])
-        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-        return true
+    }
+
+    private func apply() {
+        do {
+            try tracker.applyHand(draft)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            onApplied?()
+            dismiss()
+        } catch {
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            errorMessage = error.localizedDescription
+        }
     }
 
     private var oddsLine: String? {
-        guard (13...14).contains(hand.count) else { return nil }
-        let table = TableState(concealed: hand, melds: [], bonusTiles: [],
-                               seenHistogram: tracker.seenHistogram, unseenCount: tracker.unseenCount,
-                               opponentMeldCount: 0,
-                               context: GameContext(seatWind: .east, prevailingWind: .east, houseRules: .standard))
+        guard (13...14).contains(draft.count) else { return nil }
+        let table = TableState(
+            concealed: draft, melds: [], bonusTiles: [],
+            seenHistogram: tracker.seenHistogram,
+            unseenCount: max(1, 136 - tracker.seenHistogram.reduce(0, +) - draft.count),
+            opponentMeldCount: 0,
+            context: GameContext(seatWind: .east, prevailingWind: .east,
+                                 houseRules: .standard)
+        )
         let advice = CoachAdvisor.advise(table)
         if let best = advice.best {
             return "Discard \(MahjongData.name(for: best.tile).traditional) → \(shantenLabel(best.shantenAfter)) · \(best.ukeireTotal) live · \(pct(best.nextDrawOdds))"
@@ -164,27 +261,58 @@ struct TrackerHandSheet: View {
     private func pct(_ odds: Double) -> String { String(format: "%.1f%%", odds * 100) }
 }
 
-// MARK: - Drag payload
-
-struct TileTransfer: Transferable, Hashable {
-    let classIndex: Int
-
-    init(_ tile: Tile) { classIndex = tile.classIndex }
-    init(classIndex: Int) { self.classIndex = classIndex }
-
-    var tile: Tile { Tile(classIndex: classIndex) ?? .m(1) }
-
-    static var transferRepresentation: some TransferRepresentation {
-        ProxyRepresentation { transfer in
-            String(transfer.classIndex)
-        } importing: { raw in
-            TileTransfer(classIndex: Int(raw) ?? 0)
-        }
-    }
+private struct HandEditTarget: Identifiable {
+    var index: Int
+    var tile: Tile
+    var id: Int { index }
 }
 
-// MARK: - Suit tabs
+private struct TrackerHandTileDraftEditor: View {
+    let tile: Tile
+    let onReplace: (Tile) -> Void
+    let onRemove: () -> Void
 
+    @Environment(\.dismiss) private var dismiss
+    @State private var suit: SuitTab
+    @State private var selection: Tile
+
+    init(tile: Tile, onReplace: @escaping (Tile) -> Void,
+         onRemove: @escaping () -> Void) {
+        self.tile = tile
+        self.onReplace = onReplace
+        self.onRemove = onRemove
+        _suit = State(initialValue: SuitTab(for: tile))
+        _selection = State(initialValue: tile)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 18) {
+                    TileFaceSelectionGrid(suit: $suit, selection: $selection)
+                    Button("Use \(MahjongData.name(for: selection).english)") {
+                        onReplace(selection)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    Button("Remove from Hand", role: .destructive, action: onRemove)
+                        .buttonStyle(.bordered)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .padding(20)
+            }
+            .background(Color(.systemBackground))
+            .navigationTitle("Edit Hand Tile")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
 private enum HandSuitTab: CaseIterable, Hashable {
     case man, pin, sou, honor
 
@@ -202,7 +330,8 @@ private enum HandSuitTab: CaseIterable, Hashable {
         case .man: return (1...9).map { .m($0) }
         case .pin: return (1...9).map { .p($0) }
         case .sou: return (1...9).map { .s($0) }
-        case .honor: return [.east, .south, .west, .north, .redDragon, .greenDragon, .whiteDragon]
+        case .honor: return [.east, .south, .west, .north,
+                             .redDragon, .greenDragon, .whiteDragon]
         }
     }
 }

@@ -6,10 +6,12 @@ import CoachEngine
 /// Authoritative, deterministic, single-hand HK Mahjong state machine.
 /// It owns all physical tiles and rejects an action before it changes state.
 public struct GameState: Sendable {
-    public static let rulesProfileID = "hk_3faan_v2"
+    public static let rulesProfileID = RulesProfile.hk3FaanV2.id
     /// Frozen identity of `configs/rules/hk_3faan_v2.yaml` in the certified
     /// Python simulator. Replays fail closed if this contract changes.
-    public static let rulesHash = "0e0ce106e67fbc42"
+    public static let rulesHash = RulesProfile.hk3FaanV2.rulesHash
+
+    public private(set) var rulesProfile: RulesProfile
 
     public private(set) var players: [GamePlayer]
     public private(set) var wallOrder: [Int]
@@ -42,22 +44,23 @@ public struct GameState: Sendable {
     public var isTerminal: Bool { phase == .terminal }
     public var terminalResult: TerminalResult? { terminal }
 
-    public static func newGame(seed: UInt64 = 0, suppliedWall: [Int]? = nil, dealer: Int = 0, prevailingWind: Wind = .east) throws -> GameState {
+    public static func newGame(seed: UInt64 = 0, suppliedWall: [Int]? = nil, dealer: Int = 0,
+                               prevailingWind: Wind = .east, rulesProfile: RulesProfile = .hk3FaanV2) throws -> GameState {
         guard (0..<4).contains(dealer) else { throw MahjongGameError.invalidWall }
         let wall: [Int]
         if let suppliedWall { try TileInstance.validateWall(suppliedWall); wall = suppliedWall }
         else { wall = deterministicShuffledWall(seed: seed) }
         var players: [GamePlayer] = []
         for seat in 0..<4 { players.append(GamePlayer(id: seat, seatWind: Wind(rawValue: (seat - dealer + 4) % 4)!)) }
-        var state = GameState(players: players, wallOrder: wall, wallFront: 0, wallRear: 144, river: Array(repeating: [], count: 4), discardHistory: [], phase: .deal, currentPlayer: dealer, dealer: dealer, prevailingWind: prevailingWind, turn: 0, lastDraw: nil, lastDrawInstance: nil, lastDrawKind: nil, offer: nil, pendingReactions: [:], reactionEligible: [], events: [], replayActions: [], seed: seed, terminal: nil)
+        var state = GameState(rulesProfile: rulesProfile, players: players, wallOrder: wall, wallFront: 0, wallRear: 144, river: Array(repeating: [], count: 4), discardHistory: [], phase: .deal, currentPlayer: dealer, dealer: dealer, prevailingWind: prevailingWind, turn: 0, lastDraw: nil, lastDrawInstance: nil, lastDrawKind: nil, offer: nil, pendingReactions: [:], reactionEligible: [], events: [], replayActions: [], seed: seed, terminal: nil)
         state.deal()
         try state.checkInvariants().throwIfFailed()
         return state
     }
 
     public static func replay(_ replay: GameReplayV2) throws -> GameState {
-        guard replay.rulesProfileID == rulesProfileID, replay.rulesHash == rulesHash else { throw MahjongGameError.replayMismatch("rules identity") }
-        var state = try newGame(seed: replay.seed, suppliedWall: replay.wallInstanceIDs, dealer: replay.initialDealer, prevailingWind: replay.prevailingWind)
+        let profile = try RulesProfile.resolve(id: replay.rulesProfileID, rulesHash: replay.rulesHash)
+        var state = try newGame(seed: replay.seed, suppliedWall: replay.wallInstanceIDs, dealer: replay.initialDealer, prevailingWind: replay.prevailingWind, rulesProfile: profile)
         for (index, step) in replay.actions.enumerated() {
             guard state.currentActor == step.actor else { throw MahjongGameError.replayMismatch("actor at \(index)") }
             try state.apply(actionID: step.actionID)
@@ -127,7 +130,7 @@ public struct GameState: Sendable {
             legalMask: legalMask(for: seat), isTerminal: isTerminal)
     }
 
-    public func serializeReplay() -> GameReplayV2 { GameReplayV2(seed: seed, wallInstanceIDs: wallOrder, initialDealer: dealer, prevailingWind: prevailingWind, actions: replayActions, events: events, terminal: terminal) }
+    public func serializeReplay() -> GameReplayV2 { GameReplayV2(rulesProfileID: rulesProfile.id, rulesHash: rulesProfile.rulesHash, seed: seed, wallInstanceIDs: wallOrder, initialDealer: dealer, prevailingWind: prevailingWind, actions: replayActions, events: events, terminal: terminal) }
 
     public func checkInvariants() -> InvariantReport {
         var messages: [String] = []
@@ -286,7 +289,7 @@ public struct GameState: Sendable {
             }
         }
         let result = score(for: seat, selfDraw: source == .selfDraw, robKong: source == .robKong)
-        let faan = min(13, result.totalFaan)
+        let faan = min(rulesProfile.faanCap, result.totalFaan)
         let patterns = result.components.map { PatternLine(name: $0.englishName, faan: $0.faan) }
         let payments = paymentVector(faan: faan, winner: seat, source: source, discarder: discarder)
         for index in 0..<4 { players[index].score += payments[index] }
@@ -296,7 +299,9 @@ public struct GameState: Sendable {
     }
 
     private mutating func finishFlowerWin(_ seat: Int, _ source: WinSource) {
-        let faan = source == .flowerEight ? 13 : 3
+        // Seven flowers is a fixed 3-faan instant pattern, independent of the
+        // table's declaration minimum; eight flowers remains the limit/cap.
+        let faan = source == .flowerEight ? rulesProfile.faanCap : min(3, rulesProfile.faanCap)
         let payments = paymentVector(faan: faan, winner: seat, source: source, discarder: nil)
         for i in 0..<4 { players[i].score += payments[i] }; emit(.win, seat)
         terminal = TerminalResult(cause: "win", winner: seat, winSource: source, patternBreakdown: [PatternLine(name: source == .flowerEight ? "Eight flowers" : "Seven flowers", faan: faan)], faan: faan, payments: payments); phase = .terminal
@@ -323,25 +328,23 @@ public struct GameState: Sendable {
             let kind: MeldKind = meld.kind == .chow ? .chow : (meld.kind == .pung ? .pung : .kong)
             return Meld(kind: kind, tiles: meld.tiles.map(\.tile), isConcealed: meld.isConcealed)
         }
-        let rules = HouseRules(minimumFaan: 3, faanLimit: 13, scoreFlowers: true)
+        let rules = HouseRules(minimumFaan: rulesProfile.minimumFaan, faanLimit: rulesProfile.faanCap, scoreFlowers: rulesProfile.scoreFlowers)
         let context = GameContext(seatWind: player.seatWind, prevailingWind: prevailingWind, houseRules: rules, isLastTile: wallRemaining == 0, isReplacement: afterKong, isRobbingKong: robKong)
-        return ScoringEngine.score(hand: Hand(concealedTiles: player.concealed.map(\.tile), melds: melds, bonusTiles: player.flowers.map(\.tile), winningTile: selfDraw ? lastDraw : offer?.tile, isSelfDraw: selfDraw), context: context, table: hk3FaanV2Table)
+        return ScoringEngine.score(hand: Hand(concealedTiles: player.concealed.map(\.tile), melds: melds, bonusTiles: player.flowers.map(\.tile), winningTile: selfDraw ? lastDraw : offer?.tile, isSelfDraw: selfDraw), context: context, table: rulesProfile.faanTable)
     }
     private func standardWinningShape(for seat: Int) -> Bool {
         let player = players[seat]
         let melds: [Meld] = player.melds.map { Meld(kind: $0.kind == .chow ? .chow : ($0.kind == .pung ? .pung : .kong), tiles: $0.tiles.map(\.tile), isConcealed: $0.isConcealed) }
-        return !HandParser.standardDecompositions(concealed: player.concealed.map(\.tile), fixedMelds: melds).isEmpty
+        let concealed = player.concealed.map(\.tile)
+        if !HandParser.standardDecompositions(concealed: concealed, fixedMelds: melds).isEmpty { return true }
+        guard melds.isEmpty else { return false }
+        if rulesProfile.permitsSevenPairs, HandParser.sevenPairs(concealed) != nil { return true }
+        if rulesProfile.permitsThirteenOrphans, HandParser.thirteenOrphans(concealed) != nil { return true }
+        return false
     }
     private func canChow(_ seat: Int, pattern: [Tile], offer: Tile) -> Bool { pattern.filter { $0 != offer }.allSatisfy { count($0, in: players[seat].concealed) > 0 } }
     private func paymentVector(faan: Int, winner: Int, source: WinSource, discarder: Int?) -> [Int] {
-        let table = [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384]; let base = table[max(0, min(13, faan))]; var out = Array(repeating: 0, count: 4)
-        if source == .selfDraw || source == .flowerSeven || source == .flowerEight {
-            let total = base * 3 / 2; let each = total / 3; var remainder = total % 3
-            for seat in 0..<4 where seat != winner { out[seat] -= each }
-            var cursor = (winner + 1) % 4; while remainder > 0 { if cursor != winner { out[cursor] -= 1; remainder -= 1 }; cursor = (cursor + 1) % 4 }
-            out[winner] = -out.reduce(0, +)
-        } else if let discarder { out[discarder] = -base; out[winner] = base }
-        return out
+        rulesProfile.settlement.payments(faan: min(rulesProfile.faanCap, faan), winner: winner, source: source, discarder: discarder)
     }
 
     private mutating func take(_ tile: Tile, from seat: Int, count: Int) -> [TileInstance] { var selected: [TileInstance] = []; players[seat].concealed.removeAll { instance in if instance.tile == tile && selected.count < count { selected.append(instance); return true }; return false }; return selected }
@@ -358,14 +361,6 @@ public struct GameState: Sendable {
 public struct InvariantReport: Sendable, Hashable { public var ok: Bool; public var messages: [String]; public init(ok: Bool, messages: [String] = []) { self.ok = ok; self.messages = messages }; public func throwIfFailed() throws { if !ok { throw MahjongGameError.invariantFailure(messages) } } }
 
 private struct EventSignature: Equatable { let kind: GameEventKind; let seat: Int; let tile: Tile?; let instanceID: Int?; let drawKind: DrawKind?; let data: [Int]; init(_ event: GameEventV2) { kind = event.kind; seat = event.seat; tile = event.tile; instanceID = event.instanceID; drawKind = event.drawKind; data = event.data } }
-
-private let hk3FaanV2Table = FaanTable(values: {
-    var values = FaanTable.standard.values
-    values[.chickenHand] = 1
-    values[.fullFlush] = 7
-    values[.sevenPairs] = 0
-    return values
-}())
 
 private func deterministicEventUUID(_ index: Int) -> UUID {
     UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, UInt8((index >> 24) & 0xFF), UInt8((index >> 16) & 0xFF), UInt8((index >> 8) & 0xFF), UInt8(index & 0xFF), 0, 0, 0, 2))

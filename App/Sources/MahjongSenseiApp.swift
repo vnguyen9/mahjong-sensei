@@ -7,6 +7,9 @@ struct MahjongSenseiApp: App {
 
     init() {
         MJFont.registerBundledSerif(from: .main)
+        #if DEBUG
+        TrackerDiagnosticExport.purgeAbandonedExports()
+        #endif
     }
 
     var body: some Scene {

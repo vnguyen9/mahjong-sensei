@@ -115,7 +115,7 @@ struct TilesView: View {
 
     private func tileCell(_ tile: Tile) -> some View {
         VStack(spacing: 8) {
-            MahjongTileView(tile, theme: .jade, width: 46)
+            MahjongTileView(tile, width: 46)
             Text(shortLabel(tile))
                 .font(MJFont.ui(10.5, weight: .medium))
                 .foregroundStyle(MJColor.cream(0.6))

@@ -56,3 +56,8 @@ Force an initial screen for screenshots / UI checks:
 SIMCTL_CHILD_MJ_SCREEN=result xcrun simctl launch booted com.lumiodatalabs.MahjongSensei
 # values: onboarding | result | scan | learn | settings
 ```
+
+## Release operations
+
+- [Recover an Xcode Cloud signing/export failure](Docs/XCODE_CLOUD_SIGNING_RECOVERY.md)
+- [Run a public TestFlight beta](Docs/TESTFLIGHT_PUBLIC_BETA_RUNBOOK.md)

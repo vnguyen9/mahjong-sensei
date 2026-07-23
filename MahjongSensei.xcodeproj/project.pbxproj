@@ -8,7 +8,9 @@
 
 /* Begin PBXBuildFile section */
 		00944AF65885401831AE403B /* TileLookup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BBC3CC11EEEA182BDC658D8 /* TileLookup.swift */; };
+		030795FD66F202420DCA4857 /* TrackerPresentationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6FB091842B08D20FDCCB9FB /* TrackerPresentationState.swift */; };
 		03E684ECDED8F5AD9044D41D /* CoachLiveSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57C112E2B80A076956A0D9D6 /* CoachLiveSetupView.swift */; };
+		11123441D9C496441F71EF69 /* GamePersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC41E50A9BD221995C50A354 /* GamePersistence.swift */; };
 		1137A1F0AAAD965F3E37DF88 /* TiledTileRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1CF22F31DD73AB76B8E01F /* TiledTileRecognizer.swift */; };
 		142A18E52ED865C192E40F06 /* BreathingSeam.swift in Sources */ = {isa = PBXBuildFile; fileRef = A949B672C852C860CBE00743 /* BreathingSeam.swift */; };
 		17EF926F9DBB0834F1720ADB /* LearnView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09CBA9FA45B284199B146C5D /* LearnView.swift */; };
@@ -17,10 +19,13 @@
 		1E71E6CFF01BC18F2101C78F /* MapTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A5B3A7AD164814E4E064562 /* MapTab.swift */; };
 		1E78016465430C8A68A0EBCA /* TrackerCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0DC8161A918D10E68B73E1E /* TrackerCard.swift */; };
 		21260D5124DE328AB9426D58 /* SeenPips.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73BD64F4A46DD0F3A27372E9 /* SeenPips.swift */; };
+		2843AC4EDEA2E072E3A24C7B /* GameTableOptionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDA7C0202270FAFB41C09883 /* GameTableOptionsView.swift */; };
 		2C260C59C3EC141E7C6E2B5E /* CoachLiveSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5D54DFDE66A205AB48C8DF6 /* CoachLiveSession.swift */; };
 		2E47A7C47FA3C9C6A5774BF1 /* CaptureStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58CB9E0CB3259E6170ABAE9A /* CaptureStage.swift */; };
 		2FCDAACAC92A991B596CAB55 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6424479F9A442BC6A89B1D1F /* RootView.swift */; };
+		312CE94FD9BF4B1F4E10FD33 /* TrackerEvidenceReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C788D659A180637E92273F /* TrackerEvidenceReviewView.swift */; };
 		328B04A108B93AA00E64ED67 /* TileCountGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEE865E7C1A2483015EEC479 /* TileCountGrid.swift */; };
+		32D1E3D85214B82F86AC3FA5 /* tracker-pro-full-table-37.expected.json in Resources */ = {isa = PBXBuildFile; fileRef = D90A8440495F78E25E01AC4E /* tracker-pro-full-table-37.expected.json */; };
 		3B6922A0F0265F4DE80D3455 /* ZoneBrackets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 716455FB7BB34E54F2358CA0 /* ZoneBrackets.swift */; };
 		3C79A97F92D10738FC70FA61 /* ARWorldMapStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5AA0171DBBE343CDEB3B2CD /* ARWorldMapStore.swift */; };
 		3CBE88148AE01603F8B6AA14 /* MahjongTileDetectorSmallV3.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 9345FBB23B51F7C0E199A9C7 /* MahjongTileDetectorSmallV3.mlpackage */; };
@@ -32,9 +37,13 @@
 		5014FF308E1056ADAD37CFDC /* CalibrationPrimerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CFF9CB1C38083A371601F1F /* CalibrationPrimerView.swift */; };
 		52EA60D48B4E04846B2AEFE0 /* MeldExampleSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8411D0CA66C3C459D9E74CC /* MeldExampleSheet.swift */; };
 		548858245FEEC2BDEAF12D88 /* WorldCensusController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7FCFDA7A29BC208E727D5CC /* WorldCensusController.swift */; };
+		56BDC3A2736CFD0FF1E71EB6 /* CameraDrawerChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5F7196DA65B8A39987EA3FC /* CameraDrawerChrome.swift */; };
 		596EF8B0C7F8F073D2C2BA45 /* ScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC76CFFC67320E0F2D7C217A /* ScanView.swift */; };
 		5A1A850C5B4750F338D713E1 /* ARCameraPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA9BA8B7994C5EE17F27D8A3 /* ARCameraPreview.swift */; };
 		5BDCFABE5628423AFDB61056 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5936A7CEE0BDA52915E2A376 /* Assets.xcassets */; };
+		5CBC084CFB7524162DE7ACFD /* TrackerLiveDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A61AC7914D89D61179CBA393 /* TrackerLiveDetector.swift */; };
+		5DB3B73ECB6310EB89341272 /* TileThemeSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DD769DA484B979CC2D1A48C /* TileThemeSettingsView.swift */; };
+		5DE7869925BE5E582088DE46 /* TrackerReviewDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD6A00303B76A196B17B1DD5 /* TrackerReviewDraft.swift */; };
 		5FE6D1EBA3B3DDD7CD04D05B /* EfficiencyEngine in Frameworks */ = {isa = PBXBuildFile; productRef = 44B9AFC9F83AE2B6458F2F7B /* EfficiencyEngine */; };
 		60B619914B25A76AB4DA9118 /* ARCalibrationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CAB4E88CBE906E3E4FB1FF1 /* ARCalibrationView.swift */; };
 		60CF6BFA2720E68C738DF1DC /* LiveGeometryDebugOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4874F7181ACB869A628BEE84 /* LiveGeometryDebugOverlay.swift */; };
@@ -44,6 +53,7 @@
 		6834523AE7AC7CFAC3D0FD46 /* ScanFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = D688B944D7D34A685343BDEE /* ScanFlow.swift */; };
 		686676E3FB74A72AD5C243A4 /* ROIScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = E45B97473895ECEF51C59EF2 /* ROIScheduler.swift */; };
 		69387EBE60E6A061885CD7B0 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 635B8CDC017DF0052693C8BE /* AppIcon.icon */; };
+		6CEF7E321694B145CE26ABCE /* MahjongGameUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B44E5D2AB7C08F6805342391 /* MahjongGameUITests.swift */; };
 		6CF714859F996B5B3188CBD1 /* CoachLiveSessionPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68235F7A5C13BE38CB977B57 /* CoachLiveSessionPersistence.swift */; };
 		74186B5FB3D6729C8DED3C49 /* ContextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7AF7A3726C3C92599FBDE9D /* ContextView.swift */; };
 		75B3ADED8E753E4E56D2BF9E /* PlaneLockPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A898C2AEAD503D3AAC10AFB /* PlaneLockPolicy.swift */; };
@@ -51,6 +61,7 @@
 		79D1A84FFA47D22C300A8D78 /* HandStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C2B68E4640E9ACEB8FA7EE5 /* HandStrip.swift */; };
 		7BC58058509EEECEDBC929A2 /* TrackerTileSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69C5F17025C4CDE45C1CE48B /* TrackerTileSheet.swift */; };
 		810A9AA11801C8E0AD9C2400 /* MahjongData in Frameworks */ = {isa = PBXBuildFile; productRef = CC9B23968BCFCD2C62BDB933 /* MahjongData */; };
+		87253DC6C005B1ED89B1BF25 /* GameLearningSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5ABC51BA8787368976589F5C /* GameLearningSheet.swift */; };
 		8A3CF81DEAB3EE7D91093711 /* StartupStatusOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E9A65DBC1631EED7870C676 /* StartupStatusOverlay.swift */; };
 		90F8F0C019681ED95939CCBE /* ScoringEngine in Frameworks */ = {isa = PBXBuildFile; productRef = 9A28153581A106128C7AEC05 /* ScoringEngine */; };
 		91867373B4D94382ECE9CBE9 /* CorrectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FBD3D8AB353F158FEC90590 /* CorrectView.swift */; };
@@ -67,24 +78,33 @@
 		A1862B42C5CC6FF94B07864F /* TilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E44882F5024ED6275048D3B0 /* TilesView.swift */; };
 		A701D56CC5BBF7869F171E8E /* LiveFeedPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = D101783FE0966B336C6AFB9E /* LiveFeedPane.swift */; };
 		A8498BB034CAA373BDE66380 /* MahjongCore in Frameworks */ = {isa = PBXBuildFile; productRef = 359FD1F5644314FA31AF1692 /* MahjongCore */; };
+		AAF36972482F37D70F477A8C /* GameRulesPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = D25078C243016E52B6945932 /* GameRulesPrefs.swift */; };
+		AB3147C0C24D1C564BFBA016 /* tracker-pro-full-table-37.jpeg in Resources */ = {isa = PBXBuildFile; fileRef = 96C9450F3926621D610FA12C /* tracker-pro-full-table-37.jpeg */; };
 		ABCD755331356AF60CD50585 /* TileInsight.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2ACB05F2FA94DF9435370F2 /* TileInsight.swift */; };
 		AD6335F29D2700743F66140C /* CoachEngine in Frameworks */ = {isa = PBXBuildFile; productRef = 9B32912125417A320636C8C8 /* CoachEngine */; };
 		AD9A7D8E69EC5A3C34245ACB /* Recognition in Frameworks */ = {isa = PBXBuildFile; productRef = 620B686ABFEF1926EB5C86A0 /* Recognition */; };
 		B05AFCBC31BC7970A0698E3F /* NotoSerifTC.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FF70DF30453B9EB131A99D81 /* NotoSerifTC.ttf */; };
-		B5483082C35C1E629C615AA3 /* MahjongTileLocatorV3.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = EEF6EDCD7A9F5D8F47A1A8E0 /* MahjongTileLocatorV3.mlpackage */; };
+		B2EB3FB9E06D29BF8E236A8E /* TrackerDirectDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B204CFEF07F171F149A60201 /* TrackerDirectDetector.swift */; };
 		B6A7D5F77A716A078EC652E0 /* ARTableCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40582882748F14747679AD5C /* ARTableCapture.swift */; };
 		B7B549FB8E56197442C6B80D /* GameSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16AC07FA99546690854DCA4F /* GameSession.swift */; };
+		BA2A31C06577F78EB5376880 /* ModelLabAR.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94DC2F1B64FC5C08C38627CB /* ModelLabAR.swift */; };
 		BF78C9D7A2FE6907C4714235 /* ARTableFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10995C90B440715042A736E0 /* ARTableFrame.swift */; };
+		C0B573B48815FF05FAD09EB1 /* TrackerV4Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EEE635B5CFE60CD6A304F83 /* TrackerV4Tests.swift */; };
 		C1F7EAB61D2F8B6CF65EB31D /* MahjongTileDetectorMediumV3.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 0E4A467CE5CB81391F136C02 /* MahjongTileDetectorMediumV3.mlpackage */; };
+		C517B00426E22A659D5B84CE /* GamePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5389D07C41B54F7B66E1E6B6 /* GamePresentation.swift */; };
 		C925BF7E6DCA0774F6392227 /* MahjongSenseiApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95B1EC84171322739212E697 /* MahjongSenseiApp.swift */; };
 		CA2889ECA9FDD9EECA28DD63 /* HandEndedCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF45B54E955C3E4AA7DB073B /* HandEndedCard.swift */; };
 		CAD60B327E812E098DCBCCCB /* CorrectionSheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = F97008718877876B0C8B0599 /* CorrectionSheets.swift */; };
 		CD688C308196B1ACC047F227 /* HouseRulesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC48C0F595216EA964E413AB /* HouseRulesView.swift */; };
+		CF08CBB1CD1FA66ED45FD16D /* GameSounds.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3034CE6E211078F79A115964 /* GameSounds.swift */; };
 		CF47F7D1539B2CFEC3289219 /* GameLauncherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C960634946219A3D4F67BE2 /* GameLauncherView.swift */; };
 		D0AA90D0438A1E1F631AAA83 /* ScanReticle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A81F65F06BC7D16B083A35C /* ScanReticle.swift */; };
 		D10E1659E5A10F78ADFD69CA /* CameraMotionGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD33C846E40164CCAEC6F457 /* CameraMotionGate.swift */; };
+		D21DC295794DBFF417EF1633 /* GameLearning.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1476A505BD70AB9FFDD421DA /* GameLearning.swift */; };
 		D22EEB624D8FA5F6D8AB0E16 /* AdviceLine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52CBA5EF5DE3FB0B354C9247 /* AdviceLine.swift */; };
+		D57C8E386DBC72CEC4F860D7 /* TrackerStillCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87AE06F2F604E351D06D9996 /* TrackerStillCapture.swift */; };
 		D711BF9AA741B7B8E2E0A956 /* ROICropMapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 485BF079BCF6509C4C079810 /* ROICropMapper.swift */; };
+		D912A25586E18B2588DDE649 /* ModelLabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5557670E370E26ED8A4F35AD /* ModelLabView.swift */; };
 		D96BD39D2AD39A2E17DF3D08 /* CorrectionHintBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 717A558E040A94D6C10917DF /* CorrectionHintBanner.swift */; };
 		DB16AF747B45FF752179ACF3 /* MahjongGameEngine in Frameworks */ = {isa = PBXBuildFile; productRef = DA4D0B2EB368FDF998B46EB4 /* MahjongGameEngine */; };
 		DC2F1E25D39F165255A713EC /* MahjongTileDetectorNanoV3.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = FD62D290B65AB8EE5D2681BD /* MahjongTileDetectorNanoV3.mlpackage */; };
@@ -97,12 +117,33 @@
 		EA7F8D2C99B1F77EDD90A233 /* TilesBasics.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA32C64E1B5935B323AA3A7A /* TilesBasics.swift */; };
 		EE5FBDBF68872BF42134AB55 /* TrackerHandTilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2CA44C3A05158FEFA789BC0 /* TrackerHandTilesView.swift */; };
 		EF7515F51D3C8EBE61717435 /* FaanExampleSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8BE5293F287586D9A1ACED5 /* FaanExampleSheet.swift */; };
+		F1887BE74E45A8AC4F0AEE0D /* tracker-pro-full-table-37-letterbox.png in Resources */ = {isa = PBXBuildFile; fileRef = 10F683EB341B14429AB63462 /* tracker-pro-full-table-37-letterbox.png */; };
 		F190DD59E3D4C6FAC88C578F /* ModelPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C39EA12486DF548B1C4785DC /* ModelPickerView.swift */; };
+		F53BCC94F1F95345C6036232 /* TrackerScanPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4767A60441E48B48B2972E8A /* TrackerScanPipeline.swift */; };
+		F6A502AA42C6259322949F78 /* MahjongLearningGameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B759310A0F86481F551A1F67 /* MahjongLearningGameTests.swift */; };
 		F8F367DB4E03683303D7A38A /* ResultView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0CC6BA30CEA4FDF6A9F558E /* ResultView.swift */; };
+		FAD15410040D45F41F07F898 /* TrackerDeveloperDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14D322542CAC2445C2765854 /* TrackerDeveloperDiagnostics.swift */; };
 		FAF44A4BDD9501A8BC867A81 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCD29EB9F3E108C791767DB6 /* SettingsView.swift */; };
 		FC8174186786C50291FDD716 /* TrackerPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70E6D6459FFEDD2FF36E157E /* TrackerPersistence.swift */; };
 		FF3ACCF0DEFE6996CB88818D /* WindExplainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8862C76FEE3E810CDBE70E4E /* WindExplainerView.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		6AD1846C77AFA7E1DC4921AD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 60F47EE5A04C3406F187EF3A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 569DC8C181F180F6EB6DD0BE;
+			remoteInfo = MahjongSensei;
+		};
+		F6106EFA171856970C63F9A9 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 60F47EE5A04C3406F187EF3A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 569DC8C181F180F6EB6DD0BE;
+			remoteInfo = MahjongSensei;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		0628FE33EF033C69F491E3AB /* Recognition */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Recognition; path = Packages/Recognition; sourceTree = SOURCE_ROOT; };
@@ -111,29 +152,40 @@
 		0E4A467CE5CB81391F136C02 /* MahjongTileDetectorMediumV3.mlpackage */ = {isa = PBXFileReference; path = MahjongTileDetectorMediumV3.mlpackage; sourceTree = "<group>"; };
 		0FBD3D8AB353F158FEC90590 /* CorrectView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorrectView.swift; sourceTree = "<group>"; };
 		10995C90B440715042A736E0 /* ARTableFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARTableFrame.swift; sourceTree = "<group>"; };
+		10F683EB341B14429AB63462 /* tracker-pro-full-table-37-letterbox.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "tracker-pro-full-table-37-letterbox.png"; sourceTree = "<group>"; };
+		1476A505BD70AB9FFDD421DA /* GameLearning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameLearning.swift; sourceTree = "<group>"; };
+		14D322542CAC2445C2765854 /* TrackerDeveloperDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerDeveloperDiagnostics.swift; sourceTree = "<group>"; };
 		16AC07FA99546690854DCA4F /* GameSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameSession.swift; sourceTree = "<group>"; };
 		17214659BEC95E930837FCC9 /* FeedBlurBackdrop.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedBlurBackdrop.swift; sourceTree = "<group>"; };
 		1A5B3A7AD164814E4E064562 /* MapTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapTab.swift; sourceTree = "<group>"; };
 		226C96E2EF57E390BB558C83 /* GameView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameView.swift; sourceTree = "<group>"; };
 		2CAB4E88CBE906E3E4FB1FF1 /* ARCalibrationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARCalibrationView.swift; sourceTree = "<group>"; };
 		2FCE74283183CB64B6851D35 /* StateTabs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StateTabs.swift; sourceTree = "<group>"; };
+		3034CE6E211078F79A115964 /* GameSounds.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameSounds.swift; sourceTree = "<group>"; };
 		3264E3333140A0849419FDF0 /* EventsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventsTab.swift; sourceTree = "<group>"; };
 		3A898C2AEAD503D3AAC10AFB /* PlaneLockPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaneLockPolicy.swift; sourceTree = "<group>"; };
+		3B6CE048D7FD064BED84F4B6 /* MahjongSenseiTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MahjongSenseiTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3C960634946219A3D4F67BE2 /* GameLauncherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameLauncherView.swift; sourceTree = "<group>"; };
 		3CFF9CB1C38083A371601F1F /* CalibrationPrimerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalibrationPrimerView.swift; sourceTree = "<group>"; };
 		3F44A0B28B319BE14906B0E5 /* CapturedBackdrop.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapturedBackdrop.swift; sourceTree = "<group>"; };
 		40582882748F14747679AD5C /* ARTableCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARTableCapture.swift; sourceTree = "<group>"; };
 		41DE59781BA435C1531E6F3E /* CountsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CountsTab.swift; sourceTree = "<group>"; };
 		4302C9C3F91BDF6F33DBC0C8 /* TrackerLiveInsight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerLiveInsight.swift; sourceTree = "<group>"; };
+		4767A60441E48B48B2972E8A /* TrackerScanPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerScanPipeline.swift; sourceTree = "<group>"; };
 		485BF079BCF6509C4C079810 /* ROICropMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ROICropMapper.swift; sourceTree = "<group>"; };
 		4874F7181ACB869A628BEE84 /* LiveGeometryDebugOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveGeometryDebugOverlay.swift; sourceTree = "<group>"; };
 		4BAEC854D51D3FD555F36C56 /* DesignSystem */ = {isa = PBXFileReference; lastKnownFileType = folder; name = DesignSystem; path = Packages/DesignSystem; sourceTree = SOURCE_ROOT; };
 		4E9A65DBC1631EED7870C676 /* StartupStatusOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupStatusOverlay.swift; sourceTree = "<group>"; };
 		52CBA5EF5DE3FB0B354C9247 /* AdviceLine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdviceLine.swift; sourceTree = "<group>"; };
+		5389D07C41B54F7B66E1E6B6 /* GamePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GamePresentation.swift; sourceTree = "<group>"; };
+		5557670E370E26ED8A4F35AD /* ModelLabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelLabView.swift; sourceTree = "<group>"; };
 		55B905E0A40731812E706DD9 /* MahjongSensei.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = MahjongSensei.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		56911A66B836FBEA21A9595A /* MahjongSenseiUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MahjongSenseiUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		57C112E2B80A076956A0D9D6 /* CoachLiveSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoachLiveSetupView.swift; sourceTree = "<group>"; };
 		58CB9E0CB3259E6170ABAE9A /* CaptureStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureStage.swift; sourceTree = "<group>"; };
 		5936A7CEE0BDA52915E2A376 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		5ABC51BA8787368976589F5C /* GameLearningSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameLearningSheet.swift; sourceTree = "<group>"; };
+		5DD769DA484B979CC2D1A48C /* TileThemeSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TileThemeSettingsView.swift; sourceTree = "<group>"; };
 		625046166747D854105F7ED5 /* TrackerSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerSession.swift; sourceTree = "<group>"; };
 		635B8CDC017DF0052693C8BE /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		6424479F9A442BC6A89B1D1F /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -151,35 +203,48 @@
 		7A81F65F06BC7D16B083A35C /* ScanReticle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanReticle.swift; sourceTree = "<group>"; };
 		7B4E57CB1805025EC60E9639 /* MahjongData */ = {isa = PBXFileReference; lastKnownFileType = folder; name = MahjongData; path = Packages/MahjongData; sourceTree = SOURCE_ROOT; };
 		7C9CB7534AB7E7BF72E16788 /* HandPoseFingertip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandPoseFingertip.swift; sourceTree = "<group>"; };
+		7EEE635B5CFE60CD6A304F83 /* TrackerV4Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerV4Tests.swift; sourceTree = "<group>"; };
 		8126790AAC442ACA946A8562 /* GameSheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameSheets.swift; sourceTree = "<group>"; };
 		84A06022BBE25346EB47264D /* PixelBufferCropper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelBufferCropper.swift; sourceTree = "<group>"; };
+		87AE06F2F604E351D06D9996 /* TrackerStillCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerStillCapture.swift; sourceTree = "<group>"; };
 		8862C76FEE3E810CDBE70E4E /* WindExplainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindExplainerView.swift; sourceTree = "<group>"; };
 		9345FBB23B51F7C0E199A9C7 /* MahjongTileDetectorSmallV3.mlpackage */ = {isa = PBXFileReference; path = MahjongTileDetectorSmallV3.mlpackage; sourceTree = "<group>"; };
+		94DC2F1B64FC5C08C38627CB /* ModelLabAR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelLabAR.swift; sourceTree = "<group>"; };
 		95B1EC84171322739212E697 /* MahjongSenseiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MahjongSenseiApp.swift; sourceTree = "<group>"; };
+		96C9450F3926621D610FA12C /* tracker-pro-full-table-37.jpeg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = "tracker-pro-full-table-37.jpeg"; sourceTree = "<group>"; };
 		A0F6CB153E8ABB83E91D093B /* CameraPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraPreview.swift; sourceTree = "<group>"; };
 		A2CA44C3A05158FEFA789BC0 /* TrackerHandTilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerHandTilesView.swift; sourceTree = "<group>"; };
 		A3AAF33AECFA9F0858847671 /* DarkTableDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DarkTableDetector.swift; sourceTree = "<group>"; };
+		A61AC7914D89D61179CBA393 /* TrackerLiveDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerLiveDetector.swift; sourceTree = "<group>"; };
 		A6BAE45248E15F3933CEA93F /* TileDetailSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TileDetailSheet.swift; sourceTree = "<group>"; };
 		A81BF96E5DAE74D07FEC1A55 /* MahjongCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = MahjongCore; path = Packages/MahjongCore; sourceTree = SOURCE_ROOT; };
 		A949B672C852C860CBE00743 /* BreathingSeam.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BreathingSeam.swift; sourceTree = "<group>"; };
 		AC76CFFC67320E0F2D7C217A /* ScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanView.swift; sourceTree = "<group>"; };
 		AE4550B8CDB53B86965D719F /* BreathingController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BreathingController.swift; sourceTree = "<group>"; };
+		B204CFEF07F171F149A60201 /* TrackerDirectDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerDirectDetector.swift; sourceTree = "<group>"; };
 		B226DCEAD0631E14B3248166 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		B2C788D659A180637E92273F /* TrackerEvidenceReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerEvidenceReviewView.swift; sourceTree = "<group>"; };
+		B44E5D2AB7C08F6805342391 /* MahjongGameUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MahjongGameUITests.swift; sourceTree = "<group>"; };
 		B5D54DFDE66A205AB48C8DF6 /* CoachLiveSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoachLiveSession.swift; sourceTree = "<group>"; };
+		B759310A0F86481F551A1F67 /* MahjongLearningGameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MahjongLearningGameTests.swift; sourceTree = "<group>"; };
 		B85B676565988D9A99E33450 /* ScoringCheatSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScoringCheatSheetView.swift; sourceTree = "<group>"; };
 		C0CC6BA30CEA4FDF6A9F558E /* ResultView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResultView.swift; sourceTree = "<group>"; };
 		C39C6141CAF942D790B88E69 /* MahjongGameEngine */ = {isa = PBXFileReference; lastKnownFileType = folder; name = MahjongGameEngine; path = Packages/MahjongGameEngine; sourceTree = SOURCE_ROOT; };
 		C39EA12486DF548B1C4785DC /* ModelPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerView.swift; sourceTree = "<group>"; };
 		C42B81E5515A8DA1F8B0A765 /* MahjongTileDetectorProV3.mlpackage */ = {isa = PBXFileReference; path = MahjongTileDetectorProV3.mlpackage; sourceTree = "<group>"; };
 		C593FFB8B57C8B76E38AE6E8 /* CensusStateAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CensusStateAdapter.swift; sourceTree = "<group>"; };
+		C5F7196DA65B8A39987EA3FC /* CameraDrawerChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraDrawerChrome.swift; sourceTree = "<group>"; };
 		CC1CF22F31DD73AB76B8E01F /* TiledTileRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TiledTileRecognizer.swift; sourceTree = "<group>"; };
+		CC41E50A9BD221995C50A354 /* GamePersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GamePersistence.swift; sourceTree = "<group>"; };
 		CC48C0F595216EA964E413AB /* HouseRulesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HouseRulesView.swift; sourceTree = "<group>"; };
 		CD33C846E40164CCAEC6F457 /* CameraMotionGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraMotionGate.swift; sourceTree = "<group>"; };
 		CF45B54E955C3E4AA7DB073B /* HandEndedCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandEndedCard.swift; sourceTree = "<group>"; };
 		D0E9D90845927B6B7EA1CA75 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		D101783FE0966B336C6AFB9E /* LiveFeedPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveFeedPane.swift; sourceTree = "<group>"; };
+		D25078C243016E52B6945932 /* GameRulesPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRulesPrefs.swift; sourceTree = "<group>"; };
 		D688B944D7D34A685343BDEE /* ScanFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanFlow.swift; sourceTree = "<group>"; };
 		D8411D0CA66C3C459D9E74CC /* MeldExampleSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeldExampleSheet.swift; sourceTree = "<group>"; };
+		D90A8440495F78E25E01AC4E /* tracker-pro-full-table-37.expected.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "tracker-pro-full-table-37.expected.json"; sourceTree = "<group>"; };
 		DC05119DB7493FAC6B9795B4 /* TrackerHandSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerHandSheet.swift; sourceTree = "<group>"; };
 		DFD9EFCF4B660C9D9945CC6C /* CoachLiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoachLiveView.swift; sourceTree = "<group>"; };
 		E0DC8161A918D10E68B73E1E /* TrackerCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerCard.swift; sourceTree = "<group>"; };
@@ -190,16 +255,18 @@
 		E7AF7A3726C3C92599FBDE9D /* ContextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextView.swift; sourceTree = "<group>"; };
 		E7FCFDA7A29BC208E727D5CC /* WorldCensusController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorldCensusController.swift; sourceTree = "<group>"; };
 		EA9BA8B7994C5EE17F27D8A3 /* ARCameraPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARCameraPreview.swift; sourceTree = "<group>"; };
+		EDA7C0202270FAFB41C09883 /* GameTableOptionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameTableOptionsView.swift; sourceTree = "<group>"; };
 		EDB03CA4E27656701C825493 /* EfficiencyEngine */ = {isa = PBXFileReference; lastKnownFileType = folder; name = EfficiencyEngine; path = Packages/EfficiencyEngine; sourceTree = SOURCE_ROOT; };
 		EE525DB1AA55DABAE6E8CAB6 /* CoachEngine */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CoachEngine; path = Packages/CoachEngine; sourceTree = SOURCE_ROOT; };
 		EEE865E7C1A2483015EEC479 /* TileCountGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TileCountGrid.swift; sourceTree = "<group>"; };
-		EEF6EDCD7A9F5D8F47A1A8E0 /* MahjongTileLocatorV3.mlpackage */ = {isa = PBXFileReference; path = MahjongTileLocatorV3.mlpackage; sourceTree = "<group>"; };
 		F4A901E942F012189A2497FC /* CameraTorch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraTorch.swift; sourceTree = "<group>"; };
+		F6FB091842B08D20FDCCB9FB /* TrackerPresentationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerPresentationState.swift; sourceTree = "<group>"; };
 		F8BE5293F287586D9A1ACED5 /* FaanExampleSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaanExampleSheet.swift; sourceTree = "<group>"; };
 		F97008718877876B0C8B0599 /* CorrectionSheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorrectionSheets.swift; sourceTree = "<group>"; };
 		FA32C64E1B5935B323AA3A7A /* TilesBasics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TilesBasics.swift; sourceTree = "<group>"; };
 		FCD29EB9F3E108C791767DB6 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		FD62D290B65AB8EE5D2681BD /* MahjongTileDetectorNanoV3.mlpackage */ = {isa = PBXFileReference; path = MahjongTileDetectorNanoV3.mlpackage; sourceTree = "<group>"; };
+		FD6A00303B76A196B17B1DD5 /* TrackerReviewDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerReviewDraft.swift; sourceTree = "<group>"; };
 		FF70DF30453B9EB131A99D81 /* NotoSerifTC.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = NotoSerifTC.ttf; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -222,6 +289,16 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		010E02F7C25A4A40E8368DB3 /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				10F683EB341B14429AB63462 /* tracker-pro-full-table-37-letterbox.png */,
+				D90A8440495F78E25E01AC4E /* tracker-pro-full-table-37.expected.json */,
+				96C9450F3926621D610FA12C /* tracker-pro-full-table-37.jpeg */,
+			);
+			path = Fixtures;
+			sourceTree = "<group>";
+		};
 		0C5A0C863DA696AA875D2086 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
@@ -231,6 +308,16 @@
 				B73012946D2AFCAEADC03C52 /* Models */,
 			);
 			path = Resources;
+			sourceTree = "<group>";
+		};
+		1323533C43FC02741CE4EE63 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				B759310A0F86481F551A1F67 /* MahjongLearningGameTests.swift */,
+				7EEE635B5CFE60CD6A304F83 /* TrackerV4Tests.swift */,
+				010E02F7C25A4A40E8368DB3 /* Fixtures */,
+			);
+			path = Tests;
 			sourceTree = "<group>";
 		};
 		3C91E55003ED5D12C1C2158C /* Scan */ = {
@@ -267,6 +354,8 @@
 			isa = PBXGroup;
 			children = (
 				55B905E0A40731812E706DD9 /* MahjongSensei.app */,
+				3B6CE048D7FD064BED84F4B6 /* MahjongSenseiTests.xctest */,
+				56911A66B836FBEA21A9595A /* MahjongSenseiUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -310,6 +399,14 @@
 			path = Capture;
 			sourceTree = "<group>";
 		};
+		78E1D4E3B34268916D2E46DF /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				B44E5D2AB7C08F6805342391 /* MahjongGameUITests.swift */,
+			);
+			path = UITests;
+			sourceTree = "<group>";
+		};
 		8D80854B0197DE973B85E126 /* CoachLive */ = {
 			isa = PBXGroup;
 			children = (
@@ -348,6 +445,8 @@
 		A6939933E7B719B3245E5A3E /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				C5F7196DA65B8A39987EA3FC /* CameraDrawerChrome.swift */,
+				3034CE6E211078F79A115964 /* GameSounds.swift */,
 				A6BAE45248E15F3933CEA93F /* TileDetailSheet.swift */,
 				E2ACB05F2FA94DF9435370F2 /* TileInsight.swift */,
 			);
@@ -382,7 +481,6 @@
 				FD62D290B65AB8EE5D2681BD /* MahjongTileDetectorNanoV3.mlpackage */,
 				C42B81E5515A8DA1F8B0A765 /* MahjongTileDetectorProV3.mlpackage */,
 				9345FBB23B51F7C0E199A9C7 /* MahjongTileDetectorSmallV3.mlpackage */,
-				EEF6EDCD7A9F5D8F47A1A8E0 /* MahjongTileLocatorV3.mlpackage */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -391,6 +489,8 @@
 			isa = PBXGroup;
 			children = (
 				AE229432BD3C59501BBC6AE0 /* Sources */,
+				1323533C43FC02741CE4EE63 /* Tests */,
+				78E1D4E3B34268916D2E46DF /* UITests */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -399,8 +499,13 @@
 			isa = PBXGroup;
 			children = (
 				3C960634946219A3D4F67BE2 /* GameLauncherView.swift */,
+				1476A505BD70AB9FFDD421DA /* GameLearning.swift */,
+				5ABC51BA8787368976589F5C /* GameLearningSheet.swift */,
+				CC41E50A9BD221995C50A354 /* GamePersistence.swift */,
+				5389D07C41B54F7B66E1E6B6 /* GamePresentation.swift */,
 				16AC07FA99546690854DCA4F /* GameSession.swift */,
 				8126790AAC442ACA946A8562 /* GameSheets.swift */,
+				EDA7C0202270FAFB41C09883 /* GameTableOptionsView.swift */,
 				226C96E2EF57E390BB558C83 /* GameView.swift */,
 			);
 			path = Game;
@@ -433,11 +538,19 @@
 			children = (
 				CC1CF22F31DD73AB76B8E01F /* TiledTileRecognizer.swift */,
 				E0DC8161A918D10E68B73E1E /* TrackerCard.swift */,
+				14D322542CAC2445C2765854 /* TrackerDeveloperDiagnostics.swift */,
+				B204CFEF07F171F149A60201 /* TrackerDirectDetector.swift */,
+				B2C788D659A180637E92273F /* TrackerEvidenceReviewView.swift */,
 				DC05119DB7493FAC6B9795B4 /* TrackerHandSheet.swift */,
 				A2CA44C3A05158FEFA789BC0 /* TrackerHandTilesView.swift */,
+				A61AC7914D89D61179CBA393 /* TrackerLiveDetector.swift */,
 				4302C9C3F91BDF6F33DBC0C8 /* TrackerLiveInsight.swift */,
 				70E6D6459FFEDD2FF36E157E /* TrackerPersistence.swift */,
+				F6FB091842B08D20FDCCB9FB /* TrackerPresentationState.swift */,
+				FD6A00303B76A196B17B1DD5 /* TrackerReviewDraft.swift */,
+				4767A60441E48B48B2972E8A /* TrackerScanPipeline.swift */,
 				625046166747D854105F7ED5 /* TrackerSession.swift */,
+				87AE06F2F604E351D06D9996 /* TrackerStillCapture.swift */,
 				69C5F17025C4CDE45C1CE48B /* TrackerTileSheet.swift */,
 			);
 			path = Tracker;
@@ -446,9 +559,13 @@
 		EC301B7A12B2FEE72AF47629 /* Settings */ = {
 			isa = PBXGroup;
 			children = (
+				D25078C243016E52B6945932 /* GameRulesPrefs.swift */,
 				CC48C0F595216EA964E413AB /* HouseRulesView.swift */,
+				94DC2F1B64FC5C08C38627CB /* ModelLabAR.swift */,
+				5557670E370E26ED8A4F35AD /* ModelLabView.swift */,
 				C39EA12486DF548B1C4785DC /* ModelPickerView.swift */,
 				FCD29EB9F3E108C791767DB6 /* SettingsView.swift */,
+				5DD769DA484B979CC2D1A48C /* TileThemeSettingsView.swift */,
 			);
 			path = Settings;
 			sourceTree = "<group>";
@@ -506,6 +623,43 @@
 			productReference = 55B905E0A40731812E706DD9 /* MahjongSensei.app */;
 			productType = "com.apple.product-type.application";
 		};
+		9D02F940CA4CC535AC358344 /* MahjongSenseiTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C2D4774CB8FB2ABDC3FBB0C5 /* Build configuration list for PBXNativeTarget "MahjongSenseiTests" */;
+			buildPhases = (
+				DEB6EC058BC554E30865545D /* Sources */,
+				841255E3FC193195DA46B211 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C995D87D32E10D1B55D53E77 /* PBXTargetDependency */,
+			);
+			name = MahjongSenseiTests;
+			packageProductDependencies = (
+			);
+			productName = MahjongSenseiTests;
+			productReference = 3B6CE048D7FD064BED84F4B6 /* MahjongSenseiTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		AACF7DBDC9DAFD04225AD9CC /* MahjongSenseiUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1326A6B7C7BDA1EFE0840BA2 /* Build configuration list for PBXNativeTarget "MahjongSenseiUITests" */;
+			buildPhases = (
+				25D24A09C5446500D862517F /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E4AC3E714DB6CC8C95228F8B /* PBXTargetDependency */,
+			);
+			name = MahjongSenseiUITests;
+			packageProductDependencies = (
+			);
+			productName = MahjongSenseiUITests;
+			productReference = 56911A66B836FBEA21A9595A /* MahjongSenseiUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -518,6 +672,9 @@
 					569DC8C181F180F6EB6DD0BE = {
 						DevelopmentTeam = WX6S96WKKC;
 						ProvisioningStyle = Automatic;
+					};
+					AACF7DBDC9DAFD04225AD9CC = {
+						TestTargetID = 569DC8C181F180F6EB6DD0BE;
 					};
 				};
 			};
@@ -546,6 +703,8 @@
 			projectRoot = "";
 			targets = (
 				569DC8C181F180F6EB6DD0BE /* MahjongSensei */,
+				9D02F940CA4CC535AC358344 /* MahjongSenseiTests */,
+				AACF7DBDC9DAFD04225AD9CC /* MahjongSenseiUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -561,9 +720,27 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		841255E3FC193195DA46B211 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F1887BE74E45A8AC4F0AEE0D /* tracker-pro-full-table-37-letterbox.png in Resources */,
+				32D1E3D85214B82F86AC3FA5 /* tracker-pro-full-table-37.expected.json in Resources */,
+				AB3147C0C24D1C564BFBA016 /* tracker-pro-full-table-37.jpeg in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		25D24A09C5446500D862517F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6CEF7E321694B145CE26ABCE /* MahjongGameUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		D3D0382417B37D56817A69CF /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -578,6 +755,7 @@
 				408465FB2222FD74445F0220 /* BreathingController.swift in Sources */,
 				142A18E52ED865C192E40F06 /* BreathingSeam.swift in Sources */,
 				5014FF308E1056ADAD37CFDC /* CalibrationPrimerView.swift in Sources */,
+				56BDC3A2736CFD0FF1E71EB6 /* CameraDrawerChrome.swift in Sources */,
 				D10E1659E5A10F78ADFD69CA /* CameraMotionGate.swift in Sources */,
 				489C4FC8F6612FC592ED60B0 /* CameraPreview.swift in Sources */,
 				4B4BF2469611A70488F40CD6 /* CameraTorch.swift in Sources */,
@@ -601,8 +779,15 @@
 				EF7515F51D3C8EBE61717435 /* FaanExampleSheet.swift in Sources */,
 				9CD43C2AD1C50979E541EA4F /* FeedBlurBackdrop.swift in Sources */,
 				CF47F7D1539B2CFEC3289219 /* GameLauncherView.swift in Sources */,
+				D21DC295794DBFF417EF1633 /* GameLearning.swift in Sources */,
+				87253DC6C005B1ED89B1BF25 /* GameLearningSheet.swift in Sources */,
+				11123441D9C496441F71EF69 /* GamePersistence.swift in Sources */,
+				C517B00426E22A659D5B84CE /* GamePresentation.swift in Sources */,
+				AAF36972482F37D70F477A8C /* GameRulesPrefs.swift in Sources */,
 				B7B549FB8E56197442C6B80D /* GameSession.swift in Sources */,
 				DF8F719A0EB77E1BA0905109 /* GameSheets.swift in Sources */,
+				CF08CBB1CD1FA66ED45FD16D /* GameSounds.swift in Sources */,
+				2843AC4EDEA2E072E3A24C7B /* GameTableOptionsView.swift in Sources */,
 				1A346D6728F02C58F55E8F53 /* GameView.swift in Sources */,
 				CA2889ECA9FDD9EECA28DD63 /* HandEndedCard.swift in Sources */,
 				4379912831304276F871495C /* HandPoseFingertip.swift in Sources */,
@@ -616,9 +801,10 @@
 				DC2F1E25D39F165255A713EC /* MahjongTileDetectorNanoV3.mlpackage in Sources */,
 				98CEF6F6C52A1CD07AB8360A /* MahjongTileDetectorProV3.mlpackage in Sources */,
 				3CBE88148AE01603F8B6AA14 /* MahjongTileDetectorSmallV3.mlpackage in Sources */,
-				B5483082C35C1E629C615AA3 /* MahjongTileLocatorV3.mlpackage in Sources */,
 				1E71E6CFF01BC18F2101C78F /* MapTab.swift in Sources */,
 				52EA60D48B4E04846B2AEFE0 /* MeldExampleSheet.swift in Sources */,
+				BA2A31C06577F78EB5376880 /* ModelLabAR.swift in Sources */,
+				D912A25586E18B2588DDE649 /* ModelLabView.swift in Sources */,
 				F190DD59E3D4C6FAC88C578F /* ModelPickerView.swift in Sources */,
 				9C8BE8A4D4DA5A9D673513BB /* OnboardingView.swift in Sources */,
 				E83C1CF3E0F578BF1C75054D /* PixelBufferCropper.swift in Sources */,
@@ -639,15 +825,24 @@
 				79012560F7C5605687E9287F /* TileDetailSheet.swift in Sources */,
 				ABCD755331356AF60CD50585 /* TileInsight.swift in Sources */,
 				00944AF65885401831AE403B /* TileLookup.swift in Sources */,
+				5DB3B73ECB6310EB89341272 /* TileThemeSettingsView.swift in Sources */,
 				1137A1F0AAAD965F3E37DF88 /* TiledTileRecognizer.swift in Sources */,
 				EA7F8D2C99B1F77EDD90A233 /* TilesBasics.swift in Sources */,
 				A1862B42C5CC6FF94B07864F /* TilesView.swift in Sources */,
 				1E78016465430C8A68A0EBCA /* TrackerCard.swift in Sources */,
+				FAD15410040D45F41F07F898 /* TrackerDeveloperDiagnostics.swift in Sources */,
+				B2EB3FB9E06D29BF8E236A8E /* TrackerDirectDetector.swift in Sources */,
+				312CE94FD9BF4B1F4E10FD33 /* TrackerEvidenceReviewView.swift in Sources */,
 				E34F87E400EF5ED1323EE418 /* TrackerHandSheet.swift in Sources */,
 				EE5FBDBF68872BF42134AB55 /* TrackerHandTilesView.swift in Sources */,
+				5CBC084CFB7524162DE7ACFD /* TrackerLiveDetector.swift in Sources */,
 				A03E5419C6CAD7E9EE5BEF01 /* TrackerLiveInsight.swift in Sources */,
 				FC8174186786C50291FDD716 /* TrackerPersistence.swift in Sources */,
+				030795FD66F202420DCA4857 /* TrackerPresentationState.swift in Sources */,
+				5DE7869925BE5E582088DE46 /* TrackerReviewDraft.swift in Sources */,
+				F53BCC94F1F95345C6036232 /* TrackerScanPipeline.swift in Sources */,
 				998637E9553D0A5667A35F91 /* TrackerSession.swift in Sources */,
+				D57C8E386DBC72CEC4F860D7 /* TrackerStillCapture.swift in Sources */,
 				7BC58058509EEECEDBC929A2 /* TrackerTileSheet.swift in Sources */,
 				FF3ACCF0DEFE6996CB88818D /* WindExplainerView.swift in Sources */,
 				548858245FEEC2BDEAF12D88 /* WorldCensusController.swift in Sources */,
@@ -655,7 +850,29 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		DEB6EC058BC554E30865545D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F6A502AA42C6259322949F78 /* MahjongLearningGameTests.swift in Sources */,
+				C0B573B48815FF05FAD09EB1 /* TrackerV4Tests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		C995D87D32E10D1B55D53E77 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 569DC8C181F180F6EB6DD0BE /* MahjongSensei */;
+			targetProxy = F6106EFA171856970C63F9A9 /* PBXContainerItemProxy */;
+		};
+		E4AC3E714DB6CC8C95228F8B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 569DC8C181F180F6EB6DD0BE /* MahjongSensei */;
+			targetProxy = 6AD1846C77AFA7E1DC4921AD /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		6EB4084028A5E917EC9474DD /* Release */ = {
@@ -690,6 +907,24 @@
 			};
 			name = Release;
 		};
+		83717B76196F440DC46B3525 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.lumiodatalabs.MahjongSenseiTests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mahjong Sensei.app/Mahjong Sensei";
+			};
+			name = Debug;
+		};
 		9D6D143F26792CDACFCF1F06 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -721,6 +956,24 @@
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
+		};
+		BA5D85B22859913C24E40AB5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.lumiodatalabs.MahjongSenseiUITests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = MahjongSensei;
+			};
+			name = Release;
 		};
 		BAB200DD9CEB10316B0F1151 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -775,6 +1028,24 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		E83E3C20A8849DA576884DD2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.lumiodatalabs.MahjongSenseiTests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mahjong Sensei.app/Mahjong Sensei";
 			};
 			name = Release;
 		};
@@ -841,14 +1112,50 @@
 			};
 			name = Debug;
 		};
+		F65F5C28299A78AA9274252C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.lumiodatalabs.MahjongSenseiUITests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = MahjongSensei;
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		1326A6B7C7BDA1EFE0840BA2 /* Build configuration list for PBXNativeTarget "MahjongSenseiUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F65F5C28299A78AA9274252C /* Debug */,
+				BA5D85B22859913C24E40AB5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		B19FA595FBC19840A23F97CC /* Build configuration list for PBXNativeTarget "MahjongSensei" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				9D6D143F26792CDACFCF1F06 /* Debug */,
 				6EB4084028A5E917EC9474DD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		C2D4774CB8FB2ABDC3FBB0C5 /* Build configuration list for PBXNativeTarget "MahjongSenseiTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				83717B76196F440DC46B3525 /* Debug */,
+				E83E3C20A8849DA576884DD2 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

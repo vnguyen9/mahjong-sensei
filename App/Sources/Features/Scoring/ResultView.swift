@@ -108,7 +108,7 @@ struct ResultView: View {
                     VStack(spacing: 6) {
                         HStack(spacing: 2) {
                             ForEach(Array(meld.tiles.enumerated()), id: \.offset) { _, tile in
-                                MahjongTileView(tile, theme: .jade, width: 22)
+                                MahjongTileView(tile, width: 22)
                             }
                         }
                         Text(meldLabel(meld))

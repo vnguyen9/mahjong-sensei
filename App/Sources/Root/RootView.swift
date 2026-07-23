@@ -7,6 +7,12 @@ struct RootView: View {
     @Environment(AppState.self) private var app
 
     var body: some View {
+        content
+            .environment(\.tileTheme, (app.tileTheme ?? .jade).theme)
+            .environment(\.tileBackStyle, app.tileBack)
+    }
+
+    @ViewBuilder private var content: some View {
         // Debug hook: `SIMCTL_CHILD_MJ_SCREEN=<onboarding|result|scan|learn|settings>`
         // forces an initial screen for screenshots / UI checks.
         if let forced = ProcessInfo.processInfo.environment["MJ_SCREEN"] {
@@ -21,6 +27,8 @@ struct RootView: View {
             case "context":    ScanFlowView(debugRoute: .context)
             #if DEBUG
             case let s where s.hasPrefix("coach-live"): Self.coachLiveDebugView(s)
+            case "model-lab": NavigationStack { ModelLabView() }
+            case "tile-theme": NavigationStack { TileThemeSettingsView() }
             #endif
             case "learn":      LearnView()
             case "settings":   SettingsView()
@@ -29,7 +37,7 @@ struct RootView: View {
             case "winds":      NavigationStack { WindExplainerView() }
             case "rules":      NavigationStack { HouseRulesView() }
             #if DEBUG
-            case "game", "game-reaction", "game-result", "game-inspector":
+            case let gameRoute where gameRoute.hasPrefix("game"):
                 MahjongGameDebugScene.view(for: forced) ?? AnyView(MainTabView())
             #endif
             default:           MainTabView()
@@ -89,21 +97,32 @@ struct RootView: View {
 /// The three-tab shell with the floating pill tab bar (spec §3.3).
 struct MainTabView: View {
     @Environment(AppState.self) private var app
+    @State private var dockFrame: CGRect = .zero
 
     var body: some View {
         @Bindable var app = app
-        ZStack(alignment: .bottom) {
-            Group {
-                switch app.selectedTab {
-                case .scan:     ScanFlowView()
-                case .learn:    LearnView()
-                case .settings: SettingsView()
+        GeometryReader { proxy in
+            let containerFrame = proxy.frame(in: .global)
+            let dockClearance = dockFrame == .zero
+                ? CGFloat(0)
+                : max(0, containerFrame.maxY - dockFrame.minY + 12)
+            ZStack(alignment: .bottom) {
+                Group {
+                    switch app.selectedTab {
+                    case .scan:     ScanFlowView()
+                    case .learn:    LearnView()
+                    case .settings: SettingsView()
+                    }
                 }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .environment(\.floatingDockClearance, dockClearance)
 
-            MJTabBar(selection: $app.selectedTab)
-                .padding(.bottom, 6)
+                MJTabBar(selection: $app.selectedTab)
+                    .padding(.bottom, 6)
+                    .onGeometryChange(for: CGRect.self,
+                                      of: { $0.frame(in: .global) },
+                                      action: { dockFrame = $0 })
+            }
         }
     }
 }

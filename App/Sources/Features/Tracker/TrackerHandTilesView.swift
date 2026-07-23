@@ -18,12 +18,12 @@ struct TrackerHandTilesView: View {
                 Group {
                     if let onTap {
                         Button { onTap(tile) } label: {
-                            MahjongTileView(tile, theme: .jade, width: tileWidth)
+                            MahjongTileView(tile, width: tileWidth)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Edit \(MahjongData.name(for: tile).english)")
                     } else {
-                        MahjongTileView(tile, theme: .jade, width: tileWidth)
+                        MahjongTileView(tile, width: tileWidth)
                     }
                 }
             }

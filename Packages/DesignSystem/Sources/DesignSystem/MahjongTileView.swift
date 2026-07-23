@@ -11,16 +11,21 @@ import MahjongCore
 /// below ~30pt and on decorative tiles (pass `showsBadge: false`).
 public struct MahjongTileView: View {
     public let tile: Tile
-    public var theme: TileTheme
+    /// Explicit theme pins the render (camera/physical surfaces); `nil` follows
+    /// the ambient `\.tileTheme` environment value.
+    private let explicitTheme: TileTheme?
     public var width: CGFloat
     public var showsBadge: Bool
+    @Environment(\.tileTheme) private var envTheme
 
-    public init(_ tile: Tile, theme: TileTheme = .jade, width: CGFloat = 40, showsBadge: Bool = true) {
+    public init(_ tile: Tile, theme: TileTheme? = nil, width: CGFloat = 40, showsBadge: Bool = true) {
         self.tile = tile
-        self.theme = theme
+        self.explicitTheme = theme
         self.width = width
         self.showsBadge = showsBadge
     }
+
+    private var theme: TileTheme { explicitTheme ?? envTheme }
 
     private var height: CGFloat { (width * 1.35).rounded() }
     private var corner: CGFloat { (width * 0.19).rounded() }
@@ -48,19 +53,21 @@ public struct MahjongTileView: View {
     // MARK: Face
 
     private var face: some View {
-        RoundedRectangle(cornerRadius: corner, style: .continuous)
-            .fill(faceFill)
-            .overlay {
-                RoundedRectangle(cornerRadius: corner, style: .continuous)
-                    .strokeBorder(theme.border, lineWidth: 1)
-            }
-            .overlay {
-                if theme.goldInnerRing {
-                    RoundedRectangle(cornerRadius: max(2, corner - 1), style: .continuous)
-                        .strokeBorder(MJColor.gold(0.30), lineWidth: 1.5)
-                        .padding(1.5)
+        ZStack(alignment: .top) {
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                .fill(faceFill)
+                .overlay {
+                    RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        .strokeBorder(theme.border, lineWidth: 1)
                 }
+        }
+        .overlay {
+            if theme.goldInnerRing {
+                RoundedRectangle(cornerRadius: max(2, corner - 1), style: .continuous)
+                    .strokeBorder(MJColor.gold(0.30), lineWidth: 1.5)
+                    .padding(1.5)
             }
+        }
     }
 
     private var faceFill: AnyShapeStyle {
@@ -155,27 +162,42 @@ public struct MahjongTileView: View {
 
     private func dotGrid(_ n: Int) -> some View {
         let layout = Self.dotLayouts[n] ?? []
+        let inks = Self.dotInks[n] ?? []
         let d = width * (Self.dotDiameter[n] ?? 0.20)
         return ZStack {
-            ForEach(Array(layout.enumerated()), id: \.offset) { _, p in
-                dot(d).position(x: p.x * contentW, y: p.y * contentH)
+            ForEach(Array(layout.enumerated()), id: \.offset) { i, p in
+                dot(d, ink: inkColor(i < inks.count ? inks[i] : .blue))
+                    .position(x: p.x * contentW, y: p.y * contentH)
             }
         }
         .frame(width: contentW, height: contentH)
     }
 
-    private func dot(_ size: CGFloat) -> some View {
-        Circle()
-            .fill(theme.dot)
-            .overlay { Circle().strokeBorder(theme.dotRing, lineWidth: 1.5) }
-            .overlay {
-                Circle().fill(
-                    RadialGradient(colors: [.white.opacity(0.55), .clear],
-                                   center: .init(x: 0.38, y: 0.34),
-                                   startRadius: 0, endRadius: size * 0.55)
-                )
-            }
-            .frame(width: size, height: size)
+    /// One pip: a flat single-color mini-bullseye — the same concentric recipe
+    /// as the 1-dot (ring → face gap → core), so every dot rank shares one
+    /// crisp style at any size. No gradients or fixed-width strokes (the old
+    /// gloss + 1.5pt ring turned small pips muddy).
+    private func dot(_ size: CGFloat, ink: Color) -> some View {
+        ZStack {
+            Circle().fill(ink)
+            Circle().fill(theme.face2).frame(width: size * 0.68, height: size * 0.68)
+            Circle().fill(ink).frame(width: size * 0.52, height: size * 0.52)
+        }
+        .frame(width: size, height: size)
+    }
+
+    /// Real HK sets ink each pip in one of three colors. Mapped onto existing
+    /// theme slots so no theme changes are needed: ivory/classic get authentic
+    /// blue/red/green, while monochrome themes (jade/flat/glass) collapse all
+    /// three roles to their single ink and stay coherent.
+    private enum DotInk { case blue, red, green }
+
+    private func inkColor(_ ink: DotInk) -> Color {
+        switch ink {
+        case .blue:  return theme.dot
+        case .red:   return theme.dotRing
+        case .green: return theme.bam
+        }
     }
 
     // MARK: Bamboo (索) — authored per-rank layouts
@@ -238,8 +260,25 @@ public struct MahjongTileView: View {
 
     // MARK: Layout tables (pip/stick centers in the 0–1 content box)
 
+    /// Approved "max + fuller" sizing (design review 2026-07-22): +25% over the
+    /// original values, with 7 and 9 capped just under their neighbor spacing
+    /// so adjacent pips never touch.
     private static let dotDiameter: [Int: CGFloat] = [
-        2: 0.30, 3: 0.26, 4: 0.26, 5: 0.24, 6: 0.20, 7: 0.19, 8: 0.175, 9: 0.19,
+        2: 0.375, 3: 0.325, 4: 0.32, 5: 0.30, 6: 0.25, 7: 0.22, 8: 0.215, 9: 0.22,
+    ]
+
+    /// Per-pip ink roles, index-aligned with `dotLayouts` (traditional HK
+    /// arrangements: alternating 4s, red-center 5, green-over-red 6/7,
+    /// all-blue 8, green/red/blue rows on 9).
+    private static let dotInks: [Int: [DotInk]] = [
+        2: [.green, .blue],
+        3: [.blue, .red, .green],
+        4: [.blue, .green, .green, .blue],
+        5: [.blue, .green, .red, .green, .blue],
+        6: [.green, .green, .red, .red, .red, .red],
+        7: [.green, .green, .green, .red, .red, .red, .red],
+        8: [.blue, .blue, .blue, .blue, .blue, .blue, .blue, .blue],
+        9: [.green, .green, .green, .red, .red, .red, .blue, .blue, .blue],
     ]
     private static let dotLayouts: [Int: [CGPoint]] = [
         2: [CGPoint(x: 0.5, y: 0.24), CGPoint(x: 0.5, y: 0.76)],

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import DesignSystem
 import MahjongCore
 import MahjongData
@@ -9,8 +10,17 @@ import ScoringEngine
 struct TrackerTileSheet: View {
     let tile: Tile
     let tracker: TrackerSession
+    private let isPad: Bool
 
-    @State private var detent: PresentationDetent = .medium
+    @State private var detent: PresentationDetent
+
+    init(tile: Tile, tracker: TrackerSession) {
+        self.tile = tile
+        self.tracker = tracker
+        let pad = UIDevice.current.userInterfaceIdiom == .pad
+        isPad = pad
+        _detent = State(initialValue: pad ? .fraction(0.68) : .medium)
+    }
 
     private var tableCount: Int { tracker.tableSeen(tile) }
     private var handCopies: Int { tracker.handCount(tile) }
@@ -39,7 +49,6 @@ struct TrackerTileSheet: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         header(name)
-                        dualCountRow
                         LiveTileStatsView(insight: insight)
                     }
                     .padding(20)
@@ -47,7 +56,10 @@ struct TrackerTileSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large], selection: $detent)
+        .presentationDetents(
+            isPad ? [.fraction(0.68), .fraction(0.94)] : [.medium, .large],
+            selection: $detent
+        )
         .presentationDragIndicator(.hidden)
         .presentationBackground(.clear)
         .preferredColorScheme(.dark)
@@ -57,17 +69,17 @@ struct TrackerTileSheet: View {
 
     private func header(_ name: TileName) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 16) {
-                MahjongTileView(tile, theme: .jade, width: 52)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(name.english)
-                        .font(MJFont.serif(19, weight: .bold))
-                        .foregroundStyle(MJColor.creamHeading)
-                    Text("\(name.traditional) · \(name.jyutping)")
-                        .font(MJFont.ui(13, weight: .medium))
-                        .foregroundStyle(MJColor.gold)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 20) {
+                    tileIdentity(name)
+                    Spacer(minLength: 16)
+                    dualCountRow
+                        .frame(maxWidth: 340)
                 }
-                Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: 14) {
+                    tileIdentity(name)
+                    dualCountRow
+                }
             }
             HStack(spacing: 8) {
                 switch tile {
@@ -90,11 +102,24 @@ struct TrackerTileSheet: View {
         }
     }
 
+    private func tileIdentity(_ name: TileName) -> some View {
+        HStack(alignment: .center, spacing: 16) {
+            MahjongTileView(tile, width: isPad ? 66 : 52)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(name.english)
+                    .font(MJFont.serif(19, weight: .bold))
+                    .foregroundStyle(MJColor.creamHeading)
+                Text("\(name.traditional) · \(name.jyutping)")
+                    .font(MJFont.ui(13, weight: .medium))
+                    .foregroundStyle(MJColor.gold)
+            }
+        }
+    }
+
     // MARK: Dual steppers (same row)
 
     private var dualCountRow: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("Counts")
             HStack(spacing: 12) {
                 countCluster(label: "Table", seen: tableCount,
                              canMinus: tableCount > 0,

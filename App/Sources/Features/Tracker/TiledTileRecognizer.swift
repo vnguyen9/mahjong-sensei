@@ -5,18 +5,10 @@ import ImageIO
 import MahjongCore
 import Recognition
 
-/// Tiles a captured image into an overlapping NATIVE-resolution grid,
-/// recognizes each crop, maps boxes back to full-image coordinates, and
-/// dedupes — the fix for feeding a whole frame to YOLO, which compresses
-/// small/far tiles below the model's effective input resolution and wrecks
-/// recall (Tracker plan §3, "the key requirement"). Reuses the exact crop
-/// machinery Coach Live's ROI scheduler already built (`ROICropMapper`,
-/// `PixelBufferCropper`) — this is a plain grid instead of AR zone rects, but
-/// the same crop → recognize → map-back → dedupe chain.
+/// Shared tiled recognition for Score and Coach Live. Tracker V4 deliberately
+/// does not use this path: its still goes through one full-image Pro pass.
 enum TiledTileRecognizer {
-    /// Grid dimensions — device-tunable constants (plan calls for real-device
-    /// QA to retune these against a live whole-table shot; 3×4 keeps far tiles
-    /// sharp once the Tracker ROI grew to near full-frame).
+    /// Grid dimensions for the shared live/cropped recognition path.
     static let gridCols = 3
     static let gridRows = 4
     /// Fractional padding each grid cell is grown by (of its own width/height,
@@ -38,8 +30,7 @@ enum TiledTileRecognizer {
     /// the larger box’s diagonal (catches IoU-just-under-threshold pairs).
     static let sameClassCenterFraction = 0.6
 
-    /// Reused across calls — constructing a `CIContext` per crop is
-    /// expensive (see `PixelBufferCropper`'s own doc).
+    /// Reused across calls — constructing a `CIContext` per crop is expensive.
     private static let cropper = PixelBufferCropper()
 
     /// Recognizes every tile in `buffer` within `roi` (or the whole frame if
@@ -143,7 +134,7 @@ enum TiledTileRecognizer {
     /// coordinates. The actual overlap between adjacent crops comes from
     /// `overlap` being passed as `cropRect`'s padding, not from growing these
     /// cells themselves.
-    private static func gridCells(over region: TileBoundingBox) -> [TileBoundingBox] {
+    static func gridCells(over region: TileBoundingBox) -> [TileBoundingBox] {
         guard region.width > 0, region.height > 0 else { return [] }
         let cellW = region.width / Double(gridCols)
         let cellH = region.height / Double(gridRows)
@@ -243,5 +234,13 @@ enum TiledTileRecognizer {
         let dist = (dx * dx + dy * dy).squareRoot()
         let largerDiag = max(hypot(a.width, a.height), hypot(b.width, b.height))
         return largerDiag > 0 && dist <= fraction * largerDiag
+    }
+}
+
+private extension Duration {
+    var timeInterval: TimeInterval {
+        let value = components
+        return TimeInterval(value.seconds)
+            + TimeInterval(value.attoseconds) / 1_000_000_000_000_000_000
     }
 }

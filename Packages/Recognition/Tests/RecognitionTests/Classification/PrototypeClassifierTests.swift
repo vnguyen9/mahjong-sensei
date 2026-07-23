@@ -66,6 +66,21 @@ final class PrototypeClassifierTests: XCTestCase {
 
         XCTAssertNil(hypothesis.topFace)
         XCTAssertEqual(hypothesis.rejectionScore, 1)
+        XCTAssertEqual(hypothesis.rejectionReason, .noModelOutput)
+    }
+
+    func testBelowSuggestionFloorCandidateIsRetainedForDiagnostics() async throws {
+        let raw = [RawTileDetection(label: "7p", confidence: 0.149,
+                                    box: TileBoundingBox(x: 0, y: 0, width: 1, height: 1))]
+        let classifier = PrototypeClassifier(recognizer: StubRawRecognizer(raw: raw))
+
+        let hypothesis = try await classifier.classify(Self.crop())
+
+        XCTAssertNil(hypothesis.topFace)
+        XCTAssertEqual(hypothesis.rejectionReason, .belowAutoConfirmThreshold)
+        XCTAssertEqual(hypothesis.diagnostics.rawTopCandidates.first?.face, .tile(.p(7)))
+        XCTAssertEqual(Double(hypothesis.diagnostics.rawTopCandidates.first?.confidence ?? 0),
+                       0.149, accuracy: 0.0001)
     }
 
     func testFallsBackToRecognizeWhenRawIsUnavailable() async throws {

@@ -85,4 +85,83 @@ public extension TileTheme {
         dot: .white, dotRing: .white, bam: .white, num: .white, sub: .white, wind: .white,
         dragonRed: .white, dragonGreen: .white, dragonWhite: .white,
         usesSerif: false, isGlass: true)
+
+    /// Haidilao-style set: glossy cream face, gold engraved ink, red accents
+    /// (design review "Gilded Ivory", variant B).
+    static let gilded = TileTheme(
+        face1: Color(hex: 0xFCF8ED), face2: Color(hex: 0xF0E6CE), border: Color(hex: 0xE3D6B8),
+        shadowColor: Color(hex: 0x46300A, alpha: 0.22), shadowBlur: 12, shadowY: 5,
+        dot: Color(hex: 0xB18C33), dotRing: Color(hex: 0xC03428), bam: Color(hex: 0xB18C33),
+        num: Color(hex: 0xB18C33), sub: Color(hex: 0xC03428), wind: Color(hex: 0xB18C33),
+        dragonRed: Color(hex: 0xC03428), dragonGreen: Color(hex: 0xB18C33), dragonWhite: Color(hex: 0xB18C33),
+        usesSerif: true)
+}
+
+/// The set of themes a user can pick in Settings (plus the "Auto" state,
+/// represented by `nil` at the call site — see `AppState.tileTheme`).
+public enum TileThemeChoice: String, CaseIterable, Sendable {
+    case jade, ivory, classic, flat, glass, gilded
+
+    public var theme: TileTheme {
+        switch self {
+        case .jade:   return .jade
+        case .ivory:  return .ivory
+        case .classic: return .classic
+        case .flat:   return .flat
+        case .glass:  return .glass
+        case .gilded: return .gilded
+        }
+    }
+
+    public var displayName: String {
+        switch self {
+        case .jade:   return "Jade"
+        case .ivory:  return "Ivory"
+        case .classic: return "Classic"
+        case .flat:   return "Flat"
+        case .glass:  return "Glass"
+        case .gilded: return "Gilded Ivory"
+        }
+    }
+}
+
+private struct TileThemeKey: EnvironmentKey {
+    static let defaultValue: TileTheme = .jade
+}
+
+public extension EnvironmentValues {
+    /// The ambient tile theme. `MahjongTileView`/`TileRow` fall back to this
+    /// when constructed with `theme: nil`; an explicit theme always wins.
+    var tileTheme: TileTheme {
+        get { self[TileThemeKey.self] }
+        set { self[TileThemeKey.self] = newValue }
+    }
+}
+
+/// The face-down tile cap style. `MahjongTileBackView` reads the ambient
+/// value from `\.tileBackStyle` and renders the matching cap over the shared
+/// ivory body.
+public enum TileBackStyle: String, CaseIterable, Sendable {
+    case gold, velvet, jade
+
+    public var displayName: String {
+        switch self {
+        case .gold:   return "Gold"
+        case .velvet: return "Velvet Red"
+        case .jade:   return "Jade River"
+        }
+    }
+}
+
+private struct TileBackStyleKey: EnvironmentKey {
+    static let defaultValue: TileBackStyle = .gold
+}
+
+public extension EnvironmentValues {
+    /// The ambient tile back style. `MahjongTileBackView` renders whichever
+    /// cap this names; an explicit `seed` still varies the pattern within it.
+    var tileBackStyle: TileBackStyle {
+        get { self[TileBackStyleKey.self] }
+        set { self[TileBackStyleKey.self] = newValue }
+    }
 }

@@ -1,14 +1,16 @@
 import SwiftUI
 import DesignSystem
 
-/// Lane 5 · House Rules (spec screen 21). Preset tabs (Family / Club / Custom)
-/// over grouped, editable-looking faan rows. Values are static for now — a real
-/// per-row editor comes later — but every row reads as tappable.
+/// Table rules for new experimental Mahjong matches. A match reads one
+/// `GameRulesPrefs.snapshot` when it is created, so changing a control here
+/// never changes scoring during an active hand.
 struct HouseRulesView: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var preset: Preset = .family
-
-    enum Preset: Hashable { case family, club, custom }
+    @State private var minimumFaan = GameRulesPrefs.minimumFaan
+    @State private var faanLimit = GameRulesPrefs.faanLimit
+    @State private var scoreFlowers = GameRulesPrefs.scoreFlowers
+    @State private var paymentStyle = GameRulesPrefs.paymentStyle
+    @State private var gameSoundsEnabled = GameSounds.enabled
 
     var body: some View {
         ZStack {
@@ -17,17 +19,66 @@ struct HouseRulesView: View {
                 MJBackHeader(title: "House Rules") { dismiss() }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        SegmentedToggle(selection: $preset,
-                                        options: [(Preset.family, "Family"),
-                                                  (Preset.club, "Club"),
-                                                  (Preset.custom, "Custom")])
-                            .frame(maxWidth: .infinity)
-
-                        ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
-                            groupCard(group)
+                        ruleCard(title: "Winning") {
+                            rulePicker(
+                                title: "Minimum faan",
+                                detail: "Faan needed to declare a win.",
+                                selection: $minimumFaan,
+                                options: [(1, "1 faan"), (3, "3 faan")]
+                            )
+                            Divider().overlay(MJColor.gold(0.12))
+                            rulePicker(
+                                title: "Limit cap",
+                                detail: "Maximum payable faan.",
+                                selection: $faanLimit,
+                                options: [(10, "10 faan"), (13, "13 faan")]
+                            )
                         }
 
-                        Text("Presets set every value at once; tap a row to override it. House rules feed scoring, coaching, and the dictionary.")
+                        ruleCard(title: "Bonus") {
+                            Toggle(isOn: $scoreFlowers) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Flowers")
+                                        .font(MJFont.ui(14, weight: .medium))
+                                        .foregroundStyle(MJColor.creamHeading)
+                                    Text("Score seat flowers, seasons, and bouquets.")
+                                        .font(MJFont.ui(11))
+                                        .foregroundStyle(MJColor.cream(0.55))
+                                }
+                            }
+                            .tint(MJColor.gold)
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 52)
+                            .accessibilityHint("Controls flower and season scoring for new matches.")
+                        }
+
+                        ruleCard(title: "Payments") {
+                            rulePicker(
+                                title: "Payment style",
+                                detail: paymentStyle.detail,
+                                selection: $paymentStyle,
+                                options: GamePaymentStyle.allCases.map { ($0, $0.title) }
+                            )
+                        }
+
+                        ruleCard(title: "Experience") {
+                            Toggle(isOn: $gameSoundsEnabled) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Game sounds")
+                                        .font(MJFont.ui(14, weight: .medium))
+                                        .foregroundStyle(MJColor.creamHeading)
+                                    Text("Subtle tile, claim, and win sounds that follow Silent Mode.")
+                                        .font(MJFont.ui(11))
+                                        .foregroundStyle(MJColor.cream(0.55))
+                                }
+                            }
+                            .tint(MJColor.gold)
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 52)
+                            .accessibilityHint("Turns Mahjong game sounds on or off for new and current matches.")
+                        }
+
+                        Text("These settings apply when you start a new match. An active match keeps the rules it started with.")
                             .font(MJFont.ui(11))
                             .foregroundStyle(MJColor.cream(0.5))
                             .fixedSize(horizontal: false, vertical: true)
@@ -38,78 +89,48 @@ struct HouseRulesView: View {
                 }
             }
         }
+        .onChange(of: minimumFaan) { _, value in GameRulesPrefs.minimumFaan = value }
+        .onChange(of: faanLimit) { _, value in GameRulesPrefs.faanLimit = value }
+        .onChange(of: scoreFlowers) { _, value in GameRulesPrefs.scoreFlowers = value }
+        .onChange(of: paymentStyle) { _, value in GameRulesPrefs.paymentStyle = value }
+        .onChange(of: gameSoundsEnabled) { _, value in GameSounds.enabled = value }
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
     }
 
-    // MARK: Group card
-
-    private func groupCard(_ group: RuleGroup) -> some View {
+    private func ruleCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(group.title).eyebrowStyle()
-                .padding(.leading, 2)
-            VStack(spacing: 0) {
-                ForEach(Array(group.rows.enumerated()), id: \.offset) { i, rule in
-                    ruleRow(rule)
-                    if i < group.rows.count - 1 {
-                        Divider().overlay(MJColor.gold(0.12))
-                    }
-                }
-            }
-            .mjCard(padding: 4)
+            Text(title).eyebrowStyle().padding(.leading, 2)
+            VStack(spacing: 0, content: content).mjCard(padding: 4)
         }
     }
 
-    private func ruleRow(_ rule: Rule) -> some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 6) {
-                Text(rule.name)
+    private func rulePicker<Value: Hashable>(
+        title: String,
+        detail: String,
+        selection: Binding<Value>,
+        options: [(Value, String)]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
                     .font(MJFont.ui(14, weight: .medium))
                     .foregroundStyle(MJColor.creamHeading)
-                if let zh = rule.zh {
-                    Text(zh)
-                        .font(MJFont.serif(12, weight: .regular))
-                        .foregroundStyle(MJColor.gold(0.55))
+                Text(detail)
+                    .font(MJFont.ui(11))
+                    .foregroundStyle(MJColor.cream(0.55))
+            }
+            Picker(title, selection: selection) {
+                ForEach(options.indices, id: \.self) { index in
+                    let (value, label) = options[index]
+                    Text(label).tag(value)
                 }
             }
-            Spacer(minLength: 8)
-            Text(rule.value)
-                .font(MJFont.ui(13, weight: .semibold))
-                .foregroundStyle(MJColor.gold)
-            Image(systemName: "chevron.right")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(MJColor.cream(0.35))
+            .pickerStyle(.segmented)
+            .accessibilityLabel(title)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 13)
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-        .accessibilityHint(Text("Double-tap to edit"))
-    }
-
-    // MARK: Model
-
-    private struct Rule { let name: String; let zh: String?; let value: String }
-    private struct RuleGroup { let title: String; let rows: [Rule] }
-
-    private var groups: [RuleGroup] {
-        let limit = preset == .club ? "13 faan" : "10 faan"
-        let conversion = preset == .club ? "Full-spicy" : "Half-spicy"
-        return [
-            RuleGroup(title: "Winning", rows: [
-                Rule(name: "Minimum faan", zh: nil, value: "3"),
-                Rule(name: "Limit cap", zh: nil, value: limit),
-            ]),
-            RuleGroup(title: "Ambiguous hands", rows: [
-                Rule(name: "All Pungs", zh: "對對糊", value: "3 faan"),
-                Rule(name: "Half Flush", zh: "混一色", value: "3 faan"),
-                Rule(name: "Conversion", zh: nil, value: conversion),
-            ]),
-            RuleGroup(title: "Bonus & payments", rows: [
-                Rule(name: "Flowers", zh: nil, value: "On"),
-                Rule(name: "Self-draw", zh: nil, value: "All pay"),
-                Rule(name: "Dealer double", zh: nil, value: "On"),
-            ]),
-        ]
+        .padding(.vertical, 10)
+        .frame(minHeight: 72)
     }
 }

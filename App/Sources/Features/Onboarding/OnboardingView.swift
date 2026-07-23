@@ -44,7 +44,7 @@ struct OnboardingView: View {
         VStack(spacing: 0) {
             Spacer()
 
-            MahjongTileView(.redDragon, theme: .jade, width: 62, showsBadge: false)
+            MahjongTileView(.redDragon, width: 62, showsBadge: false)
                 .padding(.bottom, 26)
 
             Text("Mahjong Sensei")
@@ -238,7 +238,7 @@ private struct OptionRow: View {
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 14) {
-                MahjongTileView(tile, theme: .jade, width: 30, showsBadge: false)
+                MahjongTileView(tile, width: 30, showsBadge: false)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(name)
                         .font(MJFont.ui(15, weight: .semibold))

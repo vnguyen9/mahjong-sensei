@@ -24,6 +24,10 @@ public struct VisionRecognizer: Recognizer {
     private let model: VNCoreMLModel
     /// Detections below this score are dropped.
     public var confidenceThreshold: Double
+    /// Class-agnostic NMS gate applied after decoding (suppresses two labels
+    /// stacked on one physical tile). The default matches the long-standing
+    /// production behavior; the dev-only Model Lab exposes it as a live slider.
+    public var nmsIoUThreshold = 0.55
 
     /// Wrap an already-loaded `MLModel`.
     public init(
@@ -56,6 +60,7 @@ public struct VisionRecognizer: Recognizer {
     public func recognize(_ frame: RecognizerFrame) async throws -> RecognitionResult {
         let model = self.model
         let threshold = self.confidenceThreshold
+        let iouThreshold = self.nmsIoUThreshold
         let geometry = LetterboxGeometry(orientedImageSize: frame.orientedPixelSize)
         return try await withCheckedThrowingContinuation { continuation in
             // Vision's `perform` is synchronous/blocking — keep it off the caller
@@ -66,7 +71,8 @@ public struct VisionRecognizer: Recognizer {
                     request.imageCropAndScaleOption = .scaleFit   // letterbox, matches training
                     try frame.makeHandler().perform([request])
                     let tiles = VisionRecognizer.decodeTiles(from: request.results,
-                                                             threshold: threshold, geometry: geometry)
+                                                             threshold: threshold, geometry: geometry,
+                                                             iouThreshold: iouThreshold)
                     continuation.resume(returning: RecognitionResult(tiles: tiles))
                 } catch {
                     continuation.resume(throwing: error)
@@ -79,12 +85,14 @@ public struct VisionRecognizer: Recognizer {
 
     /// Pull the raw output tensor out of Vision's feature-value observation.
     static func decodeTiles(from results: [VNObservation]?, threshold: Double,
-                            geometry: LetterboxGeometry) -> [DetectedTile] {
+                            geometry: LetterboxGeometry,
+                            iouThreshold: Double = 0.55) -> [DetectedTile] {
         guard let array = results?
             .lazy
             .compactMap({ ($0 as? VNCoreMLFeatureValueObservation)?.featureValue.multiArrayValue })
             .first else { return [] }
-        return decodeTiles(from: array, threshold: threshold, geometry: geometry)
+        return decodeTiles(from: array, threshold: threshold, geometry: geometry,
+                           iouThreshold: iouThreshold)
     }
 
     /// Decode the end-to-end (NMS-free) YOLO26 output. Each of the N rows is
@@ -92,7 +100,8 @@ public struct VisionRecognizer: Recognizer {
     /// space; `geometry` inverts the letterbox to normalized oriented-image coords.
     /// Overlapping duplicates (two labels on one physical tile) are then suppressed.
     static func decodeTiles(from array: MLMultiArray, threshold: Double,
-                            geometry: LetterboxGeometry) -> [DetectedTile] {
+                            geometry: LetterboxGeometry,
+                            iouThreshold: Double = 0.55) -> [DetectedTile] {
         guard array.shape.count == 3, array.shape[2].intValue >= 6 else { return [] }
         let rows = array.shape[1].intValue
         let rowStride = array.strides[1].intValue
@@ -114,7 +123,7 @@ public struct VisionRecognizer: Recognizer {
                 raw.append(DetectedTile(tile: tile, confidence: confidence, box: box))
             }
         }
-        return suppressingOverlaps(raw)
+        return suppressingOverlaps(raw, iouThreshold: iouThreshold)
     }
 
     // MARK: - Overlap suppression (class-agnostic)
@@ -239,6 +248,17 @@ public struct RawTileDetection: Sendable, Hashable {
 /// wrapped recognizer doesn't implement it — e.g. ``MockRecognizer`` in tests.
 public protocol RawBoxDetecting: Sendable {
     func detectRawBoxes(_ frame: RecognizerFrame) async throws -> [RawTileDetection]
+    func detectRawBoxes(_ frame: RecognizerFrame,
+                        minimumConfidence: Double) async throws -> [RawTileDetection]
+}
+
+public extension RawBoxDetecting {
+    /// Compatibility implementation for test doubles and recognizers that
+    /// cannot expose a different decode floor without another inference.
+    func detectRawBoxes(_ frame: RecognizerFrame,
+                        minimumConfidence: Double) async throws -> [RawTileDetection] {
+        try await detectRawBoxes(frame).filter { $0.confidence >= minimumConfidence }
+    }
 }
 
 extension VisionRecognizer: RawBoxDetecting {
@@ -247,8 +267,17 @@ extension VisionRecognizer: RawBoxDetecting {
     /// itself is untouched — this is a fully additive decode path sharing the
     /// same model, threshold, and letterbox geometry.
     public func detectRawBoxes(_ frame: RecognizerFrame) async throws -> [RawTileDetection] {
+        try await detectRawBoxes(frame, minimumConfidence: confidenceThreshold)
+    }
+
+    /// Runs the model once and decodes at a caller-selected floor. Tracker's
+    /// crop classifier uses this to retain weak top candidates for diagnostics;
+    /// the locator continues using its independently calibrated threshold.
+    public func detectRawBoxes(_ frame: RecognizerFrame,
+                               minimumConfidence: Double) async throws -> [RawTileDetection] {
         let model = self.model
-        let threshold = self.confidenceThreshold
+        let threshold = max(0, minimumConfidence)
+        let iouThreshold = self.nmsIoUThreshold
         let geometry = LetterboxGeometry(orientedImageSize: frame.orientedPixelSize)
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -257,7 +286,8 @@ extension VisionRecognizer: RawBoxDetecting {
                     request.imageCropAndScaleOption = .scaleFit
                     try frame.makeHandler().perform([request])
                     let raw = VisionRecognizer.decodeRawBoxes(from: request.results,
-                                                               threshold: threshold, geometry: geometry)
+                                                               threshold: threshold, geometry: geometry,
+                                                               iouThreshold: iouThreshold)
                     continuation.resume(returning: raw)
                 } catch {
                     continuation.resume(throwing: error)
@@ -270,16 +300,19 @@ extension VisionRecognizer: RawBoxDetecting {
     /// regardless of whether its label maps to a ``Tile`` (mirrors
     /// ``decodeTiles(from:threshold:geometry:)`` but keeps `back`).
     static func decodeRawBoxes(from results: [VNObservation]?, threshold: Double,
-                               geometry: LetterboxGeometry) -> [RawTileDetection] {
+                               geometry: LetterboxGeometry,
+                               iouThreshold: Double = 0.55) -> [RawTileDetection] {
         guard let array = results?
             .lazy
             .compactMap({ ($0 as? VNCoreMLFeatureValueObservation)?.featureValue.multiArrayValue })
             .first else { return [] }
-        return decodeRawBoxes(from: array, threshold: threshold, geometry: geometry)
+        return decodeRawBoxes(from: array, threshold: threshold, geometry: geometry,
+                              iouThreshold: iouThreshold)
     }
 
     static func decodeRawBoxes(from array: MLMultiArray, threshold: Double,
-                               geometry: LetterboxGeometry) -> [RawTileDetection] {
+                               geometry: LetterboxGeometry,
+                               iouThreshold: Double = 0.55) -> [RawTileDetection] {
         guard array.shape.count == 3, array.shape[2].intValue >= 6 else { return [] }
         let rows = array.shape[1].intValue
         let rowStride = array.strides[1].intValue
@@ -300,7 +333,7 @@ extension VisionRecognizer: RawBoxDetecting {
                 raw.append(RawTileDetection(label: label, confidence: confidence, box: box))
             }
         }
-        return suppressingRawOverlaps(raw)
+        return suppressingRawOverlaps(raw, iouThreshold: iouThreshold)
     }
 
     /// Same class-agnostic greedy NMS as ``suppressingOverlaps(_:iouThreshold:)``,

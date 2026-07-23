@@ -12,20 +12,22 @@
 /// and, like today's Scan-Score path, cannot see `back`.
 public struct PrototypeLocator: TileLocating {
     public var recognizer: Recognizer
+    public var minimumConfidence: Float
 
-    public init(recognizer: Recognizer) {
+    public init(recognizer: Recognizer, minimumConfidence: Float = 0.50) {
         self.recognizer = recognizer
+        self.minimumConfidence = minimumConfidence
     }
 
     public func locate(in region: LocatorInput) async throws -> [TileLocalization] {
         if let rawDetector = recognizer as? RawBoxDetecting {
             let raw = try await rawDetector.detectRawBoxes(region.frame)
-            return raw.map {
+            return raw.filter { Float($0.confidence) >= minimumConfidence }.map {
                 TileLocalization(box: $0.box, confidence: Float($0.confidence), poseHint: .unknown)
             }
         }
         let result = try await recognizer.recognize(region.frame)
-        return result.tiles.map {
+        return result.tiles.filter { Float($0.confidence) >= minimumConfidence }.map {
             TileLocalization(box: $0.box, confidence: Float($0.confidence), poseHint: .unknown)
         }
     }

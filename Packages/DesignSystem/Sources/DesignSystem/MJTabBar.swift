@@ -69,16 +69,21 @@ public struct MJTabBar: View {
 /// A horizontal row of tiles (hand tray / meld strip helper).
 public struct TileRow: View {
     private let tiles: [Tile]
-    private let theme: TileTheme
+    /// Explicit theme pins the render; `nil` follows the ambient `\.tileTheme`
+    /// environment value (matches `MahjongTileView`).
+    private let explicitTheme: TileTheme?
     private let width: CGFloat
     private let spacing: CGFloat
     private let showsBadges: Bool
+    @Environment(\.tileTheme) private var envTheme
 
-    public init(_ tiles: [Tile], theme: TileTheme = .jade, width: CGFloat = 24,
+    public init(_ tiles: [Tile], theme: TileTheme? = nil, width: CGFloat = 24,
                 spacing: CGFloat = 3, showsBadges: Bool = true) {
-        self.tiles = tiles; self.theme = theme; self.width = width
+        self.tiles = tiles; self.explicitTheme = theme; self.width = width
         self.spacing = spacing; self.showsBadges = showsBadges
     }
+
+    private var theme: TileTheme { explicitTheme ?? envTheme }
 
     public var body: some View {
         HStack(spacing: spacing) {
