@@ -64,6 +64,62 @@ final class MahjongLearningGameTests: XCTestCase {
         XCTAssertEqual(state.serializeReplay(), replayBefore)
     }
 
+    func testAttentionStateTracksPhysicalDiscardAndClaimInstances() {
+        let firstDiscard = GameEventV2(kind: .discard, seat: 1, tile: .s(5), instanceID: 47)
+        let acceptedPung = GameEventV2(kind: .pung, seat: 3, tile: .s(5), instanceID: 47)
+        let claimantDiscard = GameEventV2(kind: .discard, seat: 3, tile: .redDragon, instanceID: 91)
+
+        var attention = GameTableAttentionState.reconstructing(events: [firstDiscard, acceptedPung])
+        XCTAssertEqual(attention.lastDiscardInstanceID, 47)
+        XCTAssertEqual(attention.lastClaimedInstanceID, 47)
+
+        attention.consume([claimantDiscard])
+        XCTAssertEqual(attention.lastDiscardInstanceID, 91)
+        XCTAssertNil(attention.lastClaimedInstanceID)
+    }
+
+    @MainActor
+    func testResumeReconstructsAttentionWithoutChangingReplay() throws {
+        var state = try MatchState(configuration: MatchConfiguration(seed: 8_282, humanSeat: 0))
+        let actor = try XCTUnwrap(state.currentActor)
+        let discard = try XCTUnwrap(state.legalActions(for: actor).first(where: { $0.kind == .discard }))
+        try state.apply(actionID: discard.id)
+        let replay = state.serializeReplay()
+
+        let session = try GameSession(
+            replay: replay,
+            persistence: MahjongMatchStore(archiveURL: temporaryArchiveURL())
+        )
+
+        XCTAssertEqual(session.attention, GameTableAttentionState.reconstructing(events: session.state.events))
+        XCTAssertEqual(session.match.serializeReplay(), replay)
+        XCTAssertEqual(
+            session.attention.lastDiscardInstanceID,
+            session.state.events.last(where: { $0.kind == .discard })?.instanceID
+        )
+    }
+
+    @MainActor
+    func testStructuralClarityPreferencesDoNotMutateReplay() {
+        let oldHighlight = GameLearningPreferences.highlightNewestDiscard
+        let oldHints = GameLearningPreferences.coachHintsEnabled
+        defer {
+            GameLearningPreferences.highlightNewestDiscard = oldHighlight
+            GameLearningPreferences.coachHintsEnabled = oldHints
+        }
+        let session = GameSession(
+            seed: 8_383,
+            humanSeat: 0,
+            persistence: MahjongMatchStore(archiveURL: temporaryArchiveURL())
+        )
+        let replay = session.match.serializeReplay()
+
+        session.highlightNewestDiscard.toggle()
+        session.coachHintsEnabled.toggle()
+
+        XCTAssertEqual(session.match.serializeReplay(), replay)
+    }
+
     func testLearningContextNeverAttributesUnseenTilesToAHiddenLocation() throws {
         let state = try MatchState(configuration: MatchConfiguration(seed: 202_607_22, humanSeat: 0))
         let observation = state.observation(for: 0)

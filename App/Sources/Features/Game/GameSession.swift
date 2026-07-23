@@ -3,6 +3,7 @@ import Observation
 import UIKit
 import SwiftUI
 import MahjongCore
+import MahjongData
 import MahjongGameEngine
 
 /// Main-actor bridge from the deterministic match state machine to SwiftUI.
@@ -57,6 +58,12 @@ final class GameSession {
             if !isPaused { beginReactionCountdown(reset: true) }
         }
     }
+    var highlightNewestDiscard: Bool {
+        didSet { GameLearningPreferences.highlightNewestDiscard = highlightNewestDiscard }
+    }
+    var coachHintsEnabled: Bool {
+        didSet { GameLearningPreferences.coachHintsEnabled = coachHintsEnabled }
+    }
     var errorMessage: String?
     var latestBotDiagnostic: String?
     var revealOpponents = false
@@ -72,6 +79,7 @@ final class GameSession {
     private(set) var isSuggesting = false
     private(set) var isAwaitingProceed = false
     private(set) var stepMessage: String?
+    private(set) var attention = GameTableAttentionState()
     private var debugAutoplay = false
     private var pendingTerminalPresentation = false
     private var activeReactionSignature: String?
@@ -79,6 +87,7 @@ final class GameSession {
     private var botTaskGeneration: UInt64 = 0
     private var reactionTaskGeneration: UInt64 = 0
     private var undoCheckpoint: MatchReplayV1?
+    private var lastAnnouncedActor: Int?
 
     @ObservationIgnored private var botTask: Task<Void, Never>?
     @ObservationIgnored private var reactionTask: Task<Void, Never>?
@@ -86,6 +95,7 @@ final class GameSession {
     @ObservationIgnored private var motionTask: Task<Void, Never>?
     @ObservationIgnored private var persistenceTail: Task<Void, Never>?
     @ObservationIgnored private var suggestionTask: Task<Void, Never>?
+    @ObservationIgnored private var announcementTask: Task<Void, Never>?
 
     init(
         seed: UInt64 = UInt64.random(in: 1...UInt64.max),
@@ -100,6 +110,8 @@ final class GameSession {
         tileInsightsEnabled = GameLearningPreferences.tileInsightsEnabled
         stepThroughEnabled = GameLearningPreferences.stepThroughEnabled
         claimTimerSetting = GameLearningPreferences.claimTimer
+        highlightNewestDiscard = GameLearningPreferences.highlightNewestDiscard
+        coachHintsEnabled = GameLearningPreferences.coachHintsEnabled
 
         let prefs = GameRulesPrefs.snapshot
         let selectedRules = MatchRulesConfiguration(
@@ -136,8 +148,11 @@ final class GameSession {
         tileInsightsEnabled = GameLearningPreferences.tileInsightsEnabled
         stepThroughEnabled = GameLearningPreferences.stepThroughEnabled
         claimTimerSetting = GameLearningPreferences.claimTimer
+        highlightNewestDiscard = GameLearningPreferences.highlightNewestDiscard
+        coachHintsEnabled = GameLearningPreferences.coachHintsEnabled
         presentationPhase = .playing
         configureOpeningLayout()
+        rebuildAttentionFromEvents()
 
         if rebuilt.currentHand.isTerminal {
             revealOpponents = true
@@ -154,6 +169,7 @@ final class GameSession {
         presentationTask?.cancel()
         motionTask?.cancel()
         suggestionTask?.cancel()
+        announcementTask?.cancel()
     }
 
     var state: GameState { match.currentHand }
@@ -201,6 +217,67 @@ final class GameSession {
         }
         return player.concealed.filter { $0.id != drawn.id }.sorted { $0.tile < $1.tile } + [drawn]
     }
+    var displayedActor: Int? {
+        if state.phase == .reaction { return isReaction ? humanSeat : nil }
+        return state.phase == .selfAction ? match.currentActor : nil
+    }
+    var shouldUseInlineReaction: Bool {
+        guard isReaction, let offer = state.offer, !offer.isRobKong else { return false }
+        let nonPass = legalActions.filter { $0.kind != .pass }
+        let chowCount = nonPass.filter { $0.kind == .chow }.count
+        return chowCount <= 1 && nonPass.count <= 2
+    }
+    var tableStatusText: String {
+        if state.isTerminal {
+            return state.terminal?.winner == nil ? "The wall is exhausted." : "The hand is complete."
+        }
+        if attention.isWaitingForReactionResolution, state.phase == .reaction {
+            return "Waiting for opponents to resolve the claim…"
+        }
+        if state.phase == .reaction, let offer = state.offer {
+            let source = tablePlayerName(offer.fromSeat)
+            let tile = MahjongData.name(for: offer.tile).english
+            return isReaction
+                ? "\(source) discarded \(tile) · claim it or pass."
+                : "\(source) discarded \(tile) · checking claims…"
+        }
+        guard state.phase == .selfAction, let actor = match.currentActor else {
+            return "Preparing the table…"
+        }
+        if actor == humanSeat {
+            if state.lastDrawInstance != nil {
+                switch state.lastDrawKind {
+                case .flowerReplacement, .kongReplacement:
+                    return "Replacement drawn from the rear wall · choose a tile to discard."
+                case .ordinary, nil:
+                    return "Drew from the wall · choose a tile to discard."
+                }
+            }
+            if let claim = latestClaimEvent(for: humanSeat) {
+                return "\(claimVerb(claim.kind)) \(claimSourceText(claim)) · discard without drawing."
+            }
+            return "Your turn · choose a tile to discard."
+        }
+
+        let name = tablePlayerName(actor)
+        if state.lastDrawInstance != nil {
+            return state.lastDrawKind == .ordinary
+                ? "\(name) drew from the wall · choosing a discard."
+                : "\(name) drew a replacement · choosing a discard."
+        }
+        if let claim = latestClaimEvent(for: actor) {
+            return "\(name) \(claimVerb(claim.kind).lowercased()) \(claimSourceText(claim)) · choosing a discard."
+        }
+        return "Waiting for \(name)…"
+    }
+    var coachHintText: String? {
+        guard coachHintsEnabled else { return nil }
+        if isReaction { return "A claim uses this public discard; Pass lets play continue from the wall." }
+        if state.phase == .reaction { return "The gold ring keeps the newest discard visible while claims resolve." }
+        if isHumanTurn, state.lastDrawInstance != nil { return "Blue marks the private tile you just drew from the wall." }
+        if isHumanTurn, latestClaimEvent(for: humanSeat) != nil { return "After Chow or Pung, discard immediately without drawing." }
+        return "Gold marks the active player and the newest public action."
+    }
     var totals: [Int] { match.totals }
     var seatStats: [MatchSeatStats] { match.seatStats }
     var standings: [Int] { match.summary.standings }
@@ -232,6 +309,7 @@ final class GameSession {
             isMatchEndPresented = false
             revealOpponents = false
             pendingTerminalPresentation = false
+            resetAttention()
             configureOpeningLayout()
             enqueuePersistence()
             beginOpeningPresentation(full: true)
@@ -254,6 +332,7 @@ final class GameSession {
             isResultPresented = false
             revealOpponents = false
             pendingTerminalPresentation = false
+            resetAttention()
             configureOpeningLayout()
             enqueuePersistence()
             beginOpeningPresentation(full: false)
@@ -287,6 +366,7 @@ final class GameSession {
 
     func apply(_ action: GameAction) {
         guard !isPaused, match.currentActor == humanSeat else { return }
+        let submittedReaction = state.phase == .reaction
         cancelReactionTask()
         suggestionTask?.cancel()
         suggestionTask = nil
@@ -305,7 +385,11 @@ final class GameSession {
             } else if action.kind == .discard {
                 GameSounds.tileMove()
             }
-            acceptedMutation(previousEventCount: previousEventCount, offerBeforeAction: offerBeforeAction)
+            acceptedMutation(
+                previousEventCount: previousEventCount,
+                offerBeforeAction: offerBeforeAction,
+                humanSubmittedReaction: submittedReaction
+            )
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -363,6 +447,7 @@ final class GameSession {
             revealOpponents = false
             presentationPhase = .playing
             configureOpeningLayout()
+            rebuildAttentionFromEvents()
             enqueuePersistence()
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             startIfNeeded()
@@ -447,6 +532,7 @@ final class GameSession {
         presentationTask = nil
         openingDealCounts = state.players.map { $0.concealed.count }
         presentationPhase = .playing
+        announceCurrentTurnIfNeeded(force: true)
         startIfNeeded()
     }
 
@@ -504,6 +590,28 @@ final class GameSession {
             var guardCount = 0
             while !Task.isCancelled && guardCount < 30_000 {
                 guardCount += 1
+                if destination == .humanTurn,
+                   self.state.phase == .selfAction,
+                   self.match.currentActor == self.humanSeat,
+                   self.state.lastDrawKind == .ordinary {
+                    self.rebuildAttentionFromEvents()
+                    return
+                }
+                if destination == .opponentTurn,
+                   self.state.phase == .selfAction,
+                   self.match.currentActor != self.humanSeat {
+                    self.rebuildAttentionFromEvents()
+                    return
+                }
+                if destination == .postClaimDiscard,
+                   self.state.phase == .selfAction,
+                   self.match.currentActor == self.humanSeat,
+                   self.state.lastDrawInstance == nil,
+                   self.state.events.last(where: { $0.seat == self.humanSeat })
+                    .map({ [.chow, .pung].contains($0.kind) }) == true {
+                    self.rebuildAttentionFromEvents()
+                    return
+                }
                 if self.state.isTerminal {
                     if destination == .matchEnd {
                         if self.match.isMatchComplete {
@@ -533,8 +641,13 @@ final class GameSession {
                 let offerBeforeAction = self.state.offer
                 do {
                     try self.match.apply(actionID: action.id)
+                    self.rebuildAttentionFromEvents()
                 } catch {
                     self.errorMessage = error.localizedDescription
+                    return
+                }
+                if destination == .newestDiscard,
+                   self.state.events.dropFirst(previousEventCount).contains(where: { $0.kind == .discard }) {
                     return
                 }
                 if destination == .replacementDraw,
@@ -562,10 +675,22 @@ final class GameSession {
         legalActions.first { $0.kind == .discard && $0.tile == tile.tile }
     }
 
-    private func acceptedMutation(previousEventCount: Int, offerBeforeAction: PendingOffer?) {
+    private func acceptedMutation(
+        previousEventCount: Int,
+        offerBeforeAction: PendingOffer?,
+        humanSubmittedReaction: Bool = false
+    ) {
         activeReactionSignature = nil
         reactionSecondsRemaining = 0
         let acceptedEvents = Array(state.events.dropFirst(previousEventCount))
+        attention.consume(acceptedEvents)
+        if humanSubmittedReaction, state.phase == .reaction {
+            attention.isWaitingForReactionResolution = true
+        } else if state.phase != .reaction {
+            attention.isWaitingForReactionResolution = false
+        }
+
+        announceAttentionChange(events: acceptedEvents, offerBeforeAction: offerBeforeAction)
         if stepThroughEnabled, !state.isTerminal,
            let teachingEvent = acceptedEvents.last(where: { $0.kind != .pass && $0.kind != .deal }) {
             isAwaitingProceed = true
@@ -578,6 +703,9 @@ final class GameSession {
         )
 
         if state.isTerminal {
+            attention.lastDiscardInstanceID = nil
+            attention.lastClaimedInstanceID = nil
+            attention.isWaitingForReactionResolution = false
             revealOpponents = true
             pendingTerminalPresentation = true
             if state.terminal?.winner != nil { GameSounds.win() }
@@ -790,6 +918,7 @@ final class GameSession {
             guard await self.openingPause(milliseconds: Int(650 * stageScale)) else { return }
             self.presentationPhase = .playing
             self.presentationTask = nil
+            self.announceCurrentTurnIfNeeded(force: true)
             self.startIfNeeded()
         }
     }
@@ -830,15 +959,155 @@ final class GameSession {
             return
         }
         activeMotion = motionQueue.removeFirst()
+        let duration = activeMotion?.durationMilliseconds ?? 300
         motionTask?.cancel()
         motionTask = Task { [weak self] in
             guard let self else { return }
-            try? await Task.sleep(for: .milliseconds(300))
+            try? await Task.sleep(for: .milliseconds(duration))
             guard !Task.isCancelled else { return }
             self.activeMotion = nil
             self.motionTask = nil
             self.playNextMotionIfNeeded()
         }
+    }
+
+    private func announceAttentionChange(events: [GameEventV2], offerBeforeAction: PendingOffer?) {
+        for event in events where event.kind == .discard && event.seat != humanSeat {
+            let name = tablePlayerName(event.seat)
+            let tile = event.tile.map { MahjongData.name(for: $0).english } ?? "a tile"
+            UIAccessibility.post(notification: .announcement, argument: "\(name) discarded \(tile)")
+        }
+
+        if let claim = events.last(where: { [.chow, .pung, .kong].contains($0.kind) }) {
+            let claimant = tablePlayerName(claim.seat)
+            let sourceSeat = offerBeforeAction?.fromSeat
+            let source = sourceSeat.map(possessivePlayerName) ?? "the previous player’s"
+            let tile = claim.tile.map { MahjongData.name(for: $0).english } ?? "tile"
+            let label = claimLabel(claim.kind).uppercased()
+            let subtitle: String
+            if claim.kind == .kong {
+                subtitle = "\(claimant) claimed \(source) \(tile) · replacement from rear wall"
+            } else {
+                subtitle = "\(claimant) claimed \(source) \(tile) · discard without drawing"
+            }
+            presentAnnouncement(title: label, subtitle: subtitle, style: .claim)
+            return
+        }
+
+        if isReaction, let offer = state.offer {
+            let tile = MahjongData.name(for: offer.tile).english
+            UIAccessibility.post(
+                notification: .announcement,
+                argument: "Claim available for \(tile). Choose a legal claim or Pass."
+            )
+            return
+        }
+
+        announceCurrentTurnIfNeeded(force: false)
+    }
+
+    private func announceCurrentTurnIfNeeded(force: Bool) {
+        guard state.phase == .selfAction, let actor = match.currentActor else { return }
+        guard force || actor != lastAnnouncedActor else { return }
+        lastAnnouncedActor = actor
+
+        if actor == humanSeat {
+            let subtitle: String
+            if state.lastDrawKind == .ordinary {
+                subtitle = "Drawn from wall — choose a discard"
+            } else if state.lastDrawInstance != nil {
+                subtitle = "Replacement drawn — choose a discard"
+            } else {
+                subtitle = "Choose a tile to discard"
+            }
+            presentAnnouncement(title: "YOUR TURN", subtitle: subtitle, style: .turn)
+            UIAccessibility.post(notification: .announcement, argument: "Your turn. \(subtitle)")
+        } else {
+            let player = state.players[actor]
+            let action: String
+            if state.lastDrawInstance != nil {
+                action = state.lastDrawKind == .ordinary
+                    ? "drew from wall · choosing a discard"
+                    : "drew replacement from rear wall · choosing a discard"
+            } else if let claim = latestClaimEvent(for: actor) {
+                action = "\(claimLabel(claim.kind)) claimed · choosing a discard"
+            } else {
+                action = "choosing a discard"
+            }
+            presentAnnouncement(
+                title: tablePlayerName(actor).uppercased(),
+                subtitle: "\(windNameForLearning(player.seatWind).capitalized) · \(action)",
+                style: .turn
+            )
+        }
+    }
+
+    private func presentAnnouncement(title: String, subtitle: String, style: GameTableAnnouncementStyle) {
+        announcementTask?.cancel()
+        let announcement = GameTableAnnouncement(title: title, subtitle: subtitle, style: style)
+        attention.announcement = announcement
+        announcementTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(1_300))
+            guard !Task.isCancelled, self?.attention.announcement?.id == announcement.id else { return }
+            self?.attention.announcement = nil
+            self?.announcementTask = nil
+        }
+    }
+
+    private func rebuildAttentionFromEvents() {
+        announcementTask?.cancel()
+        announcementTask = nil
+        attention = GameTableAttentionState.reconstructing(events: state.events)
+        lastAnnouncedActor = state.phase == .selfAction ? match.currentActor : nil
+    }
+
+    private func resetAttention() {
+        announcementTask?.cancel()
+        announcementTask = nil
+        attention = GameTableAttentionState()
+        lastAnnouncedActor = nil
+    }
+
+    private func latestClaimEvent(for seat: Int) -> GameEventV2? {
+        state.events.last { event in
+            event.seat == seat && [.chow, .pung, .kong].contains(event.kind)
+        }
+    }
+
+    private func claimSourceText(_ event: GameEventV2) -> String {
+        let meld = state.players[event.seat].melds.last { meld in
+            guard let instanceID = event.instanceID else { return false }
+            return meld.tiles.contains { $0.id == instanceID }
+        }
+        let source = meld?.fromSeat.map(possessivePlayerName) ?? "another player’s"
+        let tile = event.tile.map { MahjongData.name(for: $0).english } ?? "tile"
+        return "\(source) \(tile)"
+    }
+
+    private func claimVerb(_ kind: GameEventKind) -> String {
+        switch kind {
+        case .chow: "Chowed"
+        case .pung: "Punged"
+        case .kong: "Konged"
+        default: "Claimed"
+        }
+    }
+
+    private func claimLabel(_ kind: GameEventKind) -> String {
+        switch kind {
+        case .chow: "Chow"
+        case .pung: "Pung"
+        case .kong: "Kong"
+        default: "Claim"
+        }
+    }
+
+    private func tablePlayerName(_ seat: Int) -> String {
+        seat == humanSeat ? "You" : "Bot \((seat - humanSeat + 4) % 4)"
+    }
+
+    private func possessivePlayerName(_ seat: Int) -> String {
+        seat == humanSeat ? "your" : "\(tablePlayerName(seat))’s"
     }
 
     private func enqueuePersistence() {
@@ -866,6 +1135,7 @@ final class GameSession {
             selectedTileID = nil
             isResultPresented = false
             revealOpponents = false
+            resetAttention()
         } catch {
             errorMessage = error.localizedDescription
         }

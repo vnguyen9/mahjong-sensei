@@ -1,6 +1,7 @@
 import SwiftUI
 import DesignSystem
 import MahjongCore
+import MahjongData
 import MahjongGameEngine
 
 /// The table deliberately renders from the public game state.  It never moves a
@@ -16,6 +17,7 @@ struct GameView: View {
     @State private var chowSheet = false
     @State private var forceInspector = false
     @State private var humanRiverFrame = CGRect.zero
+    @State private var motionAnchors: [GameMotionAnchor: CGRect] = [:]
     @State private var isDraggingOverRiver = false
     @State private var showCoachMark = !GameLearningPreferences.hasShownTileCoachMark
     private let debugDestination: GameDebugDestination?
@@ -52,7 +54,21 @@ struct GameView: View {
                         isDraggingOverRiver: $isDraggingOverRiver,
                         inspect: inspect
                     )
+                    .reportsGameMotionAnchor(.rack(session.humanSeat))
                     .allowsHitTesting(!session.isPresentationBlocking)
+                    if session.isReaction, session.shouldUseInlineReaction, let offer = session.state.offer {
+                        InlineClaimBar(
+                            offer: offer,
+                            sourceName: gamePlayerName(seat: offer.fromSeat, humanSeat: session.humanSeat),
+                            actions: session.legalActions,
+                            label: session.label(for:),
+                            seconds: session.reactionTimerSeconds,
+                            compact: layout.isPhone,
+                            onAction: session.apply,
+                            onPass: session.pass,
+                            inspect: { inspect(offer.tile, .offered(ownerSeat: offer.fromSeat, isRobKong: false)) }
+                        )
+                    }
                     actionDock(compact: layout.isPhone)
                         .allowsHitTesting(!session.isPresentationBlocking)
                 }
@@ -60,13 +76,25 @@ struct GameView: View {
                 .padding(.vertical, layout.verticalPadding)
             }
 
-            if session.isReaction { reactionOverlay }
-            if let motion = session.activeMotion { TableMotionCue(motion: motion, humanSeat: session.humanSeat, reduceMotion: reduceMotion) }
+            if session.isReaction && !session.shouldUseInlineReaction { reactionOverlay }
+            if let motion = session.activeMotion {
+                TableMotionCue(
+                    motion: motion,
+                    humanSeat: session.humanSeat,
+                    anchors: motionAnchors,
+                    reduceMotion: reduceMotion
+                )
+            }
+            if let announcement = session.attention.announcement {
+                GameTableAnnouncementView(announcement: announcement, reduceMotion: reduceMotion)
+                    .transition(reduceMotion ? .opacity : .scale(scale: 0.94).combined(with: .opacity))
+            }
             if session.presentationPhase.openingStage != nil { openingPresentation }
             if showCoachMark && session.tileInsightsEnabled && !voiceOverEnabled && session.presentationPhase == .playing && !session.isReaction { insightCoachMark }
         }
         .coordinateSpace(name: "mahjong-game-root")
         .onPreferenceChange(HumanRiverFramePreference.self) { humanRiverFrame = $0 }
+        .onPreferenceChange(GameMotionAnchorPreference.self) { motionAnchors = $0 }
         .navigationTitle("Practice table")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
@@ -92,7 +120,9 @@ struct GameView: View {
             GameTableOptionsView(
                 tileInsightsEnabled: $session.tileInsightsEnabled,
                 stepThroughEnabled: $session.stepThroughEnabled,
-                claimTimer: $session.claimTimerSetting
+                claimTimer: $session.claimTimerSetting,
+                highlightNewestDiscard: $session.highlightNewestDiscard,
+                coachHintsEnabled: $session.coachHintsEnabled
             )
         }
         .sheet(item: $session.selectedInsight, onDismiss: { session.closeTileInsight() }) { context in
@@ -142,43 +172,58 @@ struct GameView: View {
     }
 
     private func gameHeader(compact: Bool) -> some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: compact ? 4 : 6) {
+            HStack(spacing: 10) {
                 Text("\(windName(session.match.prevailingWind)) ROUND · HAND \(session.handNumber) · 連\(session.match.dealerRepeatCount)")
                     .font(compact ? .caption2.weight(.bold) : MJFont.eyebrow)
                     .tracking(compact ? 0.7 : 1.1).foregroundStyle(MJColor.gold(0.86))
-                Text(session.isBotThinking ? "Opponents are thinking…" : eventText)
-                    .font(.caption).foregroundStyle(MJColor.cream(0.72)).lineLimit(1)
+                Spacer()
+                HStack(spacing: 7) {
+                    Text("WALL").font(.caption2.weight(.bold)).tracking(0.8).foregroundStyle(MJColor.gold(0.82))
+                    Text("\(session.state.wallRemaining)")
+                        .font(compact ? .title3.weight(.bold) : .title2.weight(.bold))
+                        .foregroundStyle(MJColor.creamHeading)
+                }
             }
-            Spacer()
-            HStack(spacing: 7) {
-                Text("WALL").font(.caption2.weight(.bold)).tracking(0.8).foregroundStyle(MJColor.gold(0.82))
-                Text("\(session.state.wallRemaining)")
-                    .font(compact ? .title3.weight(.bold) : .title2.weight(.bold))
+
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Circle()
+                    .fill(session.isHumanTurn && session.state.lastDrawInstance != nil ? GameCueColor.wallDraw : MJColor.gold)
+                    .frame(width: 7, height: 7)
+                Text(session.tableStatusText)
+                    .font(.footnote.weight(.semibold))
                     .foregroundStyle(MJColor.creamHeading)
+                    .lineLimit(compact ? 2 : 1)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let hint = session.coachHintText {
+                HStack(spacing: 7) {
+                    Image(systemName: "lightbulb.max.fill")
+                        .foregroundStyle(MJColor.gold)
+                    Text(hint)
+                        .font(.caption)
+                        .foregroundStyle(MJColor.cream(0.68))
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                    Button {
+                        session.coachHintsEnabled = false
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.weight(.bold))
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(MJColor.cream(0.62))
+                    .accessibilityLabel("Hide coach hints")
+                }
             }
         }
         .padding(.horizontal, compact ? 10 : 13).padding(.vertical, compact ? 6 : 7)
         .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(MJColor.gold(0.16)) }
         .accessibilityElement(children: .combine)
-    }
-
-    private var eventText: String {
-        guard let event = session.state.events.last else { return "Your hand is ready" }
-        let seat = windName(session.state.players[event.seat].seatWind).capitalized
-        switch event.kind {
-        case .deal: return "Tiles dealt"
-        case .draw: return event.drawKind == .flowerReplacement ? "\(seat) draws a flower replacement" : "\(seat) draws"
-        case .flower: return "\(seat) reveals a flower"
-        case .discard: return event.tile.map { "\(seat) discards \($0.code)" } ?? "\(seat) discards"
-        case .chow: return "\(seat) calls Chow"
-        case .pung: return "\(seat) calls Pung"
-        case .kong, .addedKong, .concealedKong: return "\(seat) declares Kong"
-        case .pass: return "\(seat) passes"
-        case .win: return "\(seat) wins"
-        case .exhaustive: return "The wall is exhausted"
-        }
     }
 
     private func actionDock(compact: Bool) -> some View {
@@ -202,10 +247,11 @@ struct GameView: View {
         if let suggestion = session.latestSuggestion {
             return "Suggested: \(tileVoiceOverName(suggestion.tile).capitalized) · \(suggestion.shanten) shanten · \(suggestion.outs) live outs"
         }
-        if session.isHumanTurn && !session.isReaction {
-            return session.selectedTileID == nil ? "Choose a tile to discard" : "Selected tile ready to discard"
+        if let id = session.selectedTileID,
+           let selected = session.player.concealed.first(where: { $0.id == id }) {
+            return "Selected: \(MahjongData.name(for: selected.tile).english)"
         }
-        return session.isBotThinking ? "Waiting for opponents…" : "Watching the table…"
+        return ""
     }
 
     private var reactionOverlay: some View {
@@ -257,6 +303,10 @@ struct GameView: View {
 }
 
 enum GameDebugDestination: Equatable {
+    case humanTurn
+    case opponentTurn
+    case newestDiscard
+    case postClaimDiscard
     case reaction
     case result
     case scoreboard
@@ -274,7 +324,7 @@ enum GameDebugDestination: Equatable {
 
     var isClaimScene: Bool {
         switch self {
-        case .reaction, .claimWin, .claimPung, .claimKong, .claimChow, .robKong: true
+        case .reaction, .claimWin, .claimPung, .claimKong, .claimChow, .robKong, .postClaimDiscard: true
         default: false
         }
     }
@@ -303,6 +353,13 @@ private struct MahjongLearningTable: View {
             let metrics = GameTableMetrics(size: geo.size, compact: compact)
             ZStack {
                 tableFelt
+                if let actor = session.displayedActor, actor != session.humanSeat {
+                    ActiveSeatSpotlight(
+                        seat: actor,
+                        humanSeat: session.humanSeat,
+                        metrics: metrics
+                    )
+                }
                 PhysicalWall(
                     front: session.presentedWallFront,
                     rear: session.presentedWallRear,
@@ -324,16 +381,22 @@ private struct MahjongLearningTable: View {
                 TableRoundCompass(
                     round: session.match.prevailingWind,
                     dealer: session.state.dealer,
-                    actor: session.state.currentActor,
+                    actor: session.displayedActor,
                     humanSeat: session.humanSeat,
                     compact: compact
                 )
                 .position(metrics.centerPoint)
                 .zIndex(3)
 
-                PlayerMeldAndFlowerTray(player: session.player, width: metrics.meldTileWidth, inspect: inspect)
+                PlayerMeldAndFlowerTray(
+                    player: session.player,
+                    width: metrics.meldTileWidth,
+                    highlightedInstanceID: session.attention.lastClaimedInstanceID,
+                    inspect: inspect
+                )
+                    .reportsGameMotionAnchor(.meld(session.humanSeat))
                     .position(metrics.humanTrayPoint)
-                PlayerBadge(name: "You", player: session.player, total: session.totals[session.humanSeat], active: session.state.currentActor == session.humanSeat)
+                PlayerBadge(name: "You", player: session.player, total: session.totals[session.humanSeat], active: session.displayedActor == session.humanSeat)
                     .position(metrics.humanBadgePoint)
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -362,23 +425,38 @@ private struct MahjongLearningTable: View {
         let player = session.state.players[seat]
         if orientation == .top {
             VStack(spacing: 3) {
-                PlayerBadge(name: gamePlayerName(seat: seat, humanSeat: session.humanSeat), player: player, total: session.totals[seat], active: session.state.currentActor == seat)
+                PlayerBadge(name: gamePlayerName(seat: seat, humanSeat: session.humanSeat), player: player, total: session.totals[seat], active: session.displayedActor == seat)
                 OpponentRack(vertical: false, reveal: session.revealOpponents, tiles: player.concealed, width: metrics.opponentTileWidth, availableLength: metrics.topRackLength, faceRotation: 180)
-                PlayerMeldAndFlowerTray(player: player, width: metrics.meldTileWidth, inspect: inspect)
+                    .reportsGameMotionAnchor(.rack(seat))
+                PlayerMeldAndFlowerTray(
+                    player: player,
+                    width: metrics.meldTileWidth,
+                    highlightedInstanceID: session.attention.lastClaimedInstanceID,
+                    inspect: inspect
+                )
+                    .reportsGameMotionAnchor(.meld(seat))
             }
             .position(position)
         } else {
             ZStack {
                 OpponentRack(vertical: true, reveal: session.revealOpponents, tiles: player.concealed, width: metrics.opponentTileWidth, availableLength: metrics.sideRackLength, faceRotation: orientation == .left ? 90 : -90)
+                    .reportsGameMotionAnchor(.rack(seat))
                 SidePlayerBadge(
                     name: gamePlayerName(seat: seat, humanSeat: session.humanSeat),
                     player: player,
                     total: session.totals[seat],
-                    active: session.state.currentActor == seat
+                    active: session.displayedActor == seat
                 )
                 .offset(x: orientation == .left ? -(metrics.opponentTileWidth + 17) : metrics.opponentTileWidth + 17)
 
-                PlayerMeldAndFlowerTray(player: player, width: metrics.sideMeldTileWidth, vertical: true, inspect: inspect)
+                PlayerMeldAndFlowerTray(
+                    player: player,
+                    width: metrics.sideMeldTileWidth,
+                    vertical: true,
+                    highlightedInstanceID: session.attention.lastClaimedInstanceID,
+                    inspect: inspect
+                )
+                    .reportsGameMotionAnchor(.meld(seat))
                     .offset(x: orientation == .left ? metrics.opponentTileWidth + 14 : -(metrics.opponentTileWidth + 14))
             }
             .position(position)
@@ -400,11 +478,13 @@ private struct MahjongLearningTable: View {
             tileWidth: metrics.riverTileWidth,
             isHuman: isHuman,
             isDropTarget: isHuman && isDraggingOverHumanRiver,
+            newestDiscardID: session.highlightNewestDiscard ? session.attention.lastDiscardInstanceID : nil,
             inspect: inspect
         )
         .frame(width: metrics.riverWidth)
         .rotationEffect(.degrees(rotation))
         .position(position)
+        .reportsGameMotionAnchor(.river(seat))
     }
 }
 
@@ -689,6 +769,52 @@ private struct GameTableMetrics {
     var humanBadgePoint: CGPoint { CGPoint(x: size.width * 0.5, y: size.height - (compact ? 17 : 21)) }
 }
 
+private struct ActiveSeatSpotlight: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let seat: Int
+    let humanSeat: Int
+    let metrics: GameTableMetrics
+    @State private var breathing = false
+
+    var body: some View {
+        let relative = (seat - humanSeat + 4) % 4
+        let vertical = relative == 1 || relative == 3
+        Ellipse()
+            .fill(
+                RadialGradient(
+                    colors: [MJColor.gold(0.26), MJColor.gold(0.09), .clear],
+                    center: .center,
+                    startRadius: 2,
+                    endRadius: vertical ? 72 : 118
+                )
+            )
+            .frame(
+                width: vertical ? (metrics.compact ? 92 : 126) : (metrics.compact ? 230 : 310),
+                height: vertical ? (metrics.compact ? 220 : 300) : (metrics.compact ? 84 : 110)
+            )
+            .scaleEffect(reduceMotion ? 1 : (breathing ? 1.05 : 0.96))
+            .opacity(reduceMotion ? 0.9 : (breathing ? 1 : 0.72))
+            .position(position(relative))
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
+                    breathing = true
+                }
+            }
+            .accessibilityHidden(true)
+            .allowsHitTesting(false)
+    }
+
+    private func position(_ relative: Int) -> CGPoint {
+        switch relative {
+        case 1: metrics.rightRackPoint
+        case 2: metrics.topRackPoint
+        case 3: metrics.leftRackPoint
+        default: metrics.humanBadgePoint
+        }
+    }
+}
+
 private enum RackOrientation: Equatable { case top, left, right }
 
 private struct GameLayoutProfile {
@@ -712,11 +838,19 @@ private struct PlayerBadge: View {
     let active: Bool
     var body: some View {
         HStack(spacing: 5) {
-            Circle().fill(active ? MJColor.gold : MJColor.cream(0.30)).frame(width: 7, height: 7)
+            Circle().fill(active ? MJColor.inkOnGold : MJColor.cream(0.30)).frame(width: 7, height: 7)
             Text("\(name.uppercased()) · \(windName(player.seatWind)) · \(total >= 0 ? "+" : "")\(total)")
-                .font(MJFont.ui(10, weight: .bold)).foregroundStyle(active ? MJColor.creamHeading : MJColor.cream(0.60))
+                .font(MJFont.ui(10, weight: .bold)).foregroundStyle(active ? MJColor.inkOnGold : MJColor.cream(0.60))
         }
-        .padding(.horizontal, 8).padding(.vertical, 5).background(.black.opacity(0.28), in: Capsule())
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(
+            active
+                ? AnyShapeStyle(LinearGradient(colors: [MJColor.lightGold, MJColor.gold], startPoint: .top, endPoint: .bottom))
+                : AnyShapeStyle(.black.opacity(0.28)),
+            in: Capsule()
+        )
+        .shadow(color: active ? MJColor.gold(0.56) : .clear, radius: 9)
+        .accessibilityAddTraits(active ? .isSelected : [])
     }
 }
 
@@ -727,14 +861,20 @@ private struct SidePlayerBadge: View {
     let active: Bool
     var body: some View {
         VStack(spacing: 2) {
-            Circle().fill(active ? MJColor.gold : MJColor.cream(0.28)).frame(width: 6, height: 6)
+            Circle().fill(active ? MJColor.inkOnGold : MJColor.cream(0.28)).frame(width: 6, height: 6)
             Text(shortWind(player.seatWind)).font(.caption2.weight(.bold))
             Text("\(total >= 0 ? "+" : "")\(total)").font(.system(.caption2, design: .rounded).weight(.semibold))
         }
-        .foregroundStyle(active ? MJColor.creamHeading : MJColor.cream(0.60))
+        .foregroundStyle(active ? MJColor.inkOnGold : MJColor.cream(0.60))
         .frame(width: 34)
         .frame(minHeight: 48)
-        .background(.black.opacity(0.30), in: Capsule())
+        .background(
+            active
+                ? AnyShapeStyle(LinearGradient(colors: [MJColor.lightGold, MJColor.gold], startPoint: .top, endPoint: .bottom))
+                : AnyShapeStyle(.black.opacity(0.30)),
+            in: Capsule()
+        )
+        .shadow(color: active ? MJColor.gold(0.56) : .clear, radius: 9)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(name), \(windName(player.seatWind).capitalized), score \(total)")
     }
@@ -806,6 +946,14 @@ private struct PhysicalWall: View {
                     .rotationEffect(.degrees(segment == 0 ? 180 : segment == 1 ? -90 : segment == 2 ? 0 : 90))
                     .position(wallPoint(segment))
             }
+            Color.clear
+                .frame(width: 2, height: 2)
+                .position(stackPoint(min(71, max(0, front / 2))))
+                .reportsGameMotionAnchor(.frontWall)
+            Color.clear
+                .frame(width: 2, height: 2)
+                .position(stackPoint(min(71, max(0, (rear - 1) / 2))))
+                .reportsGameMotionAnchor(.rearWall)
         }
         .frame(width: size.width, height: size.height)
         .accessibilityHidden(true)
@@ -816,6 +964,18 @@ private struct PhysicalWall: View {
         case 1: CGPoint(x: size.width - verticalInset, y: size.height * 0.49)
         case 2: CGPoint(x: size.width * 0.5, y: size.height - horizontalInset * 0.58)
         default: CGPoint(x: verticalInset, y: size.height * 0.49)
+        }
+    }
+
+    private func stackPoint(_ stack: Int) -> CGPoint {
+        let segment = stack / 18
+        let local = CGFloat(stack % 18) - 8.5
+        let offset = local * (stackWidth + 1)
+        let center = wallPoint(segment)
+        switch segment {
+        case 0, 2: return CGPoint(x: center.x + offset, y: center.y)
+        case 1, 3: return CGPoint(x: center.x, y: center.y + offset)
+        default: return center
         }
     }
 }
@@ -895,6 +1055,7 @@ private struct PlayerMeldAndFlowerTray: View {
     let player: GamePlayer
     let width: CGFloat
     var vertical = false
+    var highlightedInstanceID: Int?
     let inspect: (Tile, GameTileInsightOrigin) -> Void
     var body: some View {
         if !player.melds.isEmpty || !player.flowers.isEmpty {
@@ -907,9 +1068,23 @@ private struct PlayerMeldAndFlowerTray: View {
                                 MahjongTileBackView(width: width, seed: UInt64(bitPattern: Int64(tile.id)))
                             } else {
                                 MahjongTileView(tile.tile, width: width, showsBadge: false)
-                                    .rotationEffect(.degrees(isClaimedInstance(tile, in: meld) ? 90 : 0))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: max(3, width * 0.16), style: .continuous)
+                                            .strokeBorder(
+                                                tile.id == highlightedInstanceID ? MJColor.gold : .clear,
+                                                lineWidth: 2
+                                            )
+                                            .shadow(
+                                                color: tile.id == highlightedInstanceID ? MJColor.gold(0.72) : .clear,
+                                                radius: 7
+                                            )
+                                    }
+                                    .rotationEffect(.degrees(
+                                        isClaimedInstance(tile, in: meld) || tile.id == highlightedInstanceID ? 90 : 0
+                                    ))
                                     .onTapGesture { inspect(tile.tile, .meld(ownerSeat: player.id)) }
                                     .accessibilityLabel(meldAccessibilityLabel(tile, meld: meld))
+                                    .accessibilityValue(tile.id == highlightedInstanceID ? "Most recent claimed tile" : "")
                             }
                         }
                     }
@@ -950,20 +1125,29 @@ private struct RiverGrid: View {
     let tileWidth: CGFloat
     let isHuman: Bool
     let isDropTarget: Bool
+    let newestDiscardID: Int?
     let inspect: (Tile, GameTileInsightOrigin) -> Void
     var body: some View {
-        let showsZone = !tiles.isEmpty || isDropTarget
+        let showsZone = !tiles.isEmpty || isDropTarget || isHuman
         VStack(spacing: 3) {
-            HStack(spacing: 3) {
-                Text(isHuman ? "YOUR RIVER" : "\(shortWind(wind)) RIVER")
-                    .font(MJFont.ui(8, weight: .bold)).tracking(0.5).foregroundStyle(isDropTarget ? MJColor.inkOnGold : MJColor.gold(0.75))
-                Spacer(minLength: 0)
-            }
-            LazyVGrid(columns: Array(repeating: GridItem(.fixed(tileWidth), spacing: 1), count: 6), spacing: 1) {
-                ForEach(tiles, id: \.id) { tile in
-                    MahjongTileView(tile.tile, width: tileWidth, showsBadge: false)
-                        .onTapGesture { inspect(tile.tile, .river(ownerSeat: seat)) }
-                        .accessibilityLabel("\(tileVoiceOverName(tile.tile)), discarded by \(windName(wind).lowercased())")
+            if showsZone {
+                HStack(spacing: 3) {
+                    Text(isHuman ? "YOUR RIVER" : "\(shortWind(wind)) RIVER")
+                        .font(MJFont.ui(8, weight: .bold)).tracking(0.5).foregroundStyle(isDropTarget ? MJColor.inkOnGold : MJColor.gold(0.75))
+                    Spacer(minLength: 0)
+                }
+                LazyVGrid(columns: Array(repeating: GridItem(.fixed(tileWidth), spacing: 1), count: 6), spacing: 1) {
+                    ForEach(tiles, id: \.id) { tile in
+                        RecentRiverTile(
+                            tile: tile,
+                            width: tileWidth,
+                            isNewest: tile.id == newestDiscardID
+                        )
+                            .onTapGesture { inspect(tile.tile, .river(ownerSeat: seat)) }
+                            .accessibilityLabel(
+                                "\(tileVoiceOverName(tile.tile)), \(tile.id == newestDiscardID ? "most recent " : "")discard by \(windName(wind).lowercased())"
+                            )
+                    }
                 }
             }
         }
@@ -986,6 +1170,43 @@ private struct RiverGrid: View {
     }
 }
 
+private struct RecentRiverTile: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let tile: TileInstance
+    let width: CGFloat
+    let isNewest: Bool
+    @State private var hasLanded = false
+
+    var body: some View {
+        MahjongTileView(tile.tile, width: width, showsBadge: false)
+            .overlay {
+                RoundedRectangle(cornerRadius: max(3, width * 0.16), style: .continuous)
+                    .strokeBorder(isNewest ? MJColor.gold : .clear, lineWidth: 2)
+                    .shadow(color: isNewest ? MJColor.gold(0.72) : .clear, radius: 7)
+            }
+            .scaleEffect(isNewest && !hasLanded && !reduceMotion ? 1.16 : 1)
+            .onAppear { landIfNeeded() }
+            .onChange(of: isNewest) { _, _ in
+                hasLanded = false
+                landIfNeeded()
+            }
+    }
+
+    private func landIfNeeded() {
+        guard isNewest else {
+            hasLanded = true
+            return
+        }
+        if reduceMotion {
+            hasLanded = true
+        } else {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.58)) {
+                hasLanded = true
+            }
+        }
+    }
+}
+
 
 private struct HumanRack: View {
     let session: GameSession
@@ -1002,7 +1223,7 @@ private struct HumanRack: View {
         GeometryReader { geo in
             let tiles = session.humanTiles
             let spacing: CGFloat = compact ? 1 : 2
-            let drawnGap: CGFloat = tiles.contains(where: { session.state.lastDrawInstance?.id == $0.id }) ? 7 : 0
+            let drawnGap: CGFloat = tiles.contains(where: { session.state.lastDrawInstance?.id == $0.id }) ? 12 : 0
             let available = geo.size.width - 16 - drawnGap - spacing * CGFloat(max(tiles.count - 1, 0))
             let tileWidth = min(maximumTileWidth, max(compact ? 20 : 24, available / CGFloat(max(tiles.count, 1))))
             HStack(alignment: .bottom, spacing: spacing) {
@@ -1014,16 +1235,55 @@ private struct HumanRack: View {
             .padding(.horizontal, 8).padding(.top, 10).padding(.bottom, 4)
         }
         .frame(height: max(compact ? 60 : 74, maximumTileWidth * 1.35 + 17))
-        .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(.black.opacity(0.18))
+                if session.displayedActor == session.humanSeat {
+                    HumanRackSpotlight()
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+            }
+        }
         .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(MJColor.gold(0.20)) }
     }
 
     private func tileButton(_ tile: TileInstance, width: CGFloat, drawnGap: CGFloat) -> some View {
         let selected = session.selectedTileID == tile.id
+        let isDrawn = session.state.lastDrawInstance?.id == tile.id
+        let isReplacement = isDrawn && session.state.lastDrawKind != .ordinary
+        let drawLabel = isReplacement ? "REPLACEMENT FROM WALL" : "FROM WALL"
         return MahjongTileView(tile.tile, width: width, showsBadge: width >= 28)
             .offset(y: selected ? -9 : 0)
             .padding(.leading, drawnGap)
-            .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(selected ? MJColor.gold : .clear, lineWidth: 2) }
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(isDrawn ? GameCueColor.wallDraw : .clear, lineWidth: 2)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(selected ? MJColor.gold : .clear, lineWidth: 2)
+            }
+            .overlay(alignment: .top) {
+                if isDrawn {
+                    Text(drawLabel)
+                        .font(.system(size: compact ? 6 : 8, weight: .black, design: .rounded))
+                        .tracking(0.35)
+                        .foregroundStyle(Color.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(GameCueColor.wallDraw.opacity(0.94), in: Capsule())
+                        .overlay {
+                            if isReplacement {
+                                Capsule().strokeBorder(MJColor.gold, lineWidth: 1)
+                            }
+                        }
+                        .fixedSize()
+                        .offset(x: compact && isReplacement ? -46 : (compact ? -18 : 0), y: compact ? -13 : -15)
+                        .accessibilityHidden(true)
+                }
+            }
+            .shadow(color: isDrawn ? GameCueColor.wallDraw.opacity(0.82) : .clear, radius: 7)
             .scaleEffect(draggingTileID == tile.id || session.debugDraggingTileID == tile.id ? 1.12 : 1)
             .offset(draggingTileID == tile.id ? dragTranslation : (session.debugDraggingTileID == tile.id ? CGSize(width: 0, height: -18) : .zero))
             .zIndex(draggingTileID == tile.id || session.debugDraggingTileID == tile.id ? 2 : 0)
@@ -1031,7 +1291,9 @@ private struct HumanRack: View {
             .onTapGesture { session.select(tile) }
             .simultaneousGesture(LongPressGesture(minimumDuration: 0.45).onEnded { _ in inspect(tile.tile, .humanHand) })
             .highPriorityGesture(dragGesture(for: tile))
-            .accessibilityLabel("\(tileVoiceOverName(tile.tile))\(selected ? ", selected" : "")")
+            .accessibilityLabel(
+                "\(tileVoiceOverName(tile.tile))\(isDrawn ? (isReplacement ? ", latest private replacement drawn from the rear wall" : ", latest private tile drawn from the wall") : "")\(selected ? ", selected" : "")"
+            )
             .accessibilityHint("Double tap to select for discard. Use the Learn about action for tile details.")
             .accessibilityAction(named: "Learn about \(tileVoiceOverName(tile.tile))") { inspect(tile.tile, .humanHand) }
     }
@@ -1060,6 +1322,30 @@ private struct HumanRack: View {
     }
 }
 
+private struct HumanRackSpotlight: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var breathing = false
+
+    var body: some View {
+        RadialGradient(
+            colors: [MJColor.gold(0.25), MJColor.gold(0.07), .clear],
+            center: .center,
+            startRadius: 4,
+            endRadius: 190
+        )
+        .scaleEffect(reduceMotion ? 1 : (breathing ? 1.04 : 0.96))
+        .opacity(reduceMotion ? 0.9 : (breathing ? 1 : 0.72))
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
+                breathing = true
+            }
+        }
+        .accessibilityHidden(true)
+        .allowsHitTesting(false)
+    }
+}
+
 private struct TableDecisionDock: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let prompt: String
@@ -1076,13 +1362,20 @@ private struct TableDecisionDock: View {
 
     var body: some View {
         VStack(spacing: compact ? 4 : 6) {
-            Text(prompt)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(MJColor.cream(0.72))
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-                .frame(maxWidth: .infinity, minHeight: 17)
-                .accessibilityLabel("Table status: \(prompt)")
+            Group {
+                if prompt.isEmpty {
+                    Color.clear
+                        .accessibilityHidden(true)
+                } else {
+                    Text(prompt)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(MJColor.cream(0.72))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                        .accessibilityLabel("Decision feedback: \(prompt)")
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 17, maxHeight: 17)
 
             HStack(spacing: compact ? 6 : 9) {
                 dockButton(
@@ -1161,6 +1454,107 @@ private struct TableDecisionDock: View {
         case "Proceed": return "Continues step-by-step play"
         default: return "Rewinds the last human decision and later opponent actions"
         }
+    }
+}
+
+private struct InlineClaimBar: View {
+    let offer: PendingOffer
+    let sourceName: String
+    let actions: [GameAction]
+    let label: (GameAction) -> String
+    let seconds: Int?
+    let compact: Bool
+    let onAction: (GameAction) -> Void
+    let onPass: () -> Void
+    let inspect: () -> Void
+
+    private var nonPassActions: [GameAction] { actions.filter { $0.kind != .pass } }
+
+    var body: some View {
+        HStack(spacing: compact ? 8 : 12) {
+            MahjongTileView(offer.tile, width: compact ? 36 : 43, showsBadge: false)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(MJColor.gold, lineWidth: 2)
+                        .shadow(color: MJColor.gold(0.72), radius: 7)
+                }
+                .onTapGesture(perform: inspect)
+                .accessibilityAction(named: "Learn about \(tileVoiceOverName(offer.tile))") { inspect() }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(claimTitle)
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(MJColor.creamHeading)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                Text(detailText)
+                    .font(.caption)
+                    .foregroundStyle(MJColor.cream(0.65))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 6) {
+                ForEach(nonPassActions, id: \.id) { action in
+                    GameActionButton(
+                        title: label(action),
+                        prominent: action.kind == .win,
+                        action: { onAction(action) }
+                    )
+                }
+                GameActionButton(title: "Pass", prominent: false, action: onPass)
+            }
+        }
+        .padding(.horizontal, compact ? 9 : 13)
+        .padding(.vertical, 7)
+        .background(MJColor.deepJade.opacity(0.96), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 15).strokeBorder(MJColor.gold(0.46), lineWidth: 1.5) }
+        .shadow(color: .black.opacity(0.34), radius: 10, y: 5)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(sourceName) offered \(tileVoiceOverName(offer.tile))")
+    }
+
+    private var claimTitle: String {
+        let tile = MahjongData.name(for: offer.tile).english
+        if nonPassActions.count == 1, let action = nonPassActions.first {
+            return "\(label(action)) \(tile)?"
+        }
+        return "Claim \(tile)?"
+    }
+
+    private var detailText: String {
+        if let seconds { return "From \(sourceName) · auto-pass in \(seconds)s" }
+        return "From \(sourceName) · choose or Pass"
+    }
+}
+
+private struct GameTableAnnouncementView: View {
+    let announcement: GameTableAnnouncement
+    let reduceMotion: Bool
+
+    var body: some View {
+        VStack(spacing: 5) {
+            Text(announcement.title)
+                .font(.title2.weight(.black))
+                .tracking(1.1)
+                .foregroundStyle(
+                    announcement.style == .claim ? MJColor.gold : MJColor.creamHeading
+                )
+            Text(announcement.subtitle)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(MJColor.gold(0.92))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 15)
+        .background(.black.opacity(0.76), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(MJColor.gold(0.44)) }
+        .shadow(color: .black.opacity(0.5), radius: 18, y: 9)
+        .padding(24)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .animation(reduceMotion ? .easeOut(duration: 0.12) : .snappy(duration: 0.24), value: announcement.id)
     }
 }
 
@@ -1325,6 +1719,7 @@ private struct OpeningDealMotion: View {
 private struct TableMotionCue: View {
     let motion: GameTableMotion
     let humanSeat: Int
+    let anchors: [GameMotionAnchor: CGRect]
     let reduceMotion: Bool
     @State private var progress: CGFloat = 0
 
@@ -1334,7 +1729,7 @@ private struct TableMotionCue: View {
             let to = point(for: motion.destination, in: proxy.size)
             Group {
                 if let tile = motion.tile {
-                    MahjongTileView(tile, width: 31, showsBadge: false)
+                    MahjongTileView(tile, width: motion.kind == .discard ? 30 : 31, showsBadge: false)
                 } else {
                     Image(systemName: motion.kind == .win ? "sparkles" : "circle.fill")
                         .font(.title2)
@@ -1342,6 +1737,8 @@ private struct TableMotionCue: View {
                 }
             }
             .shadow(color: motion.usesGoldCue ? MJColor.gold(0.72) : .black.opacity(0.35), radius: 9)
+            .rotationEffect(.degrees(motion.rotatesAtDestination ? 90 * progress : 0))
+            .scaleEffect(motion.kind == .discard ? 1 + (1 - progress) * 0.10 : 1)
             .position(
                 x: from.x + (to.x - from.x) * progress,
                 y: from.y + (to.y - from.y) * progress
@@ -1353,27 +1750,39 @@ private struct TableMotionCue: View {
         .accessibilityHidden(true)
         .onAppear {
             if reduceMotion { progress = 1 }
-            else { withAnimation(.easeInOut(duration: 0.28)) { progress = 1 } }
+            else {
+                withAnimation(.easeOut(duration: Double(motion.durationMilliseconds) / 1_000)) {
+                    progress = 1
+                }
+            }
         }
     }
 
     private func point(for source: GameTableMotion.Source, in size: CGSize) -> CGPoint {
         switch source {
-        case .frontWall: CGPoint(x: size.width * 0.50, y: size.height * 0.25)
-        case .rearWall: CGPoint(x: size.width * 0.24, y: size.height * 0.42)
-        case let .rack(seat): rackPoint(seat: seat, in: size)
-        case let .river(seat): riverPoint(seat: seat, in: size)
+        case .frontWall: anchorPoint(.frontWall) ?? CGPoint(x: size.width * 0.50, y: size.height * 0.25)
+        case .rearWall: anchorPoint(.rearWall) ?? CGPoint(x: size.width * 0.24, y: size.height * 0.42)
+        case let .rack(seat): anchorPoint(.rack(seat)) ?? rackPoint(seat: seat, in: size)
+        case let .river(seat): anchorPoint(.river(seat)) ?? riverPoint(seat: seat, in: size)
         case .table: CGPoint(x: size.width * 0.50, y: size.height * 0.48)
         }
     }
 
     private func point(for destination: GameTableMotion.Destination, in size: CGSize) -> CGPoint {
         switch destination {
-        case let .rack(seat): rackPoint(seat: seat, in: size)
-        case let .river(seat): riverPoint(seat: seat, in: size)
-        case let .meldTray(seat), let .bonusTray(seat): rackPoint(seat: seat, in: size)
+        case let .rack(seat): anchorPoint(.rack(seat)) ?? rackPoint(seat: seat, in: size)
+        case let .river(seat): anchorPoint(.river(seat)) ?? riverPoint(seat: seat, in: size)
+        case let .meldTray(seat):
+            anchorPoint(.meld(seat)) ?? anchorPoint(.rack(seat)) ?? rackPoint(seat: seat, in: size)
+        case let .bonusTray(seat):
+            anchorPoint(.meld(seat)) ?? anchorPoint(.rack(seat)) ?? rackPoint(seat: seat, in: size)
         case .result, .table: CGPoint(x: size.width * 0.50, y: size.height * 0.48)
         }
+    }
+
+    private func anchorPoint(_ anchor: GameMotionAnchor) -> CGPoint? {
+        guard let frame = anchors[anchor], !frame.isNull, !frame.isEmpty else { return nil }
+        return CGPoint(x: frame.midX, y: frame.midY)
     }
 
     private func rackPoint(seat: Int, in size: CGSize) -> CGPoint {
@@ -1403,6 +1812,42 @@ struct GameActionButton: View {
         Button(action: action) { Text(title).font(MJFont.ui(13, weight: .bold)).foregroundStyle(prominent ? MJColor.inkOnGold : MJColor.gold).frame(minWidth: 50).frame(minHeight: 44).padding(.horizontal, 3).background(prominent ? AnyShapeStyle(MJColor.gold) : AnyShapeStyle(MJColor.gold(0.12)), in: RoundedRectangle(cornerRadius: 12)) }
             .buttonStyle(.plain).accessibilityLabel(title)
     }
+}
+
+private enum GameMotionAnchor: Hashable {
+    case frontWall
+    case rearWall
+    case rack(Int)
+    case river(Int)
+    case meld(Int)
+}
+
+private struct GameMotionAnchorPreference: PreferenceKey {
+    static var defaultValue: [GameMotionAnchor: CGRect] = [:]
+
+    static func reduce(
+        value: inout [GameMotionAnchor: CGRect],
+        nextValue: () -> [GameMotionAnchor: CGRect]
+    ) {
+        value.merge(nextValue(), uniquingKeysWith: { _, newest in newest })
+    }
+}
+
+private extension View {
+    func reportsGameMotionAnchor(_ anchor: GameMotionAnchor) -> some View {
+        background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: GameMotionAnchorPreference.self,
+                    value: [anchor: proxy.frame(in: .named("mahjong-game-root"))]
+                )
+            }
+        }
+    }
+}
+
+private enum GameCueColor {
+    static let wallDraw = Color(red: 0.37, green: 0.69, blue: 1.0)
 }
 
 private struct HumanRiverFramePreference: PreferenceKey {

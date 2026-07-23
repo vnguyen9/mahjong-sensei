@@ -4,6 +4,7 @@ final class MahjongGameUITests: XCTestCase {
     override func setUp() {
         super.setUp()
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
     }
 
     func testLandscapeTableRouteOnIPad() {
@@ -34,6 +35,23 @@ final class MahjongGameUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Pass"].exists)
         XCTAssertFalse(app.buttons["Chow"].exists)
         XCTAssertFalse(app.buttons["Kong"].exists)
+        XCTAssertFalse(app.staticTexts["Claim this tile?"].exists)
+    }
+
+    func testHumanTurnRouteShowsWallDrawInstruction() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = launch(route: "game-turn-human")
+
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Drew from the wall'"))
+            .element(boundBy: 0).waitForExistence(timeout: 8))
+    }
+
+    func testComplexClaimRouteRetainsFocusedModal() {
+        let app = launch(route: "game-complex-claim")
+
+        XCTAssertTrue(app.staticTexts["Rob the kong?"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["Win · Rob Kong"].exists)
+        XCTAssertTrue(app.buttons["Pass"].exists)
     }
 
     func testLearningDrawerUsesPublicTableLanguage() {

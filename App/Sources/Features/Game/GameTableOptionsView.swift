@@ -9,6 +9,8 @@ struct GameTableOptionsView: View {
     @Binding private var tileInsightsEnabled: Bool
     @Binding private var stepThroughEnabled: Bool
     @Binding private var claimTimer: GameClaimTimer
+    @Binding private var highlightNewestDiscard: Bool
+    @Binding private var coachHintsEnabled: Bool
     @State private var soundsEnabled: Bool
 
     /// Bind to session-owned values so changing the timer can immediately
@@ -16,11 +18,15 @@ struct GameTableOptionsView: View {
     init(
         tileInsightsEnabled: Binding<Bool>,
         stepThroughEnabled: Binding<Bool>,
-        claimTimer: Binding<GameClaimTimer>
+        claimTimer: Binding<GameClaimTimer>,
+        highlightNewestDiscard: Binding<Bool>,
+        coachHintsEnabled: Binding<Bool>
     ) {
         _tileInsightsEnabled = tileInsightsEnabled
         _stepThroughEnabled = stepThroughEnabled
         _claimTimer = claimTimer
+        _highlightNewestDiscard = highlightNewestDiscard
+        _coachHintsEnabled = coachHintsEnabled
         _soundsEnabled = State(initialValue: GameSounds.enabled)
     }
 
@@ -69,6 +75,40 @@ struct GameTableOptionsView: View {
                                 .padding(.horizontal, 12)
                                 .frame(minHeight: 58)
                                 .accessibilityHint("Controls whether the learning table waits for Proceed between actions.")
+                            }
+                        }
+
+                        optionCard(title: "Table clarity") {
+                            VStack(spacing: 0) {
+                                Toggle(isOn: $highlightNewestDiscard) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text("Highlight newest discard")
+                                            .font(MJFont.ui(14, weight: .medium))
+                                            .foregroundStyle(MJColor.creamHeading)
+                                        Text("Keeps a gold ring on the latest public discard.")
+                                            .font(MJFont.ui(11))
+                                            .foregroundStyle(MJColor.cream(0.58))
+                                    }
+                                }
+                                .tint(MJColor.gold)
+                                .padding(.horizontal, 12)
+                                .frame(minHeight: 58)
+
+                                Divider().overlay(MJColor.gold(0.12)).padding(.leading, 12)
+
+                                Toggle(isOn: $coachHintsEnabled) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text("Coach hints")
+                                            .font(MJFont.ui(14, weight: .medium))
+                                            .foregroundStyle(MJColor.creamHeading)
+                                        Text("Shows a short explanation for the current phase.")
+                                            .font(MJFont.ui(11))
+                                            .foregroundStyle(MJColor.cream(0.58))
+                                    }
+                                }
+                                .tint(MJColor.gold)
+                                .padding(.horizontal, 12)
+                                .frame(minHeight: 58)
                             }
                         }
 
@@ -139,6 +179,12 @@ struct GameTableOptionsView: View {
         }
         .onChange(of: claimTimer) { _, value in
             GameLearningPreferences.claimTimer = value
+        }
+        .onChange(of: highlightNewestDiscard) { _, value in
+            GameLearningPreferences.highlightNewestDiscard = value
+        }
+        .onChange(of: coachHintsEnabled) { _, value in
+            GameLearningPreferences.coachHintsEnabled = value
         }
         .onChange(of: soundsEnabled) { _, value in
             GameSounds.enabled = value

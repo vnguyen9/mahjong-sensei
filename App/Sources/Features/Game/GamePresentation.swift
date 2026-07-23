@@ -22,6 +22,56 @@ enum GamePresentationPhase: Sendable, Equatable {
     }
 }
 
+enum GameTableAnnouncementStyle: Sendable, Equatable {
+    case turn
+    case claim
+}
+
+/// Brief, non-blocking table copy. It deliberately carries no gameplay state:
+/// the authoritative phase, actor, and events still live in `GameState`.
+struct GameTableAnnouncement: Identifiable, Sendable, Equatable {
+    let id: UUID
+    let title: String
+    let subtitle: String
+    let style: GameTableAnnouncementStyle
+
+    init(id: UUID = UUID(), title: String, subtitle: String, style: GameTableAnnouncementStyle) {
+        self.id = id
+        self.title = title
+        self.subtitle = subtitle
+        self.style = style
+    }
+}
+
+/// Presentation-only attention markers reconstructed from the current hand's
+/// event history. None of these values are encoded in replays or observations.
+struct GameTableAttentionState: Sendable, Equatable {
+    var lastDiscardInstanceID: Int?
+    var lastClaimedInstanceID: Int?
+    var announcement: GameTableAnnouncement?
+    var isWaitingForReactionResolution = false
+
+    static func reconstructing(events: [GameEventV2]) -> GameTableAttentionState {
+        var result = GameTableAttentionState()
+        result.consume(events)
+        return result
+    }
+
+    mutating func consume(_ events: [GameEventV2]) {
+        for event in events {
+            switch event.kind {
+            case .discard:
+                lastDiscardInstanceID = event.instanceID
+                lastClaimedInstanceID = nil
+            case .chow, .pung, .kong:
+                lastClaimedInstanceID = event.instanceID
+            default:
+                break
+            }
+        }
+    }
+}
+
 /// A short-lived visual interpretation of an already-accepted engine event.
 /// The event remains the source of truth; this value only tells the table where
 /// to animate the tile from and to.
@@ -89,6 +139,21 @@ struct GameTableMotion: Identifiable, Sendable, Equatable {
             source = .table
             destination = .table
             usesGoldCue = false
+        }
+    }
+
+    var durationMilliseconds: Int {
+        switch kind {
+        case .discard: 360
+        case .chow, .pung, .kong, .addedKong, .concealedKong: 460
+        default: 300
+        }
+    }
+
+    var rotatesAtDestination: Bool {
+        switch kind {
+        case .chow, .pung, .kong: true
+        default: false
         }
     }
 }

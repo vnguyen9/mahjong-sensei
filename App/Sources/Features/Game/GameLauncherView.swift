@@ -239,6 +239,18 @@ enum MahjongGameDebugScene {
         switch route {
         case "game":
             return AnyView(NavigationStack { GameView(session: GameSession(seed: seed, humanSeat: 0)) })
+        case "game-turn-human", "game-wall-draw":
+            return AnyView(NavigationStack { GameView(session: GameSession(seed: seed, humanSeat: 0), debugDestination: .humanTurn) })
+        case "game-turn-opponent":
+            return AnyView(NavigationStack { GameView(session: GameSession(seed: seed, humanSeat: 0), debugDestination: .opponentTurn) })
+        case "game-newest-discard":
+            return AnyView(NavigationStack { GameView(session: GameSession(seed: seed, humanSeat: 0), debugDestination: .newestDiscard) })
+        case "game-inline-claim":
+            return AnyView(NavigationStack { GameView(session: GameSession(seed: seed, humanSeat: 0), debugDestination: .claimPung) })
+        case "game-complex-claim":
+            return AnyView(NavigationStack { GameRobKongDebugView(session: GameSession(seed: seed, humanSeat: 0)) })
+        case "game-post-claim-discard":
+            return AnyView(NavigationStack { GameView(session: GameSession(seed: seed, humanSeat: 0), debugDestination: .postClaimDiscard) })
         case "game-reaction":
             return AnyView(NavigationStack { GameView(session: GameSession(seed: seed + 1, humanSeat: 0), debugDestination: .reaction) })
         case "game-result":

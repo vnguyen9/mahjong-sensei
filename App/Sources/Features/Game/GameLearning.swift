@@ -11,6 +11,8 @@ enum GameLearningPreferences {
     private static let claimTimerKey = "gameLearning.claimTimer"
     private static let coachMarkKey = "gameLearning.didShowTileCoachMark"
     private static let stepThroughKey = "gameLearning.stepThroughEnabled"
+    private static let highlightNewestDiscardKey = "gameLearning.highlightNewestDiscard"
+    private static let coachHintsKey = "gameLearning.coachHintsEnabled"
 
     /// Insights are on by default because the experimental table is a learning
     /// surface. `object(forKey:)` preserves that default for existing installs.
@@ -39,6 +41,20 @@ enum GameLearningPreferences {
     static var stepThroughEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: stepThroughKey) }
         set { UserDefaults.standard.set(newValue, forKey: stepThroughKey) }
+    }
+
+    /// Public-action highlighting is structural table feedback, so existing
+    /// installs receive it unless the player explicitly turns it off.
+    static var highlightNewestDiscard: Bool {
+        get { UserDefaults.standard.object(forKey: highlightNewestDiscardKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: highlightNewestDiscardKey) }
+    }
+
+    /// Short phase-aware teaching copy is progressive disclosure: on for a new
+    /// learner, independently dismissible without removing the permanent cues.
+    static var coachHintsEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: coachHintsKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: coachHintsKey) }
     }
 }
 
