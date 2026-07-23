@@ -37,11 +37,49 @@ public struct MahjongTileBackView: View {
     }
 
     @ViewBuilder private func cap(_ corner: CGFloat) -> some View {
-        switch style {
-        case .gold:   goldCap(corner)
-        case .velvet: velvetCap(corner)
-        case .jade:   jadeCap(corner)
+        if width <= 32 {
+            compactCap(corner)
+        } else {
+            switch style {
+            case .gold:   goldCap(corner)
+            case .velvet: velvetCap(corner)
+            case .jade:   jadeCap(corner)
+            }
         }
+    }
+
+    /// Wall stacks and concealed opponent racks can contain more than one
+    /// hundred backs at once. Their tiny size cannot resolve the full marble
+    /// particle field, so use the same material palette with a cheap polished
+    /// gradient. Hero-sized backs retain the detailed procedural artwork.
+    private func compactCap(_ corner: CGFloat) -> some View {
+        let colors: [Color]
+        let edge: Color
+        switch style {
+        case .gold:
+            colors = [Color(hex: 0xEED382), Color(hex: 0xC89D38), Color(hex: 0xA97C20)]
+            edge = Color(hex: 0xF4E3AE).opacity(0.52)
+        case .velvet:
+            colors = [Color(hex: 0x8A3445), Color(hex: 0x5B1725), Color(hex: 0x350B15)]
+            edge = Color(hex: 0xB8697A).opacity(0.28)
+        case .jade:
+            colors = [Color(hex: 0x43A47C), Color(hex: 0x176849), Color(hex: 0x073825)]
+            edge = Color.white.opacity(0.24)
+        }
+        return RoundedRectangle(cornerRadius: corner, style: .continuous)
+            .fill(LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing))
+            .overlay {
+                LinearGradient(
+                    colors: [.white.opacity(0.24), .clear, .black.opacity(0.18)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: corner, style: .continuous)
+                    .strokeBorder(edge, lineWidth: 0.65)
+            }
     }
 
     // MARK: - Gold (fine glitter)
@@ -58,7 +96,7 @@ public struct MahjongTileBackView: View {
                                    center: .init(x: 0.75, y: 0.7), startRadiusFraction: 0, endRadiusFraction: 0.6)
             }
             .overlay {
-                Canvas { ctx, size in
+                Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { ctx, size in
                     let count = Int(1.0 * size.width * size.height)
                     for i in 0..<count {
                         var v = UInt64(i) &* 0x9E3779B97F4A7C15; v ^= v >> 31; v &*= 0xBF58476D1CE4E5B9; v ^= v >> 27
@@ -78,7 +116,7 @@ public struct MahjongTileBackView: View {
     // MARK: - Velvet (burgundy crushed velvet)
 
     private func velvetCap(_ corner: CGFloat) -> some View {
-        Canvas { ctx, size in
+        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { ctx, size in
             let w = size.width, h = size.height
             let rect = CGRect(origin: .zero, size: size)
             ctx.fill(Path(rect), with: .linearGradient(Gradient(colors: [Color(hex: 0x6E1F2C), Color(hex: 0x4A101B)]),
@@ -114,7 +152,7 @@ public struct MahjongTileBackView: View {
     // MARK: - Jade (marbled jade + gold-dust river)
 
     private func jadeCap(_ corner: CGFloat) -> some View {
-        Canvas { ctx, size in
+        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { ctx, size in
             let w = size.width, h = size.height
             let rect = CGRect(origin: .zero, size: size)
             var s = (seed &* 6364136223846793005 &+ 1442695040888963407) | 1

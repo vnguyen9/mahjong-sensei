@@ -103,7 +103,7 @@ struct MainTabView: View {
         @Bindable var app = app
         GeometryReader { proxy in
             let containerFrame = proxy.frame(in: .global)
-            let dockClearance = dockFrame == .zero
+            let dockClearance = app.isGameModeActive || dockFrame == .zero
                 ? CGFloat(0)
                 : max(0, containerFrame.maxY - dockFrame.minY + 12)
             ZStack(alignment: .bottom) {
@@ -117,12 +117,16 @@ struct MainTabView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .environment(\.floatingDockClearance, dockClearance)
 
-                MJTabBar(selection: $app.selectedTab)
-                    .padding(.bottom, 6)
-                    .onGeometryChange(for: CGRect.self,
-                                      of: { $0.frame(in: .global) },
-                                      action: { dockFrame = $0 })
+                if !app.isGameModeActive {
+                    MJTabBar(selection: $app.selectedTab)
+                        .padding(.bottom, 6)
+                        .onGeometryChange(for: CGRect.self,
+                                          of: { $0.frame(in: .global) },
+                                          action: { dockFrame = $0 })
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
+            .animation(.easeOut(duration: 0.2), value: app.isGameModeActive)
         }
     }
 }

@@ -144,9 +144,9 @@ struct GameTableMotion: Identifiable, Sendable, Equatable {
 
     var durationMilliseconds: Int {
         switch kind {
-        case .discard: 360
-        case .chow, .pung, .kong, .addedKong, .concealedKong: 460
-        default: 300
+        case .discard: 220
+        case .chow, .pung, .kong, .addedKong, .concealedKong: 300
+        default: 200
         }
     }
 

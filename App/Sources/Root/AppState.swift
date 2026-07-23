@@ -8,6 +8,11 @@ final class AppState {
     var selectedTab: MJTab = .scan
     var hasOnboarded: Bool
 
+    /// Transient presentation state for focused experiences that replace the
+    /// app's floating navigation dock with their own controls. This is never
+    /// persisted: leaving the experience restores normal app navigation.
+    var isGameModeActive = false
+
     /// "Higher accuracy" — swaps the scan detector for the larger, slower model.
     /// Persisted under the shared key the scan coordinator reads. Defaults to on.
     var prefersHighAccuracy: Bool {

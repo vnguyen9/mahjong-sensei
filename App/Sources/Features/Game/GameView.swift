@@ -148,8 +148,12 @@ struct GameView: View {
             Button("OK", role: .cancel) { session.errorMessage = nil }
         } message: { Text(session.errorMessage ?? "") }
         .onAppear {
+            app.isGameModeActive = true
             if forceInspector { session.isInspectorPresented = true }
             if let debugDestination { session.prepareDebugPresentation(destination: debugDestination) }
+        }
+        .onDisappear {
+            app.isGameModeActive = false
         }
         .onChange(of: reduceMotion) { _, value in session.instantBots = value || session.instantBots }
         .onChange(of: scenePhase) { _, phase in
@@ -159,7 +163,17 @@ struct GameView: View {
             default: break
             }
         }
-        .environment(\.tileTheme, (app.tileTheme ?? .ivory).theme)
+        .environment(\.tileTheme, gameTileTheme)
+    }
+
+    /// Table tiles use their material and shadow to define the edge. Removing
+    /// the theme's decorative outline avoids a gold box around every physical
+    /// tile while leaving Scan/Learn theme previews unchanged.
+    private var gameTileTheme: TileTheme {
+        var theme = (app.tileTheme ?? .ivory).theme
+        theme.border = .clear
+        theme.goldInnerRing = false
+        return theme
     }
 
     private func inspect(_ tile: Tile, _ origin: GameTileInsightOrigin) {
@@ -188,7 +202,7 @@ struct GameView: View {
 
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 Circle()
-                    .fill(session.isHumanTurn && session.state.lastDrawInstance != nil ? GameCueColor.wallDraw : MJColor.gold)
+                    .fill(session.isHumanTurn && session.state.lastDrawInstance != nil ? MJColor.creamHeading : MJColor.gold)
                     .frame(width: 7, height: 7)
                 Text(session.tableStatusText)
                     .font(.footnote.weight(.semibold))
@@ -408,6 +422,7 @@ private struct MahjongLearningTable: View {
     @ViewBuilder
     private var tableFelt: some View {
         FeltTableSurface(cornerRadius: compact ? 22 : 30)
+            .drawingGroup(opaque: false, colorMode: .nonLinear)
             .overlay {
                 RoundedRectangle(cornerRadius: compact ? 22 : 30, style: .continuous)
                     .strokeBorder(MJColor.gold(0.42), lineWidth: 1.5)
@@ -1256,14 +1271,6 @@ private struct HumanRack: View {
         return MahjongTileView(tile.tile, width: width, showsBadge: width >= 28)
             .offset(y: selected ? -9 : 0)
             .padding(.leading, drawnGap)
-            .overlay {
-                RoundedRectangle(cornerRadius: 7)
-                    .strokeBorder(isDrawn ? GameCueColor.wallDraw : .clear, lineWidth: 2)
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 7)
-                    .strokeBorder(selected ? MJColor.gold : .clear, lineWidth: 2)
-            }
             .overlay(alignment: .top) {
                 if isDrawn {
                     Text(drawLabel)
@@ -1272,18 +1279,23 @@ private struct HumanRack: View {
                         .foregroundStyle(Color.white)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
-                        .background(GameCueColor.wallDraw.opacity(0.94), in: Capsule())
+                        .background(MJColor.deepJade.opacity(0.97), in: Capsule())
                         .overlay {
-                            if isReplacement {
-                                Capsule().strokeBorder(MJColor.gold, lineWidth: 1)
-                            }
+                            Capsule().strokeBorder(
+                                isReplacement ? MJColor.gold(0.72) : MJColor.cream(0.24),
+                                lineWidth: 1
+                            )
                         }
                         .fixedSize()
                         .offset(x: compact && isReplacement ? -46 : (compact ? -18 : 0), y: compact ? -13 : -15)
                         .accessibilityHidden(true)
                 }
             }
-            .shadow(color: isDrawn ? GameCueColor.wallDraw.opacity(0.82) : .clear, radius: 7)
+            .shadow(
+                color: selected || isDrawn ? .black.opacity(0.34) : .clear,
+                radius: selected ? 6 : 4,
+                y: selected ? 5 : 3
+            )
             .scaleEffect(draggingTileID == tile.id || session.debugDraggingTileID == tile.id ? 1.12 : 1)
             .offset(draggingTileID == tile.id ? dragTranslation : (session.debugDraggingTileID == tile.id ? CGSize(width: 0, height: -18) : .zero))
             .zIndex(draggingTileID == tile.id || session.debugDraggingTileID == tile.id ? 2 : 0)
@@ -1844,10 +1856,6 @@ private extension View {
             }
         }
     }
-}
-
-private enum GameCueColor {
-    static let wallDraw = Color(red: 0.37, green: 0.69, blue: 1.0)
 }
 
 private struct HumanRiverFramePreference: PreferenceKey {

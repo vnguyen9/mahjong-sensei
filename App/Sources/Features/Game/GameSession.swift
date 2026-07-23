@@ -274,7 +274,7 @@ final class GameSession {
         guard coachHintsEnabled else { return nil }
         if isReaction { return "A claim uses this public discard; Pass lets play continue from the wall." }
         if state.phase == .reaction { return "The gold ring keeps the newest discard visible while claims resolve." }
-        if isHumanTurn, state.lastDrawInstance != nil { return "Blue marks the private tile you just drew from the wall." }
+        if isHumanTurn, state.lastDrawInstance != nil { return "The separated tile and label mark your private draw from the wall." }
         if isHumanTurn, latestClaimEvent(for: humanSeat) != nil { return "After Chow or Pung, discard immediately without drawing." }
         return "Gold marks the active player and the newest public action."
     }
@@ -772,7 +772,7 @@ final class GameSession {
             }
 
             guard !Task.isCancelled, self.botTaskGeneration == generation else { return }
-            if !self.instantBots { try? await Task.sleep(for: .milliseconds(420)) }
+            if !self.instantBots { try? await Task.sleep(for: .milliseconds(160)) }
             guard !Task.isCancelled, self.botTaskGeneration == generation, !self.isPaused,
                   self.match.currentActor == actor,
                   self.state.turn == expectedTurn,
